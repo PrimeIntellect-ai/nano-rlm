@@ -23,13 +23,8 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
     InternalServerError,
     NotFoundError,
     RateLimitError,
-    # Malformed/corrupted responses from a flaky tunnel/proxy: the body parses as JSON
-    # but fails schema validation (e.g. finish_reason='error'), or the SDK's own response
-    # validation trips. Retrying the call rides out the intermittent corruption instead of
-    # crashing the whole rollout. See PrimeIntellect-ai/rlm tunnel-corruption investigation.
     APIResponseValidationError,
     ValidationError,
-    # Raw connection resets on the tunnel that don't surface as APIConnectionError.
     ConnectionResetError,
 )
 
