@@ -6,12 +6,14 @@ from typing import Any, Awaitable, Callable
 
 from openai import (
     APIConnectionError,
+    APIResponseValidationError,
     APITimeoutError,
     AsyncOpenAI,
     InternalServerError,
     NotFoundError,
     RateLimitError,
 )
+from pydantic import ValidationError
 
 from rlm.types import TokenUsage
 
@@ -21,6 +23,9 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
     InternalServerError,
     NotFoundError,
     RateLimitError,
+    APIResponseValidationError,
+    ValidationError,
+    ConnectionResetError,
 )
 
 # Widely-spaced delays (seconds) between attempts; total ~5 min wall budget.
