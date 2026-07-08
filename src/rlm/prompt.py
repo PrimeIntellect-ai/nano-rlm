@@ -76,7 +76,14 @@ SEARCH_SKILL_PROMPT = (
     "For web search, use the pre-imported async `search` skill from IPython: "
     '`await search(query="...")`. Results come back as title, URL, and snippet; '
     "assign the result to a variable so you can revisit it. To cover "
-    "several angles at once, fan out with `asyncio.gather(search(...), search(...))`."
+    "several angles at once, pass a list of queries — they are batched into "
+    'one API call: `await search(query=["...", "..."])`.'
+)
+OPEN_WEBPAGE_SKILL_PROMPT = (
+    "To read a page in full, use the pre-imported async `open_webpage` skill "
+    'from IPython: `await open_webpage(url="...")`. It returns the page text '
+    "(HTML and PDF are parsed); assign the result to a variable so you can "
+    "slice and search it instead of re-fetching."
 )
 
 
@@ -127,6 +134,8 @@ def build_system_prompt(
             skill_lines.append(EDIT_SKILL_PROMPT)
         if "search" in installed_skills:
             skill_lines.append(SEARCH_SKILL_PROMPT)
+        if "open_webpage" in installed_skills:
+            skill_lines.append(OPEN_WEBPAGE_SKILL_PROMPT)
     if skill_lines:
         parts.extend(["", *skill_lines])
 

@@ -24,6 +24,7 @@ dependencies = [
     "scipy",
     "beautifulsoup4",
     "lxml",
+    "pdfminer.six",
     "pydantic",
 ]
 

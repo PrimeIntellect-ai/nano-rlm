@@ -1,4 +1,4 @@
-"""Tests for built-in skills (``rlm.skills``): the ``edit``/``search`` skills + enable mechanism."""
+"""Tests for built-in skills (``rlm.skills``): the ``edit``/``search``/``open_webpage`` skills + enable mechanism."""
 
 from __future__ import annotations
 
@@ -48,10 +48,54 @@ def test_search_enable_writes_stub(tmp_path):
     assert (tmp_path / "search.py").read_text() == "from rlm.skills.search import run\n"
 
 
+def test_open_webpage_enable_writes_stub(tmp_path):
+    assert "open_webpage" in available_builtin_skills()
+    assert enable_builtin_skills(["open_webpage"], tmp_path) == ["open_webpage"]
+    assert (
+        tmp_path / "open_webpage.py"
+    ).read_text() == "from rlm.skills.open_webpage import run\n"
+
+
 async def test_search_missing_api_key_returns_error(monkeypatch):
     monkeypatch.delenv("SERPER_API_KEY", raising=False)
     result = await run_search(query="anything")
     assert "SERPER_API_KEY" in result
+
+
+async def test_search_batches_queries_into_one_call(monkeypatch):
+    import rlm.skills.search as search_skill
+
+    captured = {}
+    organic = [{"title": "t", "link": "https://x", "snippet": "s"}]
+
+    class FakeResponse:
+        def __init__(self, data):
+            self._data = data
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._data
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        if isinstance(json, list):
+            return FakeResponse([{"organic": organic} for _ in json])
+        return FakeResponse({"organic": organic})
+
+    monkeypatch.setenv("SERPER_API_KEY", "test-key")
+    monkeypatch.setattr(search_skill.httpx, "post", fake_post)
+
+    single = await run_search(query="one", num_results=3)
+    assert captured["json"] == {"q": "one", "num": 3}
+    assert single.startswith("Result 1: t")
+
+    batched = await run_search(query=["one", "two"])
+    assert captured["json"] == [{"q": "one", "num": 10}, {"q": "two", "num": 10}]
+    assert 'Results for query "one":' in batched
+    assert 'Results for query "two":' in batched
+    assert "\n\n==========\n\n" in batched
 
 
 def test_search_format_results():

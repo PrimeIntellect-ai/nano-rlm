@@ -1,8 +1,9 @@
 """Built-in ``search`` skill — web search via Serper.
 
 Enabled via ``RLM_SKILLS``; pre-imported into the IPython kernel so the agent calls
-``await search(query="...")``. Needs ``SERPER_API_KEY``. Ported from the Serper ``websearch``
-skill in research-environments/rlm_browsecomp.
+``await search(query="...")``, or ``await search(query=["...", "..."])`` to batch
+several queries into one API call. Needs ``SERPER_API_KEY``. Ported from the Serper
+``websearch`` skill in research-environments/rlm_browsecomp.
 """
 
 from __future__ import annotations
@@ -32,30 +33,44 @@ def format_results(results, query: str) -> str:
     return "\n\n---\n\n".join(sections)
 
 
-def search(query: str, num_results: int = 5) -> str:
-    """Run a synchronous Serper web search and return formatted results."""
+def search(queries: list[str], num_results: int = 10) -> str:
+    """Run one Serper API call for one or more queries and return formatted results."""
     api_key = os.environ.get("SERPER_API_KEY", "")
     if not api_key:
         return "Error: SERPER_API_KEY environment variable is not set"
+    payload = [{"q": query, "num": num_results} for query in queries]
     response = httpx.post(
         SERPER_URL,
-        json={"q": query},
+        json=payload[0] if len(payload) == 1 else payload,
         headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
         timeout=45,
     )
     response.raise_for_status()
-    organic = response.json().get("organic") or []
-    return format_results(organic[:num_results], query)
+    data = response.json()
+    responses = data if isinstance(data, list) else [data]
+    sections = [
+        format_results((r.get("organic") or [])[:num_results], query)
+        for query, r in zip(queries, responses, strict=True)
+    ]
+    if len(sections) == 1:
+        return sections[0]
+    return "\n\n==========\n\n".join(
+        f'Results for query "{query}":\n\n{section}'
+        for query, section in zip(queries, sections)
+    )
 
 
-async def run(query: str, *, num_results: int = 5) -> str:
-    """Run a web search via Serper and return formatted results.
+async def run(query: str | list[str], *, num_results: int = 10) -> str:
+    """Run web search(es) via Serper and return formatted results.
 
     Args:
-        query: Web search query.
-        num_results: Number of results to return.
+        query: A search query, or a list of queries batched into one API call.
+        num_results: Number of results to return per query.
 
     Returns:
-        Formatted results (title, URL, snippet).
+        Formatted results (title, URL, snippet); one section per query when batched.
     """
-    return await asyncio.to_thread(search, query, num_results)
+    queries = [query] if isinstance(query, str) else list(query)
+    if not queries:
+        return "Error: query must be a non-empty string or list of strings"
+    return await asyncio.to_thread(search, queries, num_results)
