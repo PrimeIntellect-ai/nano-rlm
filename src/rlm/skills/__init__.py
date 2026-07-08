@@ -1,7 +1,8 @@
 """Built-in skills shipped with rlm, enabled per run via ``RLM_SKILLS``.
 
 Each built-in skill is a module here exposing an async ``run(...)`` (the same contract as an
-uploaded skill). When enabled, a thin re-export module is written into the session directory
+uploaded skill), plus any extra public async functions listed in its ``__all__`` (e.g.
+``search.open``). When enabled, a thin re-export module is written into the session directory
 (on the kernel's ``sys.path``) so the kernel pre-imports it by name — the same path MCP-tool
 skills take (see ``rlm.mcp``). The agent then calls it from IPython, e.g. ``await edit(...)``.
 """
@@ -10,10 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Built-in skill name -> module its ``run`` is re-exported from.
+# Built-in skill name -> module whose ``__all__`` is re-exported.
 _BUILTIN_SKILLS: dict[str, str] = {
     "edit": "rlm.skills.edit",
-    "open_webpage": "rlm.skills.open_webpage",
     "search": "rlm.skills.search",
 }
 
@@ -36,7 +36,5 @@ def enable_builtin_skills(names: list[str], dest_dir: Path) -> list[str]:
         )
     dest_dir.mkdir(parents=True, exist_ok=True)
     for name in names:
-        (dest_dir / f"{name}.py").write_text(
-            f"from {_BUILTIN_SKILLS[name]} import run\n"
-        )
+        (dest_dir / f"{name}.py").write_text(f"from {_BUILTIN_SKILLS[name]} import *\n")
     return names
