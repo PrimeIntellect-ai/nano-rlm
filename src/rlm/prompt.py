@@ -76,7 +76,10 @@ SEARCH_SKILL_PROMPT = (
     "For web search, use the pre-imported async `search` skill from IPython: "
     '`await search(query="...")`. Results come back as title, URL, and snippet; '
     "assign the result to a variable so you can revisit it. To cover "
-    "several angles at once, fan out with `asyncio.gather(search(...), search(...))`."
+    "several angles at once, fan out with `asyncio.gather(search(...), search(...))`. "
+    'To read a promising result in full, use `await search.open(url="...")` — it '
+    "returns the page text (HTML and PDF are parsed); assign it to a variable so "
+    "you can slice and search it instead of re-fetching."
 )
 
 

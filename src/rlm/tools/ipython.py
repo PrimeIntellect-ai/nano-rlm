@@ -203,12 +203,16 @@ def _wrap_callable(mod, log_source):
     wrapped = _CallableModule(mod.__name__)
     wrapped.__dict__.update(mod.__dict__)
     if log_source is not None:
-        _original_run = wrapped.run
-        @functools.wraps(_original_run)
-        async def _logged_run(*args, **kwargs):
-            _log_programmatic_call(mod.__name__, log_source)
-            return await _original_run(*args, **kwargs)
-        wrapped.run = _logged_run
+        def _logged(fn):
+            @functools.wraps(fn)
+            async def _call(*args, **kwargs):
+                _log_programmatic_call(mod.__name__, log_source)
+                return await fn(*args, **kwargs)
+            return _call
+        # Log every public async function the skill exposes (`run`, `search.open`, ...).
+        for _attr, _fn in list(wrapped.__dict__.items()):
+            if not _attr.startswith('_') and inspect.iscoroutinefunction(_fn):
+                setattr(wrapped, _attr, _logged(_fn))
     # Mirror run's signature and docstring onto the module so
     # `inspect.signature(<skill>)` and `help(<skill>)` expose the real API
     # surface instead of `_CallableModule.__call__`'s `(*args, **kwargs)`

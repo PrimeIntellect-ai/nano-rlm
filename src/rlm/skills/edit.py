@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+__all__ = ["run"]
+
 
 async def run(path: str, old_str: str, new_str: str) -> str:
     """Replace a unique string in a file.
