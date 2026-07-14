@@ -167,6 +167,7 @@ if {bool(session_dir)!r}:
     sys.path.append({session_dir!r})
 os.environ['RLM_SESSION_DIR'] = {session_dir!r} or ''
 os.environ['RLM_DEPTH'] = str({depth!r} + 1)
+os.environ['NO_COLOR'] = '1'
 
 import nest_asyncio
 nest_asyncio.apply()
