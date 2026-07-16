@@ -11,7 +11,7 @@ dependencies = [
     "jupyter_client",
     "nest_asyncio",
     "tyro",
-    "mcp>=1.0",
+    "mcp>=1.28.1",
     # Base toolkit pre-installed into the rlm tool venv so the agent's
     # ipython kernel can import them without pip-installing mid-rollout.
     "requests",
