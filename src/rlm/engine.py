@@ -183,8 +183,8 @@ class RLMEngine:
         self.max_depth = int(os.environ.get("RLM_MAX_DEPTH", "0"))
         self.depth = int(os.environ.get("RLM_DEPTH", "0"))
 
-        # Task MCP tool servers ({name: url}) to expose as IPython skills; kwarg wins,
-        # otherwise parse RLM_MCP_CONFIG (a standard mcpServers URL map).
+        # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
+        # parse RLM_MCP_CONFIG (a standard mcpServers config).
         self.mcp_servers = (
             mcp_servers if mcp_servers is not None else load_mcp_servers()
         )
@@ -262,11 +262,20 @@ class RLMEngine:
 
         if not self._started:
             await self._start(prompt)
+            messages_before = self._messages[:1]
         else:
+            messages_before = list(self._messages)
             self._messages.append({"role": "user", "content": prompt})
+        branch_start_before = self._branch_start_turn
 
         self._metrics.stop_reason = ""
-        result = await self._run_loop()
+        try:
+            result = await self._run_loop()
+        except asyncio.CancelledError:
+            self._messages[:] = messages_before
+            self._branch_start_turn = branch_start_before
+            self._metrics.stop_reason = "cancelled"
+            raise
         self._last_answer = result.answer
         self._has_result = True
         return result
@@ -291,7 +300,9 @@ class RLMEngine:
         # (PTC). ipython is the sole builtin tool, so the kernel always starts.
         enable_builtin_skills(self.skills, self.session.dir)
         if self.mcp_servers:
-            mcp_skills = await generate_mcp_skills(self.mcp_servers, self.session.dir)
+            mcp_skills = await generate_mcp_skills(
+                self.mcp_servers, self.session.dir, self.cwd
+            )
             logger.info(
                 "rlm: exposed %d MCP tool(s) as skills - %s",
                 len(mcp_skills),
@@ -423,9 +434,14 @@ class RLMEngine:
             if tool is None:
                 tool_result = ToolOutcome(content=f"Error: unknown tool '{tool_name}'")
             else:
-                tool_result = await asyncio.to_thread(
-                    tool.execute, tool_args, self._tool_context(messages)
-                )
+                try:
+                    tool_result = await asyncio.to_thread(
+                        tool.execute, tool_args, self._tool_context(messages)
+                    )
+                except asyncio.CancelledError:
+                    if self._repl is not None:
+                        self._repl.interrupt()
+                    raise
             duration = time.time() - t0
             for event in tool_result.metric_events:
                 self._metrics.record(event)

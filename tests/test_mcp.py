@@ -1,8 +1,8 @@
 """Tests for MCP-tools-as-skills (``rlm.mcp``).
 
-Covers the pure logic: config parsing, JSON-schema → signature rendering, and generation
-of importable skill modules. The live MCP round-trip (kernel pre-import + streamable-HTTP
-call) is exercised end-to-end by the general-agent-v1 eval, not here.
+Covers config parsing, JSON-schema → signature rendering, generation of importable skill
+modules, and a live stdio transport round-trip. The streamable-HTTP path is exercised
+end-to-end by the general-agent-v1 eval.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import importlib
 import inspect
 import json
 import sys
+from pathlib import Path
 
 from mcp.types import Tool
 
@@ -33,7 +34,7 @@ def test_load_mcp_servers(monkeypatch):
 
     monkeypatch.setenv(
         mcp.MCP_CONFIG_ENV,
-        '{"mcpServers": {"tools": {"url": "http://h/mcp"}, "web": {"url": "http://h/web", "headers": {"Authorization": "secret"}}}}',
+        '{"mcpServers": {"tools": {"url": "http://h/mcp"}, "web": {"url": "http://h/web", "headers": {"Authorization": "secret"}}, "local": {"command": "/bin/server", "args": ["--stdio"], "env": {"TOKEN": "secret"}}}}',
     )
     servers = mcp.load_mcp_servers()
     assert servers == {
@@ -41,6 +42,11 @@ def test_load_mcp_servers(monkeypatch):
         "web": {
             "url": "http://h/web",
             "headers": {"Authorization": "secret"},
+        },
+        "local": {
+            "command": "/bin/server",
+            "args": ["--stdio"],
+            "env": {"TOKEN": "secret"},
         },
     }
     assert json.loads(mcp.dump_mcp_servers(servers)) == {
@@ -50,8 +56,25 @@ def test_load_mcp_servers(monkeypatch):
                 "url": "http://h/web",
                 "headers": {"Authorization": "secret"},
             },
+            "local": {
+                "command": "/bin/server",
+                "args": ["--stdio"],
+                "env": {"TOKEN": "secret"},
+            },
         }
     }
+
+
+async def test_stdio_transport():
+    server = {
+        "command": sys.executable,
+        "args": [str(Path(__file__).parent / "fixtures" / "mcp_stdio.py")],
+        "env": {"TEST_PREFIX": "stdio"},
+    }
+    found = await mcp.discover_tools({"local": server})
+
+    assert list(found) == ["local_echo"]
+    assert await mcp.call_tool(server, "echo", {"text": "hello"}) == "stdio:hello"
 
 
 def test_skill_name():

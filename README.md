@@ -49,11 +49,12 @@ RLM_MODEL=openai/gpt-5-mini rlm --acp
 
 Each ACP session owns one persistent RLM engine. Repeated `session/prompt`
 requests retain both the model conversation and the live IPython kernel. The
-agent accepts text prompts and streamable HTTP MCP servers, including request
-headers, and supports `session/close`. It intentionally does not advertise
-`session/load`: an arbitrary live Python kernel cannot be reconstructed after
-the ACP process exits, so clients must keep the process alive for the lifetime
-of a session.
+agent accepts text prompts and stdio or streamable HTTP MCP servers, including
+HTTP request headers. It supports cancellation and `session/close`; cancelling
+a turn leaves its session available for the next prompt. It intentionally does
+not advertise `session/load`: an arbitrary live Python kernel cannot be
+reconstructed after the ACP process exits, so clients must keep the process
+alive for the lifetime of a session.
 
 ## Python SDK
 
@@ -77,7 +78,7 @@ All configuration is via environment variables:
 | `PRIME_API_KEY` | — | PI Inference pair: targets `https://api.pinference.ai/api/v1` and forwards `PRIME_TEAM_ID` as `X-Prime-Team-ID` when set. |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` | resolved by SDK | OpenAI pair — when `OPENAI_API_KEY` is set, AsyncOpenAI's native env handling is used (covers OpenAI direct and verifiers' rollout tunnel both). Provider precedence: explicit → PI → OpenAI. Keys are scoped to their own base URL so an `OPENAI_API_KEY` lying around can't leak to PI Inference. |
 | `RLM_SKILLS` | — | Comma-separated built-in skills to enable (`edit`, `search`); pre-imported into the kernel. Unknown names raise. See [Skills](#skills). |
-| `RLM_MCP_CONFIG` | — | Standard `mcpServers` URL map; each server's tools become pre-imported IPython skills (`<server>_<tool>`). See [MCP tools as skills](#mcp-tools-as-skills). |
+| `RLM_MCP_CONFIG` | — | Standard `mcpServers` config (streamable HTTP or stdio); each server's tools become pre-imported IPython skills (`<server>_<tool>`). See [MCP tools as skills](#mcp-tools-as-skills). |
 | `RLM_MAX_DEPTH` | `0` | Max recursion depth (`0` means no sub-agents) |
 | `RLM_EXEC_TIMEOUT` | `300` | Seconds per IPython execution |
 | `RLM_MAX_OUTPUT` | `-1` | Max chars returned from a tool call (`-1` disables truncation; `0` is invalid) |
@@ -197,13 +198,22 @@ For running `rlm` against a specific skill set outside of a sandbox-orchestrated
 
 ### MCP tools as skills
 
-A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) tool servers to `rlm` by setting `RLM_MCP_CONFIG` to a standard `mcpServers` URL map:
+A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) tool servers to `rlm` by setting `RLM_MCP_CONFIG` to a standard `mcpServers` config. Streamable HTTP and stdio transports are supported:
 
 ```json
-{"mcpServers": {"tools": {"url": "http://127.0.0.1:8000/mcp"}}}
+{
+  "mcpServers": {
+    "remote": {"url": "http://127.0.0.1:8000/mcp"},
+    "local": {
+      "command": "/path/to/tool-server",
+      "args": ["--stdio"],
+      "env": {"API_KEY": "..."}
+    }
+  }
+}
 ```
 
-Programmatically, pass `mcp_servers={"tools": "http://127.0.0.1:8000/mcp"}` to `RLMEngine` / `rlm.run` instead (it takes precedence over `RLM_MCP_CONFIG`). A server may instead be `{"url": "...", "headers": {"Authorization": "..."}}` when it needs HTTP headers.
+Programmatically, pass `mcp_servers={"tools": "http://127.0.0.1:8000/mcp"}` to `RLMEngine` / `rlm.run` instead (it takes precedence over `RLM_MCP_CONFIG`). An HTTP server may instead be `{"url": "...", "headers": {"Authorization": "..."}}` when it needs request headers; stdio servers use the same `command` / `args` / `env` shape shown above.
 
 At startup `rlm` connects to each server, lists its tools, and generates one skill per tool (named `<server>_<tool>`, e.g. `tools_add_event`). These join the installed skills — pre-imported into the IPython namespace as async functions the agent calls programmatically, with a signature built from the tool's input schema:
 
@@ -212,7 +222,7 @@ help(tools_add_event)  # signature (typed from the schema) + the tool's descript
 await tools_add_event(day="monday", title="standup")
 ```
 
-Each call connects to the server over streamable HTTP, invokes the tool, and returns its text content (a tool-reported error is raised as `RuntimeError`). The generated modules are written into the session directory and the kernel imports them from there. Unlike installed skills, MCP skills are IPython-only — they're not exposed as shell commands.
+Each call connects using the configured transport, invokes the tool, and returns its text content (a tool-reported error is raised as `RuntimeError`). The generated modules are written into the session directory and the kernel imports them from there. Unlike installed skills, MCP skills are IPython-only — they're not exposed as shell commands.
 
 ## Kernel
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -9,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
-from acp.schema import HttpHeader, HttpMcpServer
+from acp.schema import EnvVariable, HttpHeader, HttpMcpServer, McpServerStdio
+import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall
 from rlm.acp import RLMACPAgent
@@ -39,12 +41,16 @@ class _Engine:
         self.session = session
         self.mcp_servers = mcp_servers
         self.prompts: list[str] = []
+        self.prompt_started = asyncio.Event()
         self.closed = False
         self.stop_reason = "done"
         self.instances.append(self)
 
     async def prompt(self, prompt: str) -> RLMResult:
         self.prompts.append(prompt)
+        self.prompt_started.set()
+        if prompt == "wait":
+            await asyncio.Future()
         return RLMResult(
             answer=f"reply:{prompt}",
             usage=TokenUsage(prompt_tokens=3, completion_tokens=2),
@@ -106,6 +112,39 @@ async def test_engine_prompt_preserves_ipython_kernel(session):
     assert tool_messages[-1]["content"].strip() == "42"
 
 
+async def test_engine_cancelled_prompt_can_be_retried(session):
+    client = DummyClient([DummyMessage(content="continued")])
+    create = client.create
+    prompt_started = asyncio.Event()
+
+    async def block_first_prompt(**kwargs):
+        if not prompt_started.is_set():
+            client.calls.append(kwargs)
+            prompt_started.set()
+            await asyncio.Future()
+        return await create(**kwargs)
+
+    client.create = block_first_prompt
+    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+
+    pending = asyncio.create_task(engine.prompt("cancel me"))
+    await prompt_started.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    try:
+        result = await engine.prompt("continue")
+    finally:
+        engine.close()
+
+    assert result.answer == "continued"
+    assert client.calls[-1]["messages"][-2:] == [
+        {"role": "user", "content": "continue"},
+        {"role": "assistant", "content": "continued"},
+    ]
+
+
 async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     _Engine.instances.clear()
     monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
@@ -126,7 +165,13 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
                 name="tools",
                 url="http://127.0.0.1:8000/mcp",
                 headers=[HttpHeader(name="Authorization", value="Bearer task")],
-            )
+            ),
+            McpServerStdio(
+                name="local",
+                command="/usr/bin/tool-server",
+                args=["--stdio"],
+                env=[EnvVariable(name="TOKEN", value="task-secret")],
+            ),
         ],
     )
     first = await agent.prompt(created.session_id, [text_block("one")])
@@ -138,7 +183,12 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
         "tools": {
             "url": "http://127.0.0.1:8000/mcp",
             "headers": {"Authorization": "Bearer task"},
-        }
+        },
+        "local": {
+            "command": "/usr/bin/tool-server",
+            "args": ["--stdio"],
+            "env": {"TOKEN": "task-secret"},
+        },
     }
     assert [update.content.text for _, update in client.updates] == [
         "reply:one",
@@ -149,6 +199,30 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
 
     await agent.close_session(created.session_id)
     assert engine.closed is True
+
+
+async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    created = await agent.new_session(str(tmp_path))
+    engine = _Engine.instances[0]
+
+    pending = asyncio.create_task(
+        agent.prompt(created.session_id, [text_block("wait")])
+    )
+    await engine.prompt_started.wait()
+    await agent.cancel(created.session_id)
+
+    assert (await pending).stop_reason == "cancelled"
+    assert engine.closed is False
+    resumed = await agent.prompt(created.session_id, [text_block("after")])
+    assert resumed.stop_reason == "end_turn"
+    assert engine.prompts == ["wait", "after"]
+
+    await agent.close_session(created.session_id)
 
 
 async def test_acp_stdio_lifecycle(tmp_path):

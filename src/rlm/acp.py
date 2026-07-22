@@ -58,14 +58,21 @@ def _mcp_servers(
 ) -> dict[str, MCPServer]:
     resolved: dict[str, MCPServer] = {}
     for server in servers or []:
-        if not isinstance(server, HttpMcpServer):
-            raise RequestError.invalid_params(
-                {"reason": "RLM supports streamable HTTP MCP servers only"}
+        if isinstance(server, HttpMcpServer):
+            headers = {header.name: header.value for header in server.headers}
+            resolved[server.name] = (
+                {"url": server.url, "headers": headers} if headers else server.url
             )
-        headers = {header.name: header.value for header in server.headers}
-        resolved[server.name] = (
-            {"url": server.url, "headers": headers} if headers else server.url
-        )
+        elif isinstance(server, McpServerStdio):
+            resolved[server.name] = {
+                "command": server.command,
+                "args": list(server.args),
+                "env": {item.name: item.value for item in server.env},
+            }
+        else:
+            raise RequestError.invalid_params(
+                {"reason": "RLM supports stdio and streamable HTTP MCP servers only"}
+            )
     return resolved
 
 
@@ -162,8 +169,6 @@ class RLMACPAgent(Agent):
             try:
                 result = await task
             except asyncio.CancelledError:
-                state.engine.close()
-                self._sessions.pop(session_id, None)
                 return PromptResponse(stop_reason="cancelled")
             except Exception:
                 state.engine.close()

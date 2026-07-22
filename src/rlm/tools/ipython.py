@@ -266,6 +266,11 @@ if {allow_recursion!r}:
         self._kc.wait_for_ready(timeout=30)
         self._inject_startup()
 
+    def interrupt(self):
+        """Interrupt a running cell, if any."""
+        if self._km:
+            self._km.interrupt_kernel()
+
     def _interrupt_and_recover(self):
         """Interrupt the running cell and restart the kernel if needed."""
         self._km.interrupt_kernel()
