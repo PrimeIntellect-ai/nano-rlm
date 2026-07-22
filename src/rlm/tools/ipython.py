@@ -125,9 +125,15 @@ class IpythonTool:
 class IPythonREPL:
     """Persistent IPython kernel communicating via Jupyter protocol."""
 
-    def __init__(self, cwd: str, session: "Session | None" = None):
+    def __init__(
+        self,
+        cwd: str,
+        session: "Session | None" = None,
+        env: dict[str, str] | None = None,
+    ):
         self.cwd = cwd
         self.session = session
+        self.env = env or {}
         self._km = None
         self._kc = None
         self._lock = threading.Lock()
@@ -144,7 +150,7 @@ class IPythonREPL:
             "-f",
             "{connection_file}",
         ]
-        self._km.start_kernel(cwd=self.cwd)
+        self._km.start_kernel(cwd=self.cwd, env={**os.environ, **self.env})
         self._kc = self._km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)

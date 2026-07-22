@@ -38,6 +38,23 @@ RLM_SYSTEM_PROMPT_PATH=/tmp/system.txt rlm "solve the task"
 
 Skill CLIs provided by the host environment are on `$PATH` and invoked the same way (e.g. `websearch --queries "latest jupyter_client release"` when the `websearch` skill is installed).
 
+## Agent Client Protocol
+
+RLM can run as an [Agent Client Protocol](https://agentclientprotocol.com/)
+agent over stdio:
+
+```bash
+RLM_MODEL=openai/gpt-5-mini rlm --acp
+```
+
+Each ACP session owns one persistent RLM engine. Repeated `session/prompt`
+requests retain both the model conversation and the live IPython kernel. The
+agent accepts text prompts and streamable HTTP MCP servers, including request
+headers, and supports `session/close`. It intentionally does not advertise
+`session/load`: an arbitrary live Python kernel cannot be reconstructed after
+the ACP process exits, so clients must keep the process alive for the lifetime
+of a session.
+
 ## Python SDK
 
 ```python
@@ -186,7 +203,7 @@ A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) too
 {"mcpServers": {"tools": {"url": "http://127.0.0.1:8000/mcp"}}}
 ```
 
-Programmatically, pass `mcp_servers={"tools": "http://127.0.0.1:8000/mcp"}` to `RLMEngine` / `rlm.run` instead (it takes precedence over `RLM_MCP_CONFIG`).
+Programmatically, pass `mcp_servers={"tools": "http://127.0.0.1:8000/mcp"}` to `RLMEngine` / `rlm.run` instead (it takes precedence over `RLM_MCP_CONFIG`). A server may instead be `{"url": "...", "headers": {"Authorization": "..."}}` when it needs HTTP headers.
 
 At startup `rlm` connects to each server, lists its tools, and generates one skill per tool (named `<server>_<tool>`, e.g. `tools_add_event`). These join the installed skills — pre-imported into the IPython namespace as async functions the agent calls programmatically, with a signature built from the tool's input schema:
 

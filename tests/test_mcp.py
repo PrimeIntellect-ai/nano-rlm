@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 import sys
 
 from mcp.types import Tool
@@ -32,9 +33,25 @@ def test_load_mcp_servers(monkeypatch):
 
     monkeypatch.setenv(
         mcp.MCP_CONFIG_ENV,
-        '{"mcpServers": {"tools": {"url": "http://h/mcp"}, "web": {"url": "http://h/web"}}}',
+        '{"mcpServers": {"tools": {"url": "http://h/mcp"}, "web": {"url": "http://h/web", "headers": {"Authorization": "secret"}}}}',
     )
-    assert mcp.load_mcp_servers() == {"tools": "http://h/mcp", "web": "http://h/web"}
+    servers = mcp.load_mcp_servers()
+    assert servers == {
+        "tools": "http://h/mcp",
+        "web": {
+            "url": "http://h/web",
+            "headers": {"Authorization": "secret"},
+        },
+    }
+    assert json.loads(mcp.dump_mcp_servers(servers)) == {
+        "mcpServers": {
+            "tools": {"url": "http://h/mcp"},
+            "web": {
+                "url": "http://h/web",
+                "headers": {"Authorization": "secret"},
+            },
+        }
+    }
 
 
 def test_skill_name():
@@ -58,9 +75,7 @@ def test_write_skill_modules(tmp_path):
     tool = Tool(
         name="add_event", description="Add an event.\ndetails", inputSchema=SCHEMA
     )
-    names = mcp.write_skill_modules(
-        {"tools_add_event": ("http://h/mcp", tool)}, tmp_path
-    )
+    names = mcp.write_skill_modules({"tools_add_event": ("tools", tool)}, tmp_path)
     assert names == ["tools_add_event"]
     # the directory is the source of truth — the modules are readable back from it.
     assert mcp.list_skill_modules(tmp_path) == ["tools_add_event"]
