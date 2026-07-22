@@ -439,13 +439,28 @@ class RLMEngine:
             if tool is None:
                 tool_result = ToolOutcome(content=f"Error: unknown tool '{tool_name}'")
             else:
-                try:
-                    tool_result = await asyncio.to_thread(
+                tool_task = asyncio.create_task(
+                    asyncio.to_thread(
                         tool.execute, tool_args, self._tool_context(messages)
                     )
+                )
+                try:
+                    tool_result = await asyncio.shield(tool_task)
                 except asyncio.CancelledError:
-                    if self._repl is not None:
-                        self._repl.interrupt()
+                    repl = self._repl
+                    if repl is not None:
+                        repl.interrupt()
+                    try:
+                        while not tool_task.done():
+                            try:
+                                await asyncio.shield(tool_task)
+                            except asyncio.CancelledError:
+                                if repl is not None:
+                                    repl.interrupt()
+                        tool_task.result()
+                    finally:
+                        if repl is not None:
+                            repl.finish_interrupt()
                     raise
             duration = time.time() - t0
             for event in tool_result.metric_events:

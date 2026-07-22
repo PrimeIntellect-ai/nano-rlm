@@ -137,6 +137,7 @@ class IPythonREPL:
         self._km = None
         self._kc = None
         self._lock = threading.Lock()
+        self._interrupt_requested = threading.Event()
 
     def start(self):
         """Start the IPython kernel."""
@@ -267,9 +268,14 @@ if {allow_recursion!r}:
         self._inject_startup()
 
     def interrupt(self):
-        """Interrupt a running cell, if any."""
+        """Request interruption and recovery of a running cell."""
+        self._interrupt_requested.set()
         if self._km:
             self._km.interrupt_kernel()
+
+    def finish_interrupt(self):
+        """Clear an interrupt after the execution worker has settled."""
+        self._interrupt_requested.clear()
 
     def _interrupt_and_recover(self):
         """Interrupt the running cell and restart the kernel if needed."""
@@ -280,7 +286,12 @@ if {allow_recursion!r}:
     def execute(self, code: str, timeout: int | None = None) -> str:
         """Execute code and return combined output."""
         with self._lock:
-            return self._execute_locked(code, timeout)
+            try:
+                if self._interrupt_requested.is_set():
+                    return ""
+                return self._execute_locked(code, timeout)
+            finally:
+                self._interrupt_requested.clear()
 
     def _execute_locked(self, code: str, timeout: int | None) -> str:
         msg_id = self._kc.execute(code)
@@ -289,24 +300,24 @@ if {allow_recursion!r}:
         outputs: list[str] = []
         try:
             while True:
+                if self._interrupt_requested.is_set():
+                    self._interrupt_and_recover()
+                    break
                 if deadline is None:
-                    wait_timeout = None
+                    wait_timeout = 0.1
                 else:
-                    wait_timeout = deadline - time.monotonic()
-                    if wait_timeout <= 0:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         self._interrupt_and_recover()
                         outputs.append(
                             f"\n[execution timed out after {timeout}s and was interrupted]"
                         )
                         break
+                    wait_timeout = min(remaining, 0.1)
                 try:
                     msg = self._kc.get_iopub_msg(timeout=wait_timeout)
                 except Empty:
-                    self._interrupt_and_recover()
-                    outputs.append(
-                        f"\n[execution timed out after {timeout}s and was interrupted]"
-                    )
-                    break
+                    continue
 
                 if msg["parent_header"].get("msg_id") != msg_id:
                     continue
@@ -328,7 +339,8 @@ if {allow_recursion!r}:
                     break
         finally:
             try:
-                self._kc.get_shell_msg(timeout=5)
+                timeout = 0.1 if self._interrupt_requested.is_set() else 5
+                self._kc.get_shell_msg(timeout=timeout)
             except Exception:
                 pass
 

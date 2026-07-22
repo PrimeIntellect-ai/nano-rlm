@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from typing import Any
@@ -51,6 +50,7 @@ class _SessionState:
     engine: RLMEngine
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     prompt_task: asyncio.Task | None = None
+    closing: bool = False
 
 
 def _mcp_servers(
@@ -164,6 +164,8 @@ class RLMACPAgent(Agent):
             raise RequestError.resource_not_found(session_id)
 
         async with state.lock:
+            if state.closing:
+                raise RequestError.resource_not_found(session_id)
             task = asyncio.create_task(state.engine.prompt(_prompt_text(prompt)))
             state.prompt_task = task
             try:
@@ -171,27 +173,30 @@ class RLMACPAgent(Agent):
             except asyncio.CancelledError:
                 return PromptResponse(stop_reason="cancelled")
             except Exception:
+                state.closing = True
                 state.engine.close()
                 self._sessions.pop(session_id, None)
                 raise
             finally:
                 state.prompt_task = None
 
-        await self._client.session_update(
-            session_id=session_id,
-            update=update_agent_message(text_block(result.answer)),
-        )
-        stop_reason = (
-            "max_tokens" if state.engine.stop_reason == "token_budget" else "end_turn"
-        )
-        return PromptResponse(
-            stop_reason=stop_reason,
-            usage=Usage(
-                total_tokens=result.usage.total,
-                input_tokens=result.usage.prompt_tokens,
-                output_tokens=result.usage.completion_tokens,
-            ),
-        )
+            await self._client.session_update(
+                session_id=session_id,
+                update=update_agent_message(text_block(result.answer)),
+            )
+            stop_reason = (
+                "max_tokens"
+                if state.engine.stop_reason == "token_budget"
+                else "end_turn"
+            )
+            return PromptResponse(
+                stop_reason=stop_reason,
+                usage=Usage(
+                    total_tokens=result.usage.total,
+                    input_tokens=result.usage.prompt_tokens,
+                    output_tokens=result.usage.completion_tokens,
+                ),
+            )
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         state = self._sessions.get(session_id)
@@ -204,11 +209,11 @@ class RLMACPAgent(Agent):
         state = self._sessions.pop(session_id, None)
         if state is None:
             raise RequestError.resource_not_found(session_id)
+        state.closing = True
         if state.prompt_task is not None:
             state.prompt_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await state.prompt_task
-        state.engine.close()
+        async with state.lock:
+            state.engine.close()
         return CloseSessionResponse()
 
     async def shutdown(self) -> None:

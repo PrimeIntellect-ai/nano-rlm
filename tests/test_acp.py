@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
+from acp import PROTOCOL_VERSION, RequestError, spawn_agent_process, text_block
 from acp.schema import EnvVariable, HttpHeader, HttpMcpServer, McpServerStdio
 import pytest
 
@@ -145,6 +145,55 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
     ]
 
 
+async def test_engine_cancelled_tool_recovers_kernel(session, tmp_path):
+    started = tmp_path / "tool-started"
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": (
+                                "from pathlib import Path; import time; "
+                                f"kept = 41; Path({str(started)!r}).touch(); "
+                                "time.sleep(30)"
+                            )
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(
+                tool_calls=[DummyToolCall("ipython", {"code": "print(kept + 1)"})]
+            ),
+            DummyMessage(content="continued"),
+        ]
+    )
+    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+
+    pending = asyncio.create_task(engine.prompt("cancel the tool"))
+    for _ in range(100):
+        if started.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert started.exists()
+
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(pending, timeout=10)
+
+    try:
+        result = await engine.prompt("continue")
+    finally:
+        engine.close()
+
+    tool_messages = [
+        message for message in client.calls[-1]["messages"] if message["role"] == "tool"
+    ]
+    assert result.answer == "continued"
+    assert tool_messages[-1]["content"].strip() == "42"
+
+
 async def test_engine_failed_start_cleans_kernel_before_retry(
     monkeypatch, session, tmp_path
 ):
@@ -264,6 +313,33 @@ async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
     assert engine.prompts == ["wait", "after"]
 
     await agent.close_session(created.session_id)
+
+
+async def test_acp_close_rejects_queued_prompt(monkeypatch, tmp_path):
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    created = await agent.new_session(str(tmp_path))
+    engine = _Engine.instances[0]
+
+    running = asyncio.create_task(
+        agent.prompt(created.session_id, [text_block("wait")])
+    )
+    await engine.prompt_started.wait()
+    queued = asyncio.create_task(
+        agent.prompt(created.session_id, [text_block("after")])
+    )
+    await asyncio.sleep(0)
+
+    await agent.close_session(created.session_id)
+
+    assert (await running).stop_reason == "cancelled"
+    with pytest.raises(RequestError):
+        await queued
+    assert engine.prompts == ["wait"]
+    assert engine.closed is True
 
 
 async def test_acp_stdio_lifecycle(tmp_path):
