@@ -172,11 +172,6 @@ class RLMACPAgent(Agent):
                 result = await task
             except asyncio.CancelledError:
                 return PromptResponse(stop_reason="cancelled")
-            except Exception:
-                state.closing = True
-                state.engine.close()
-                self._sessions.pop(session_id, None)
-                raise
             finally:
                 state.prompt_task = None
 

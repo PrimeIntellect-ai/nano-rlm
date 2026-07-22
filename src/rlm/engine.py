@@ -271,10 +271,11 @@ class RLMEngine:
         self._metrics.stop_reason = ""
         try:
             result = await self._run_loop()
-        except asyncio.CancelledError:
+        except BaseException as exc:
             self._messages[:] = messages_before
             self._branch_start_turn = branch_start_before
-            self._metrics.stop_reason = "cancelled"
+            if isinstance(exc, asyncio.CancelledError):
+                self._metrics.stop_reason = "cancelled"
             raise
         self._last_answer = result.answer
         self._has_result = True
@@ -451,13 +452,19 @@ class RLMEngine:
                     if repl is not None:
                         repl.interrupt()
                     try:
-                        while not tool_task.done():
+                        while True:
                             try:
                                 await asyncio.shield(tool_task)
                             except asyncio.CancelledError:
                                 if repl is not None:
                                     repl.interrupt()
-                        tool_task.result()
+                                continue
+                            except Exception:
+                                logger.warning(
+                                    "rlm: tool failed while cancellation was settling",
+                                    exc_info=True,
+                                )
+                            break
                     finally:
                         if repl is not None:
                             repl.finish_interrupt()

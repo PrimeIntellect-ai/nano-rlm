@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,8 @@ class _Engine:
         self.prompt_started.set()
         if prompt == "wait":
             await asyncio.Future()
+        if prompt == "fail":
+            raise RuntimeError("transient failure")
         return RLMResult(
             answer=f"reply:{prompt}",
             usage=TokenUsage(prompt_tokens=3, completion_tokens=2),
@@ -139,6 +142,92 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
         engine.close()
 
     assert result.answer == "continued"
+    assert client.calls[-1]["messages"][-2:] == [
+        {"role": "user", "content": "continue"},
+        {"role": "assistant", "content": "continued"},
+    ]
+
+
+async def test_engine_failed_prompt_can_be_retried(session):
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("boom", {})]),
+            DummyMessage(content="continued"),
+        ]
+    )
+    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await engine.prompt("fail")
+
+    try:
+        result = await engine.prompt("continue")
+    finally:
+        engine.close()
+
+    assert result.answer == "continued"
+    assert client.calls[-1]["messages"][-2:] == [
+        {"role": "user", "content": "continue"},
+        {"role": "assistant", "content": "continued"},
+    ]
+
+
+async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
+    started = threading.Event()
+    interrupted = threading.Event()
+
+    class FailingTool:
+        def execute(self, args, context):
+            started.set()
+            assert interrupted.wait(timeout=5)
+            raise RuntimeError("interrupted tool failed")
+
+    class FakeREPL:
+        def __init__(self):
+            self.finished = False
+            self.stopped = False
+
+        def interrupt(self):
+            interrupted.set()
+
+        def finish_interrupt(self):
+            self.finished = True
+
+        def shutdown(self):
+            self.stopped = True
+
+    monkeypatch.setattr("rlm.engine.get_builtin_tool", lambda name: FailingTool())
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("failing", {})]),
+            DummyMessage(content="continued"),
+        ]
+    )
+    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    repl = FakeREPL()
+    engine._started = True
+    engine._messages = [{"role": "system", "content": "system"}]
+    engine._repl = repl  # type: ignore[assignment]
+
+    pending = asyncio.create_task(engine.prompt("cancel"))
+    for _ in range(100):
+        if started.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert started.is_set()
+
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    try:
+        result = await engine.prompt("continue")
+    finally:
+        engine.close()
+
+    assert result.answer == "continued"
+    assert repl.finished is True
+    assert repl.stopped is True
     assert client.calls[-1]["messages"][-2:] == [
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
@@ -311,6 +400,26 @@ async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
     resumed = await agent.prompt(created.session_id, [text_block("after")])
     assert resumed.stop_reason == "end_turn"
     assert engine.prompts == ["wait", "after"]
+
+    await agent.close_session(created.session_id)
+
+
+async def test_acp_failed_prompt_keeps_session_reusable(monkeypatch, tmp_path):
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    created = await agent.new_session(str(tmp_path))
+    engine = _Engine.instances[0]
+
+    with pytest.raises(RuntimeError, match="transient failure"):
+        await agent.prompt(created.session_id, [text_block("fail")])
+
+    resumed = await agent.prompt(created.session_id, [text_block("after")])
+    assert resumed.stop_reason == "end_turn"
+    assert engine.prompts == ["fail", "after"]
+    assert engine.closed is False
 
     await agent.close_session(created.session_id)
 
