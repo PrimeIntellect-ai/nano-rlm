@@ -9,7 +9,8 @@ server = FastMCP("stdio-test")
 
 @server.tool()
 def echo(text: str) -> str:
-    return f"{os.environ['TEST_PREFIX']}:{text}"
+    inherited = all(name in os.environ for name in ("HOME", "PATH"))
+    return f"{os.environ['TEST_PREFIX']}:{inherited}:{text}"
 
 
 if __name__ == "__main__":

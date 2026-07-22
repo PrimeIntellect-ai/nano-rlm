@@ -315,19 +315,24 @@ class RLMEngine:
             else None
         )
         self._repl = IPythonREPL(cwd=self.cwd, session=self.session, env=repl_env)
-        self._repl.start()
-        self._known_children = {p.name for p in self.session.dir.glob("sub-*")}
+        try:
+            self._repl.start()
+            self._known_children = {p.name for p in self.session.dir.glob("sub-*")}
 
-        self._active_tools = get_active_builtin_tools()
-        self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
-        messages_path = str(self.session.dir / "messages.jsonl")
-        system_prompt = self._load_system_prompt(messages_path, self._active_tools)
+            self._active_tools = get_active_builtin_tools()
+            self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
+            messages_path = str(self.session.dir / "messages.jsonl")
+            system_prompt = self._load_system_prompt(messages_path, self._active_tools)
 
-        self._messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        self._started = True
+            self._messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+            self._started = True
+        except BaseException:
+            self._repl.shutdown()
+            self._repl = None
+            raise
 
     async def _run_loop(self) -> RLMResult:
         messages = self._messages

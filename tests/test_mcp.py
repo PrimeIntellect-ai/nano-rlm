@@ -74,7 +74,7 @@ async def test_stdio_transport():
     found = await mcp.discover_tools({"local": server})
 
     assert list(found) == ["local_echo"]
-    assert await mcp.call_tool(server, "echo", {"text": "hello"}) == "stdio:hello"
+    assert await mcp.call_tool(server, "echo", {"text": "hello"}) == "stdio:True:hello"
 
 
 def test_skill_name():

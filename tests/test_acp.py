@@ -145,6 +145,47 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
     ]
 
 
+async def test_engine_failed_start_cleans_kernel_before_retry(
+    monkeypatch, session, tmp_path
+):
+    repls = []
+
+    class FakeREPL:
+        def __init__(self, **kwargs):
+            self.started = False
+            self.stopped = False
+            repls.append(self)
+
+        def start(self):
+            self.started = True
+
+        def shutdown(self):
+            self.stopped = True
+
+    monkeypatch.setattr("rlm.engine.IPythonREPL", FakeREPL)
+    system_prompt = tmp_path / "system.txt"
+    client = DummyClient([DummyMessage(content="continued")])
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        system_prompt_path=str(system_prompt),
+    )
+
+    with pytest.raises(FileNotFoundError):
+        await engine.prompt("first")
+    assert repls[0].started is True
+    assert repls[0].stopped is True
+    assert engine._repl is None
+
+    system_prompt.write_text("system")
+    result = await engine.prompt("retry")
+    engine.close()
+
+    assert result.answer == "continued"
+    assert len(repls) == 2
+    assert repls[1].stopped is True
+
+
 async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     _Engine.instances.clear()
     monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
