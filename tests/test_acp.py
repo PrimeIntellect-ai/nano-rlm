@@ -78,6 +78,9 @@ async def test_engine_prompt_preserves_conversation(session):
 
     assert first.answer == "first"
     assert second.answer == "second"
+    assert first.usage == TokenUsage(prompt_tokens=1, completion_tokens=1)
+    assert second.usage == TokenUsage(prompt_tokens=1, completion_tokens=1)
+    assert engine._total_usage == TokenUsage(prompt_tokens=2, completion_tokens=2)
     assert client.calls[1]["messages"][-4:] == [
         {"role": "user", "content": "one"},
         {"role": "assistant", "content": "first"},
@@ -142,6 +145,7 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
         engine.close()
 
     assert result.answer == "continued"
+    assert result.turns == 1
     assert client.calls[-1]["messages"][-2:] == [
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
@@ -166,6 +170,7 @@ async def test_engine_failed_prompt_can_be_retried(session):
         engine.close()
 
     assert result.answer == "continued"
+    assert result.turns == 1
     assert client.calls[-1]["messages"][-2:] == [
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},

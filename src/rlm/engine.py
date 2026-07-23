@@ -267,6 +267,11 @@ class RLMEngine:
             messages_before = list(self._messages)
             self._messages.append({"role": "user", "content": prompt})
         branch_start_before = self._branch_start_turn
+        turn_before = self._turn
+        usage_before = TokenUsage(
+            prompt_tokens=self._total_usage.prompt_tokens,
+            completion_tokens=self._total_usage.completion_tokens,
+        )
 
         self._metrics.stop_reason = ""
         try:
@@ -274,9 +279,16 @@ class RLMEngine:
         except BaseException as exc:
             self._messages[:] = messages_before
             self._branch_start_turn = branch_start_before
+            self._turn = turn_before
             if isinstance(exc, asyncio.CancelledError):
                 self._metrics.stop_reason = "cancelled"
             raise
+        result.usage = TokenUsage(
+            prompt_tokens=self._total_usage.prompt_tokens - usage_before.prompt_tokens,
+            completion_tokens=(
+                self._total_usage.completion_tokens - usage_before.completion_tokens
+            ),
+        )
         self._last_answer = result.answer
         self._has_result = True
         return result
