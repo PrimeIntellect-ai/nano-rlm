@@ -17,6 +17,7 @@ import pytest
 from conftest import DummyClient, DummyMessage, DummyToolCall
 from rlm.acp import RLMACPAgent
 from rlm.engine import RLMEngine
+from rlm.session import Session
 from rlm.types import RLMResult, TokenUsage
 
 
@@ -78,6 +79,8 @@ async def test_engine_prompt_preserves_conversation(session):
 
     assert first.answer == "first"
     assert second.answer == "second"
+    assert first.turns == 1
+    assert second.turns == 1
     assert first.usage == TokenUsage(prompt_tokens=1, completion_tokens=1)
     assert second.usage == TokenUsage(prompt_tokens=1, completion_tokens=1)
     assert engine._total_usage == TokenUsage(prompt_tokens=2, completion_tokens=2)
@@ -341,6 +344,24 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
     assert result.answer == "continued"
     assert len(repls) == 2
     assert repls[1].stopped is True
+
+
+async def test_acp_failed_session_creation_closes_session(monkeypatch, tmp_path):
+    session = Session(tmp_path / "session")
+
+    class FailingEngine:
+        def __init__(self, **kwargs):
+            raise RuntimeError("engine init failed")
+
+    monkeypatch.setattr("rlm.acp.Session", lambda: session)
+    monkeypatch.setattr("rlm.acp.RLMEngine", FailingEngine)
+    agent = RLMACPAgent()
+
+    with pytest.raises(RuntimeError, match="engine init failed"):
+        await agent.new_session(str(tmp_path))
+
+    assert session._msg_file.closed is True
+    assert agent._sessions == {}
 
 
 async def test_acp_session_reuses_engine(monkeypatch, tmp_path):

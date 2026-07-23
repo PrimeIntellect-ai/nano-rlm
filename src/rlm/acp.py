@@ -136,15 +136,19 @@ class RLMACPAgent(Agent):
             raise RequestError.invalid_params(
                 {"reason": "RLM does not support additional session directories"}
             )
+        resolved_mcp_servers = _mcp_servers(mcp_servers)
         session = Session()
         session_id = session.dir.name
-        self._sessions[session_id] = _SessionState(
-            engine=RLMEngine(
+        try:
+            engine = RLMEngine(
                 cwd=cwd,
                 session=session,
-                mcp_servers=_mcp_servers(mcp_servers),
+                mcp_servers=resolved_mcp_servers,
             )
-        )
+        except BaseException:
+            session.close()
+            raise
+        self._sessions[session_id] = _SessionState(engine=engine)
         return NewSessionResponse(session_id=session_id)
 
     async def prompt(

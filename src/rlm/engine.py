@@ -308,6 +308,7 @@ class RLMEngine:
                 self._total_usage.completion_tokens - usage_before.completion_tokens
             ),
         )
+        result.turns = self._turn - turn_before
         self._last_answer = result.answer
         self._has_result = True
         return result
