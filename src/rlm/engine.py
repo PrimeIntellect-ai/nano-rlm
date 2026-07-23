@@ -13,7 +13,13 @@ from pathlib import Path
 from openai import AsyncOpenAI, BadRequestError
 
 from rlm.client import call_with_retries, extract_usage, make_client
-from rlm.mcp import generate_mcp_skills, load_mcp_servers
+from rlm.mcp import (
+    MCP_CONFIG_ENV,
+    MCPServer,
+    dump_mcp_servers,
+    generate_mcp_skills,
+    load_mcp_servers,
+)
 from rlm.prompt import build_system_prompt
 from rlm.session import Session
 from rlm.skills import enable_builtin_skills
@@ -149,7 +155,7 @@ class RLMEngine:
         cwd: str | None = None,
         session: Session | None = None,
         client: AsyncOpenAI | None = None,
-        mcp_servers: dict[str, str] | None = None,
+        mcp_servers: dict[str, MCPServer] | None = None,
     ):
         self.model = model or os.environ.get("RLM_MODEL", "openai/gpt-5-mini")
         self.cwd = cwd or os.getcwd()
@@ -177,8 +183,8 @@ class RLMEngine:
         self.max_depth = int(os.environ.get("RLM_MAX_DEPTH", "0"))
         self.depth = int(os.environ.get("RLM_DEPTH", "0"))
 
-        # Task MCP tool servers ({name: url}) to expose as IPython skills; kwarg wins,
-        # otherwise parse RLM_MCP_CONFIG (a standard mcpServers URL map).
+        # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
+        # parse RLM_MCP_CONFIG (a standard mcpServers config).
         self.mcp_servers = (
             mcp_servers if mcp_servers is not None else load_mcp_servers()
         )
@@ -214,6 +220,15 @@ class RLMEngine:
         # report "turns since last compaction" when a compaction fires.
         self._branch_start_turn: int = 0
 
+        self._messages: list[dict] | None = None
+        self._active_tools: list[BuiltinTool] = []
+        self._active_tool_schemas: list[dict] = []
+        self._turn = 0
+        self._last_answer = ""
+        self._has_result = False
+        self._started = False
+        self._closed = False
+
     def _ensure_session(self):
         """Create session if not set."""
         if self.session is not None:
@@ -221,14 +236,85 @@ class RLMEngine:
         session_dir = os.environ.get("RLM_SESSION_DIR")
         self.session = Session(session_dir)
 
+    @property
+    def stop_reason(self) -> str:
+        """Reason the most recent prompt stopped."""
+        return self._metrics.stop_reason
+
     async def run(self, prompt: str) -> RLMResult:
         """Run a single agent loop to completion."""
+        try:
+            return await self.prompt(prompt)
+        finally:
+            self.close()
+
+    async def prompt(self, prompt: str) -> RLMResult:
+        """Run one user turn while preserving conversation and kernel state."""
+        if self._closed:
+            raise RuntimeError("RLM engine is closed")
+
         # Check depth limit
         if self.depth > self.max_depth:
             return RLMResult(
                 answer=f"[depth limit {self.max_depth} reached, cannot start]",
                 turns=0,
             )
+
+        if not self._started:
+            await self._start(prompt)
+            messages_before = self._messages[:1]
+        else:
+            messages_before = list(self._messages)
+            self._messages.append({"role": "user", "content": prompt})
+        branch_start_before = self._branch_start_turn
+        turn_before = self._turn
+        usage_before = TokenUsage(
+            prompt_tokens=self._total_usage.prompt_tokens,
+            completion_tokens=self._total_usage.completion_tokens,
+        )
+
+        self._metrics.stop_reason = ""
+        try:
+            result = await self._run_loop()
+        except BaseException as exc:
+            attempted_turns = self._turn - turn_before
+            try:
+                self.session.log(
+                    {
+                        "type": "prompt_rollback",
+                        "start_turn": turn_before,
+                        "attempted_turns": attempted_turns,
+                        "reason": (
+                            "cancelled"
+                            if isinstance(exc, asyncio.CancelledError)
+                            else "error"
+                        ),
+                    }
+                )
+            except OSError:
+                logger.warning("rlm: failed to log prompt rollback", exc_info=True)
+            # Restore only the resumable conversation position. Usage, metrics,
+            # kernel/tool side effects, and the append-only audit log describe work
+            # that really ran and remain part of session accounting.
+            self._messages[:] = messages_before
+            self._branch_start_turn = branch_start_before
+            self._turn = turn_before
+            if isinstance(exc, asyncio.CancelledError):
+                self._metrics.stop_reason = "cancelled"
+            raise
+        result.usage = TokenUsage(
+            prompt_tokens=self._total_usage.prompt_tokens - usage_before.prompt_tokens,
+            completion_tokens=(
+                self._total_usage.completion_tokens - usage_before.completion_tokens
+            ),
+        )
+        result.turns = self._turn - turn_before
+        self._last_answer = result.answer
+        self._has_result = True
+        return result
+
+    async def _start(self, prompt: str) -> None:
+        """Initialize the session, tools, conversation, and persistent kernel."""
 
         self._ensure_session()
 
@@ -247,45 +333,56 @@ class RLMEngine:
         # (PTC). ipython is the sole builtin tool, so the kernel always starts.
         enable_builtin_skills(self.skills, self.session.dir)
         if self.mcp_servers:
-            mcp_skills = await generate_mcp_skills(self.mcp_servers, self.session.dir)
+            mcp_skills = await generate_mcp_skills(
+                self.mcp_servers, self.session.dir, self.cwd
+            )
             logger.info(
                 "rlm: exposed %d MCP tool(s) as skills - %s",
                 len(mcp_skills),
                 ", ".join(mcp_skills),
             )
 
-        self._repl = IPythonREPL(cwd=self.cwd, session=self.session)
-        self._repl.start()
-        self._known_children = {p.name for p in self.session.dir.glob("sub-*")}
-
+        repl_env = (
+            {MCP_CONFIG_ENV: dump_mcp_servers(self.mcp_servers)}
+            if self.mcp_servers
+            else None
+        )
+        self._repl = IPythonREPL(cwd=self.cwd, session=self.session, env=repl_env)
         try:
-            return await self._run_loop(prompt)
-        finally:
-            if self._repl is not None:
-                self._repl.shutdown()
+            self._repl.start()
+            self._known_children = {p.name for p in self.session.dir.glob("sub-*")}
 
-    async def _run_loop(self, prompt: str) -> RLMResult:
-        active_builtin_tools = get_active_builtin_tools()
-        active_tools = [tool.schema() for tool in active_builtin_tools]
-        messages_path = str(self.session.dir / "messages.jsonl")
-        system_prompt = self._load_system_prompt(messages_path, active_builtin_tools)
+            self._active_tools = get_active_builtin_tools()
+            self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
+            messages_path = str(self.session.dir / "messages.jsonl")
+            system_prompt = self._load_system_prompt(messages_path, self._active_tools)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
+            self._messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+            self._started = True
+        except BaseException:
+            self._repl.shutdown()
+            self._repl = None
+            raise
+
+    async def _run_loop(self) -> RLMResult:
+        messages = self._messages
+        if messages is None:
+            raise RuntimeError("RLM engine is not started")
 
         final_text = ""
-        turn = 0
 
-        for turn in itertools.count():
+        for turn in itertools.count(self._turn):
+            self._turn = turn + 1
             # Call LLM
             request_kwargs = {
                 "model": self.model,
                 "messages": messages,
             }
-            if active_tools:
-                request_kwargs["tools"] = active_tools
+            if self._active_tool_schemas:
+                request_kwargs["tools"] = self._active_tool_schemas
                 request_kwargs["parallel_tool_calls"] = False
             try:
                 response = await call_with_retries(
@@ -375,9 +472,35 @@ class RLMEngine:
             if tool is None:
                 tool_result = ToolOutcome(content=f"Error: unknown tool '{tool_name}'")
             else:
-                tool_result = await asyncio.to_thread(
-                    tool.execute, tool_args, self._tool_context(messages)
+                tool_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        tool.execute, tool_args, self._tool_context(messages)
+                    )
                 )
+                try:
+                    tool_result = await asyncio.shield(tool_task)
+                except asyncio.CancelledError:
+                    repl = self._repl
+                    if repl is not None:
+                        repl.interrupt()
+                    try:
+                        while True:
+                            try:
+                                await asyncio.shield(tool_task)
+                            except asyncio.CancelledError:
+                                if repl is not None:
+                                    repl.interrupt()
+                                continue
+                            except Exception:
+                                logger.warning(
+                                    "rlm: tool failed while cancellation was settling",
+                                    exc_info=True,
+                                )
+                            break
+                    finally:
+                        if repl is not None:
+                            repl.finish_interrupt()
+                    raise
             duration = time.time() - t0
             for event in tool_result.metric_events:
                 self._metrics.record(event)
@@ -408,7 +531,9 @@ class RLMEngine:
                 and usage.prompt_tokens >= self.summarize_at_tokens
             ):
                 try:
-                    await self._compact_branch(messages, turn, active_tools)
+                    await self._compact_branch(
+                        messages, turn, self._active_tool_schemas
+                    )
                 except BadRequestError as e:
                     if not _is_request_too_large(e):
                         raise
@@ -420,18 +545,32 @@ class RLMEngine:
             answer=final_text,
             session_dir=self.session.dir,
             usage=self._total_usage,
-            turns=turn + 1,
-        )
-        self.session.finalize(
-            final_text,
-            usage={
-                "prompt_tokens": self._total_usage.prompt_tokens,
-                "completion_tokens": self._total_usage.completion_tokens,
-            },
-            turns=turn + 1,
-            metrics=self._metrics,
+            turns=self._turn,
         )
         return result
+
+    def close(self) -> None:
+        """Finalize artifacts and stop the persistent kernel."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.session is not None:
+                if self._has_result:
+                    self.session.finalize(
+                        self._last_answer,
+                        usage={
+                            "prompt_tokens": self._total_usage.prompt_tokens,
+                            "completion_tokens": self._total_usage.completion_tokens,
+                        },
+                        turns=self._turn,
+                        metrics=self._metrics,
+                    )
+                else:
+                    self.session.close()
+        finally:
+            if self._repl is not None:
+                self._repl.shutdown()
 
     async def _compact_branch(
         self, messages: list[dict], turn: int, active_tools: list[dict]

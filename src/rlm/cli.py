@@ -34,6 +34,11 @@ def main():
         default=None,
         help="Extra instructions appended to the generated system prompt",
     )
+    parser.add_argument(
+        "--acp",
+        action="store_true",
+        help="Serve as an Agent Client Protocol agent over stdio",
+    )
     args = parser.parse_args()
 
     # Apply CLI overrides to env
@@ -44,7 +49,13 @@ def main():
     if args.append_to_system_prompt:
         os.environ["RLM_APPEND_TO_SYSTEM_PROMPT"] = args.append_to_system_prompt
 
-    if args.prompt:
+    if args.acp:
+        if args.prompt:
+            parser.error("a prompt cannot be supplied with --acp")
+        from rlm.acp import serve_acp
+
+        asyncio.run(serve_acp())
+    elif args.prompt:
         print(asyncio.run(rlm.run(args.prompt)).answer)
     else:
         _run_interactive()

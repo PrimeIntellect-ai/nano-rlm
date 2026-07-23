@@ -1,15 +1,17 @@
 """Tests for MCP-tools-as-skills (``rlm.mcp``).
 
-Covers the pure logic: config parsing, JSON-schema → signature rendering, and generation
-of importable skill modules. The live MCP round-trip (kernel pre-import + streamable-HTTP
-call) is exercised end-to-end by the general-agent-v1 eval, not here.
+Covers config parsing, JSON-schema → signature rendering, generation of importable skill
+modules, and a live stdio transport round-trip. The streamable-HTTP path is exercised
+end-to-end by the general-agent-v1 eval.
 """
 
 from __future__ import annotations
 
 import importlib
 import inspect
+import json
 import sys
+from pathlib import Path
 
 from mcp.types import Tool
 
@@ -32,9 +34,61 @@ def test_load_mcp_servers(monkeypatch):
 
     monkeypatch.setenv(
         mcp.MCP_CONFIG_ENV,
-        '{"mcpServers": {"tools": {"url": "http://h/mcp"}, "web": {"url": "http://h/web"}}}',
+        '{"mcpServers": {"tools": {"url": "http://h/mcp"}, "web": {"url": "http://h/web", "headers": {"Authorization": "secret"}}, "local": {"command": "/bin/server", "args": ["--stdio"], "env": {"TOKEN": "secret"}}}}',
     )
-    assert mcp.load_mcp_servers() == {"tools": "http://h/mcp", "web": "http://h/web"}
+    servers = mcp.load_mcp_servers()
+    assert servers == {
+        "tools": "http://h/mcp",
+        "web": {
+            "url": "http://h/web",
+            "headers": {"Authorization": "secret"},
+        },
+        "local": {
+            "command": "/bin/server",
+            "args": ["--stdio"],
+            "env": {"TOKEN": "secret"},
+        },
+    }
+    assert json.loads(mcp.dump_mcp_servers(servers)) == {
+        "mcpServers": {
+            "tools": {"url": "http://h/mcp"},
+            "web": {
+                "url": "http://h/web",
+                "headers": {"Authorization": "secret"},
+            },
+            "local": {
+                "command": "/bin/server",
+                "args": ["--stdio"],
+                "env": {"TOKEN": "secret"},
+            },
+        }
+    }
+
+
+async def test_stdio_transport(monkeypatch, tmp_path):
+    server_cwd = tmp_path / "server"
+    server_cwd.mkdir()
+    caller_cwd = tmp_path / "caller"
+    caller_cwd.mkdir()
+    server = {
+        "command": sys.executable,
+        "args": [str(Path(__file__).parent / "fixtures" / "mcp_stdio.py")],
+        "env": {"TEST_PREFIX": "stdio"},
+    }
+    found = await mcp.discover_tools({"local": server}, str(server_cwd))
+    skills_dir = tmp_path / "skills"
+    mcp.write_skill_modules(found, skills_dir, str(server_cwd))
+    monkeypatch.setenv(mcp.MCP_CONFIG_ENV, mcp.dump_mcp_servers({"local": server}))
+    monkeypatch.chdir(caller_cwd)
+
+    assert list(found) == ["local_echo"]
+    sys.path.insert(0, str(skills_dir))
+    try:
+        skill = importlib.import_module("local_echo")
+        assert await skill.run(text="hello") == f"stdio:True:{server_cwd}:hello"
+    finally:
+        sys.path.remove(str(skills_dir))
+        sys.modules.pop("local_echo", None)
 
 
 def test_skill_name():
@@ -58,9 +112,7 @@ def test_write_skill_modules(tmp_path):
     tool = Tool(
         name="add_event", description="Add an event.\ndetails", inputSchema=SCHEMA
     )
-    names = mcp.write_skill_modules(
-        {"tools_add_event": ("http://h/mcp", tool)}, tmp_path
-    )
+    names = mcp.write_skill_modules({"tools_add_event": ("tools", tool)}, tmp_path)
     assert names == ["tools_add_event"]
     # the directory is the source of truth — the modules are readable back from it.
     assert mcp.list_skill_modules(tmp_path) == ["tools_add_event"]

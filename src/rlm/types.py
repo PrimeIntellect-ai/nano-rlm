@@ -155,7 +155,7 @@ class RLMMetrics:
     sub_rlm_num_ptc_calls_python: int = 0
     sub_rlm_num_ptc_calls_bash: int = 0
 
-    stop_reason: str = ""  # "done", "token_budget", "request_too_large"
+    stop_reason: str = ""  # "done", "token_budget", "request_too_large", "cancelled"
 
     # Internal counters for derived metrics
     _ipython_call_count: int = field(default=0, repr=False)
