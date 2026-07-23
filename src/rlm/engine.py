@@ -168,6 +168,12 @@ class RLMEngine:
             env_value = summarize_at_tokens
         self.summarize_at_tokens = _parse_summarize_at_tokens(env_value)
 
+        # Cap on auto-compactions (RLM_MAX_COMPACTIONS): once reached, the branch is
+        # never compacted again and the context grows to the model's natural limit.
+        # Unset or <= 0 means unlimited.
+        _max_compactions = int(os.environ.get("RLM_MAX_COMPACTIONS", "0"))
+        self.max_compactions = _max_compactions if _max_compactions > 0 else None
+
         self.system_prompt_path = system_prompt_path or os.environ.get(
             "RLM_SYSTEM_PROMPT_PATH"
         )
@@ -402,10 +408,16 @@ class RLMEngine:
             # Auto-compaction: if this turn's prompt_tokens reached the
             # configured threshold, ask the model for a handoff summary and
             # rebuild the branch around it. Fires at most once per loop
-            # iteration; the compaction op takes its own LLM call.
+            # iteration; the compaction op takes its own LLM call. A
+            # max_compactions cap, once hit, disables further compaction so
+            # the context grows to the model's natural limit.
             if (
                 self.summarize_at_tokens is not None
                 and usage.prompt_tokens >= self.summarize_at_tokens
+                and (
+                    self.max_compactions is None
+                    or self._metrics.num_compactions < self.max_compactions
+                )
             ):
                 try:
                     await self._compact_branch(messages, turn, active_tools)
