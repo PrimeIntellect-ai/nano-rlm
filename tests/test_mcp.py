@@ -65,16 +65,30 @@ def test_load_mcp_servers(monkeypatch):
     }
 
 
-async def test_stdio_transport():
+async def test_stdio_transport(monkeypatch, tmp_path):
+    server_cwd = tmp_path / "server"
+    server_cwd.mkdir()
+    caller_cwd = tmp_path / "caller"
+    caller_cwd.mkdir()
     server = {
         "command": sys.executable,
         "args": [str(Path(__file__).parent / "fixtures" / "mcp_stdio.py")],
         "env": {"TEST_PREFIX": "stdio"},
     }
-    found = await mcp.discover_tools({"local": server})
+    found = await mcp.discover_tools({"local": server}, str(server_cwd))
+    skills_dir = tmp_path / "skills"
+    mcp.write_skill_modules(found, skills_dir, str(server_cwd))
+    monkeypatch.setenv(mcp.MCP_CONFIG_ENV, mcp.dump_mcp_servers({"local": server}))
+    monkeypatch.chdir(caller_cwd)
 
     assert list(found) == ["local_echo"]
-    assert await mcp.call_tool(server, "echo", {"text": "hello"}) == "stdio:True:hello"
+    sys.path.insert(0, str(skills_dir))
+    try:
+        skill = importlib.import_module("local_echo")
+        assert await skill.run(text="hello") == f"stdio:True:{server_cwd}:hello"
+    finally:
+        sys.path.remove(str(skills_dir))
+        sys.modules.pop("local_echo", None)
 
 
 def test_skill_name():

@@ -277,6 +277,25 @@ class RLMEngine:
         try:
             result = await self._run_loop()
         except BaseException as exc:
+            attempted_turns = self._turn - turn_before
+            try:
+                self.session.log(
+                    {
+                        "type": "prompt_rollback",
+                        "start_turn": turn_before,
+                        "attempted_turns": attempted_turns,
+                        "reason": (
+                            "cancelled"
+                            if isinstance(exc, asyncio.CancelledError)
+                            else "error"
+                        ),
+                    }
+                )
+            except OSError:
+                logger.warning("rlm: failed to log prompt rollback", exc_info=True)
+            # Restore only the resumable conversation position. Usage, metrics,
+            # kernel/tool side effects, and the append-only audit log describe work
+            # that really ran and remain part of session accounting.
             self._messages[:] = messages_before
             self._branch_start_turn = branch_start_before
             self._turn = turn_before

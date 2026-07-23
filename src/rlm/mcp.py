@@ -132,13 +132,18 @@ async def discover_tools(
     return found
 
 
-async def call_tool(server: MCPServer, name: str, arguments: dict) -> str:
+async def call_tool(
+    server: MCPServer,
+    name: str,
+    arguments: dict,
+    cwd: str | None = None,
+) -> str:
     """Call an MCP tool and return its text content.
 
     Raises ``RuntimeError`` on a tool-reported error, so a failed call surfaces as an
     exception in the REPL rather than a silently-wrong return value.
     """
-    async with _client_session(server) as session:
+    async with _client_session(server, cwd) as session:
         await session.initialize()
         result = await session.call_tool(name, arguments or {})
     text = "\n".join(
@@ -169,7 +174,7 @@ def build_signature(schema: dict) -> inspect.Signature:
     return inspect.Signature(params)
 
 
-def make_skill(server: str, tool: Tool):
+def make_skill(server: str, tool: Tool, cwd: str | None = None):
     """Build the async ``run`` for a generated skill module from an MCP ``Tool``.
 
     Generated modules are a single statement (``run = make_skill(server, Tool(...))``). The
@@ -182,7 +187,7 @@ def make_skill(server: str, tool: Tool):
             spec = load_mcp_servers()[server]
         except KeyError as exc:
             raise RuntimeError(f"MCP server {server!r} is not configured") from exc
-        return await call_tool(spec, tool.name, kwargs)
+        return await call_tool(spec, tool.name, kwargs, cwd)
 
     run.__signature__ = build_signature(tool.inputSchema)
     run.__doc__ = tool.description or f"MCP tool {tool.name!r}."
@@ -196,12 +201,14 @@ from mcp.types import Tool
 
 from rlm.mcp import make_skill
 
-run = make_skill({server!r}, Tool.model_validate({tool!r}))
+run = make_skill({server!r}, Tool.model_validate({tool!r}), cwd={cwd!r})
 '''
 
 
 def write_skill_modules(
-    found: dict[str, tuple[str, Tool]], dest_dir: Path
+    found: dict[str, tuple[str, Tool]],
+    dest_dir: Path,
+    cwd: str | None = None,
 ) -> list[str]:
     """Write one importable ``<skill>.py`` per discovered tool into ``dest_dir``.
 
@@ -216,6 +223,7 @@ def write_skill_modules(
             summary=summary.replace('"""', "'''"),
             server=server,
             tool=tool.model_dump(mode="json"),
+            cwd=cwd,
         )
         (dest_dir / f"{name}.py").write_text(source)
     return list(found)
@@ -225,7 +233,7 @@ async def generate_mcp_skills(
     servers: dict[str, MCPServer], dest_dir: Path, cwd: str | None = None
 ) -> list[str]:
     """Discover all tools on ``servers`` and write them as skill modules in ``dest_dir``."""
-    return write_skill_modules(await discover_tools(servers, cwd), dest_dir)
+    return write_skill_modules(await discover_tools(servers, cwd), dest_dir, cwd)
 
 
 def list_skill_modules(skills_dir: Path) -> list[str]:

@@ -171,6 +171,20 @@ async def test_engine_failed_prompt_can_be_retried(session):
 
     assert result.answer == "continued"
     assert result.turns == 1
+    meta = json.loads((Path(session.dir) / "meta.json").read_text())
+    assert meta["usage"] == {"prompt_tokens": 2, "completion_tokens": 2}
+    log = [
+        json.loads(line)
+        for line in (Path(session.dir) / "messages.jsonl").read_text().splitlines()
+    ]
+    assert [entry["type"] for entry in log] == [
+        "assistant",
+        "prompt_rollback",
+        "assistant",
+        "done",
+    ]
+    assert log[1]["attempted_turns"] == 1
+    assert log[1]["reason"] == "error"
     assert client.calls[-1]["messages"][-2:] == [
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
