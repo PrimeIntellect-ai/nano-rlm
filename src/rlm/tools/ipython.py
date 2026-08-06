@@ -6,7 +6,9 @@ import copy
 import os
 from queue import Empty
 import re
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -136,6 +138,7 @@ class IPythonREPL:
         self.env = env or {}
         self._km = None
         self._kc = None
+        self._ipc_dir = None
         self._lock = threading.Lock()
         self._interrupt_requested = threading.Event()
 
@@ -143,7 +146,16 @@ class IPythonREPL:
         """Start the IPython kernel."""
         from jupyter_client import KernelManager
 
-        self._km = KernelManager()
+        # IPC (Unix domain sockets) instead of the default TCP: kernel and
+        # client are always on the same host, and ipykernel >= 7.3 warns
+        # about unencrypted TCP transport. The socket path must be absolute
+        # (a relative path resolves against each process's own cwd) and
+        # short (macOS caps Unix socket paths at 104 bytes), so use a
+        # dedicated temp dir rather than the session dir.
+        self._ipc_dir = tempfile.mkdtemp(prefix="rlm-ipc-")
+        self._km = KernelManager(
+            transport="ipc", ip=os.path.join(self._ipc_dir, "kernel")
+        )
         self._km.kernel_spec.argv = [
             sys.executable,
             "-m",
@@ -354,3 +366,6 @@ if {allow_recursion!r}:
         if self._km:
             self._km.shutdown_kernel(now=True)
             self._km = None
+        if self._ipc_dir:
+            shutil.rmtree(self._ipc_dir, ignore_errors=True)
+            self._ipc_dir = None
