@@ -146,12 +146,9 @@ class IPythonREPL:
         """Start the IPython kernel."""
         from jupyter_client import KernelManager
 
-        # IPC (Unix domain sockets) instead of the default TCP: kernel and
-        # client are always on the same host, and ipykernel >= 7.3 warns
-        # about unencrypted TCP transport. The socket path must be absolute
-        # (a relative path resolves against each process's own cwd) and
-        # short (macOS caps Unix socket paths at 104 bytes), so use a
-        # dedicated temp dir rather than the session dir.
+        # IPC instead of the default TCP (ipykernel >= 7.3 warns about
+        # unencrypted TCP). The socket path must be absolute and short
+        # (macOS caps Unix socket paths at 104 bytes), hence a temp dir.
         self._ipc_dir = tempfile.mkdtemp(prefix="rlm-ipc-")
         self._km = KernelManager(
             transport="ipc", ip=os.path.join(self._ipc_dir, "kernel")
