@@ -7,6 +7,7 @@ import os
 from queue import Empty
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -160,7 +161,12 @@ class IPythonREPL:
             "-f",
             "{connection_file}",
         ]
-        self._km.start_kernel(cwd=self.cwd, env={**os.environ, **self.env})
+        self._km.start_kernel(
+            cwd=self.cwd,
+            env={**os.environ, **self.env},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         self._kc = self._km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)

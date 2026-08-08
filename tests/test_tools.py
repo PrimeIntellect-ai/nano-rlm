@@ -70,3 +70,25 @@ async def test_tool_raises(session):
 
     with pytest.raises(RuntimeError, match="boom"):
         await engine.run(prompt)
+
+
+def test_ipython_kernel_does_not_inherit_parent_stdio(session, capfd):
+    """Kernel writes outside IOPub must not corrupt an enclosing ACP transport."""
+    from rlm.tools.ipython import IPythonREPL
+
+    repl = IPythonREPL(cwd=str(session.dir), session=session)
+    repl.start()
+    try:
+        result = repl.execute(
+            "import os; "
+            "stdout_written = os.write(1, b'123\\n'); "
+            "stderr_written = os.write(2, b'kernel stderr\\n'); "
+            "print(stdout_written, stderr_written)"
+        )
+    finally:
+        repl.shutdown()
+
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert result.strip() == "4 14"
