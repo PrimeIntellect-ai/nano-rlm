@@ -80,6 +80,7 @@ All configuration is via environment variables:
 | `RLM_SKILLS` | — | Comma-separated built-in skills to enable (`edit`, `search`); pre-imported into the kernel. Unknown names raise. See [Skills](#skills). |
 | `RLM_MCP_CONFIG` | — | Standard `mcpServers` config (streamable HTTP or stdio); each server's tools become pre-imported IPython skills (`<server>_<tool>`). See [MCP tools as skills](#mcp-tools-as-skills). |
 | `RLM_MAX_DEPTH` | `0` | Max recursion depth (`0` means no sub-agents) |
+| `RLM_MAX_CONCURRENT_SUBAGENTS` | `4` | Max live sub-agents across one recursive session tree. Must be at least `RLM_MAX_DEPTH`; capacity is divided across depths to prevent nested-agent deadlocks. |
 | `RLM_EXEC_TIMEOUT` | `300` | Seconds per IPython execution |
 | `RLM_MAX_OUTPUT` | `-1` | Max chars returned from a tool call (`-1` disables truncation; `0` is invalid) |
 | `RLM_SUMMARIZE_AT_TOKENS` | — | Auto-compaction threshold: when a turn's prompt tokens reach this value, the conversation is compacted into a summary. Unset disables auto-compaction. |
@@ -111,6 +112,11 @@ results = await asyncio.gather(
 ```
 
 When recursion is disabled by depth, the system prompt does not advertise these APIs and child runs beyond the depth limit fail immediately.
+
+At most `RLM_MAX_CONCURRENT_SUBAGENTS` recursive agents run at once across the
+entire session tree. Additional calls wait for a slot. The shared slots are
+partitioned across enabled recursion depths so an agent waiting on a descendant
+cannot consume the descendant's capacity.
 
 ## Compaction
 

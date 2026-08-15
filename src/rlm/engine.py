@@ -13,6 +13,7 @@ from pathlib import Path
 from openai import AsyncOpenAI, BadRequestError
 
 from rlm.client import call_with_retries, extract_usage, make_client
+from rlm.concurrency import max_concurrent_subagents
 from rlm.mcp import (
     MCP_CONFIG_ENV,
     MCPServer,
@@ -189,6 +190,7 @@ class RLMEngine:
         )
         self.max_depth = int(os.environ.get("RLM_MAX_DEPTH", "0"))
         self.depth = int(os.environ.get("RLM_DEPTH", "0"))
+        self.max_concurrent_subagents = max_concurrent_subagents(self.max_depth)
 
         # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
         # parse RLM_MCP_CONFIG (a standard mcpServers config).
