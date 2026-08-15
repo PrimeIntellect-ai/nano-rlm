@@ -155,6 +155,62 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
     ]
 
 
+async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
+    client = DummyClient([DummyMessage(content="first")])
+    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    await engine.prompt("one")
+
+    prompt_started = asyncio.Event()
+
+    async def block_prompt(**kwargs):
+        prompt_started.set()
+        await asyncio.Future()
+
+    client.create = block_prompt
+    pending = asyncio.create_task(engine.prompt("two"))
+    await prompt_started.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    engine.close()
+
+    meta = json.loads((Path(session.dir) / "meta.json").read_text())
+    assert meta["status"] == "running"
+    assert "answer_preview" not in meta
+
+
+async def test_depth_limit_is_a_completed_result(monkeypatch, session):
+    monkeypatch.setenv("RLM_DEPTH", "1")
+    monkeypatch.setenv("RLM_MAX_DEPTH", "0")
+    client = DummyClient([])
+    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+
+    result = await engine.run("too deep")
+
+    meta = json.loads((Path(session.dir) / "meta.json").read_text())
+    assert result.answer == "[depth limit 0 reached, cannot start]"
+    assert meta["status"] == "done"
+    assert meta["metrics"]["stop_reason"] == "depth_limit"
+
+
+async def test_compaction_counts_seed_prompt(session):
+    client = DummyClient([DummyMessage(content="summary")])
+    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "original prompt"},
+        {"role": "assistant", "content": "work"},
+    ]
+
+    try:
+        await engine._compact_branch(messages, turn=0, active_tools=[])
+    finally:
+        engine.close()
+
+    assert engine._metrics.num_compactions == 1
+    assert engine._metrics.compaction_chars_dropped_mean == len("original promptwork")
+
+
 async def test_engine_failed_prompt_can_be_retried(session):
     client = DummyClient(
         [
@@ -303,6 +359,7 @@ async def test_engine_cancelled_tool_recovers_kernel(session, tmp_path):
     ]
     assert result.answer == "continued"
     assert tool_messages[-1]["content"].strip() == "42"
+    assert engine._metrics._ipython_call_count == 2
 
 
 async def test_engine_failed_start_cleans_kernel_before_retry(

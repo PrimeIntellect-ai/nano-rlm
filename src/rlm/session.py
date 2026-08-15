@@ -68,16 +68,15 @@ class Session:
         self.log({"type": "sub_spawn", "child_dir": child_name, "command": command})
 
     def aggregate_child_metrics(self) -> ChildSessionAggregate:
-        """Walk sub-*/meta.json and bundle their programmatic tool-call stats."""
+        """Aggregate call logs across all recursive descendant sessions."""
         aggregate = ChildSessionAggregate()
-        for child_dir in self.dir.glob("sub-*"):
-            meta_path = child_dir / "meta.json"
-            try:
-                with open(meta_path) as f:
-                    meta = json.load(f)
-            except FileNotFoundError:
-                continue
-            aggregate.absorb(ProgrammaticToolCallStats.from_meta(meta))
+        for child_dir in sorted(p for p in self.dir.rglob("sub-*") if p.is_dir()):
+            aggregate.num_sessions += 1
+            aggregate.absorb(
+                ProgrammaticToolCallStats.from_log(
+                    child_dir / "programmatic_tool_calls.jsonl"
+                )
+            )
         return aggregate
 
     def finalize(
@@ -94,21 +93,25 @@ class Session:
         if usage:
             meta_update["usage"] = usage
         if metrics is not None:
-            direct_tool_stats = ProgrammaticToolCallStats.from_log(
-                self.dir / "programmatic_tool_calls.jsonl"
-            )
-            child = self.aggregate_child_metrics()
-
-            metrics.apply_programmatic_tool_call_stats(
-                direct_tool_stats, child.tool_call_stats
-            )
-
-            meta_update["metrics"] = metrics.to_dict()
-            meta_update["programmatic_tool_call_stats"] = direct_tool_stats.merge(
-                child.tool_call_stats
-            ).to_dict()
+            meta_update.update(self._metrics_meta(metrics))
         self.write_meta(**meta_update)
         self._msg_file.close()
+
+    def _metrics_meta(self, metrics) -> dict:
+        """Assemble the metrics fields for meta.json from live stats on disk."""
+        direct_tool_stats = ProgrammaticToolCallStats.from_log(
+            self.dir / "programmatic_tool_calls.jsonl"
+        )
+        child = self.aggregate_child_metrics()
+        metrics.apply_programmatic_tool_call_stats(
+            direct_tool_stats, child.tool_call_stats, child.num_sessions
+        )
+        return {
+            "metrics": metrics.to_dict(),
+            "programmatic_tool_call_stats": direct_tool_stats.merge(
+                child.tool_call_stats
+            ).to_dict(),
+        }
 
     @staticmethod
     def child_dir(parent_dir: Path | str) -> Path:

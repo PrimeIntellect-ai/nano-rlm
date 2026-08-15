@@ -128,7 +128,14 @@ async def discover_tools(
         async with _client_session(spec, cwd) as session:
             await session.initialize()
             for tool in (await session.list_tools()).tools:
-                found[_skill_name(server, tool.name)] = (server, tool)
+                skill_name = _skill_name(server, tool.name)
+                if skill_name in found:
+                    previous_server, previous_tool = found[skill_name]
+                    raise ValueError(
+                        f"MCP tool name collision for {skill_name!r}: "
+                        f"{previous_server}.{previous_tool.name} and {server}.{tool.name}"
+                    )
+                found[skill_name] = (server, tool)
     return found
 
 

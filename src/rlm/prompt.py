@@ -88,6 +88,7 @@ def build_system_prompt(
     *,
     allow_recursion: bool,
     active_tools: list[BuiltinTool],
+    cli_skills: list[str] | None = None,
 ) -> str:
     """Build the system prompt.
 
@@ -119,10 +120,12 @@ def build_system_prompt(
             "Each skill is an async function by the same name. "
             "Inspect with `help(<skill>)` or `inspect.signature(<skill>.run)`."
         )
-        skill_lines.append(
-            "Each skill is also available as a shell command by the same name: `<skill> ...`. "
-            "Discover its CLI usage with `<skill> --help`."
-        )
+        if cli_skills:
+            commands = ", ".join(f"`{skill}`" for skill in cli_skills)
+            skill_lines.append(
+                f"Skills with shell commands: {commands}. "
+                "Discover CLI usage with `<skill> --help`."
+            )
         if "edit" in installed_skills:
             skill_lines.append(EDIT_SKILL_PROMPT)
         if "search" in installed_skills:
