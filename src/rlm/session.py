@@ -113,13 +113,6 @@ class Session:
             ).to_dict(),
         }
 
-    def checkpoint_metrics(self, metrics, status: str | None = None) -> None:
-        """Persist a recoverable snapshot of current metrics to meta.json."""
-        meta_update = self._metrics_meta(metrics)
-        if status is not None:
-            meta_update["status"] = status
-        self.write_meta(**meta_update)
-
     @staticmethod
     def child_dir(parent_dir: Path | str) -> Path:
         """Create and return a new child session directory under parent_dir."""

@@ -155,30 +155,7 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
     ]
 
 
-async def test_engine_checkpoints_metrics_before_first_model_response(session):
-    client = DummyClient([])
-    prompt_started = asyncio.Event()
-
-    async def block_prompt(**kwargs):
-        prompt_started.set()
-        await asyncio.Future()
-
-    client.create = block_prompt
-    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
-    pending = asyncio.create_task(engine.prompt("wait"))
-    await prompt_started.wait()
-
-    meta = json.loads((Path(session.dir) / "meta.json").read_text())
-    assert meta["status"] == "running"
-    assert meta["metrics"]["num_ptc_calls_python"] == 0
-
-    pending.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await pending
-    engine.close()
-
-
-async def test_latest_cancelled_prompt_finalizes_as_incomplete(session):
+async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
     client = DummyClient([DummyMessage(content="first")])
     engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
     await engine.prompt("one")
@@ -198,8 +175,8 @@ async def test_latest_cancelled_prompt_finalizes_as_incomplete(session):
     engine.close()
 
     meta = json.loads((Path(session.dir) / "meta.json").read_text())
-    assert meta["status"] == "incomplete"
-    assert meta["metrics"]["stop_reason"] == "cancelled"
+    assert meta["status"] == "running"
+    assert "answer_preview" not in meta
 
 
 async def test_depth_limit_is_a_completed_result(monkeypatch, session):
@@ -216,7 +193,7 @@ async def test_depth_limit_is_a_completed_result(monkeypatch, session):
     assert meta["metrics"]["stop_reason"] == "depth_limit"
 
 
-async def test_compaction_counts_seed_and_checkpoints_immediately(session):
+async def test_compaction_counts_seed_prompt(session):
     client = DummyClient([DummyMessage(content="summary")])
     engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
     messages = [
@@ -227,14 +204,11 @@ async def test_compaction_counts_seed_and_checkpoints_immediately(session):
 
     try:
         await engine._compact_branch(messages, turn=0, active_tools=[])
-        meta = json.loads((Path(session.dir) / "meta.json").read_text())
     finally:
         engine.close()
 
-    assert meta["metrics"]["num_compactions"] == 1
-    assert meta["metrics"]["compaction_chars_dropped_mean"] == len(
-        "original promptwork"
-    )
+    assert engine._metrics.num_compactions == 1
+    assert engine._metrics.compaction_chars_dropped_mean == len("original promptwork")
 
 
 async def test_engine_failed_prompt_can_be_retried(session):

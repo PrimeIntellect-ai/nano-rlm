@@ -340,7 +340,6 @@ class RLMEngine:
             prompt_preview=prompt[:200],
             cwd=self.cwd,
         )
-        self.session.checkpoint_metrics(self._metrics)
 
         # Skills the kernel pre-imports, all written into the session dir (the REPL and prompt
         # read them back from there): enabled built-in skills (rlm.skills) + any wired MCP tools
@@ -518,7 +517,6 @@ class RLMEngine:
                     if settled_result is not None:
                         for event in settled_result.metric_events:
                             self._metrics.record(event)
-                        self.session.checkpoint_metrics(self._metrics)
                     raise
             duration = time.time() - t0
             for event in tool_result.metric_events:
@@ -540,8 +538,6 @@ class RLMEngine:
 
             # Detect new child sessions spawned via rlm()
             self._detect_new_children()
-
-            self.session.checkpoint_metrics(self._metrics)
 
             # Auto-compaction: if this turn's prompt_tokens reached the
             # configured threshold, ask the model for a handoff summary and
@@ -599,7 +595,6 @@ class RLMEngine:
                     metrics=self._metrics,
                 )
             else:
-                self.session.checkpoint_metrics(self._metrics, status="incomplete")
                 self.session.close()
 
     async def _compact_branch(
@@ -685,7 +680,6 @@ class RLMEngine:
         )
         self._branch_start_turn = turn + 1
         self._metrics.turns_since_last_compaction = 0
-        self.session.checkpoint_metrics(self._metrics)
 
     def _load_system_prompt(
         self, messages_path: str, active_tools: list[BuiltinTool]

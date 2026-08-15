@@ -1,6 +1,4 @@
-"""Sub-agent metric aggregation and recoverable metric snapshots."""
-
-import json
+"""Sub-agent metric aggregation."""
 
 from rlm.session import Session
 from rlm.types import ProgrammaticToolCallStats, RLMMetrics
@@ -45,29 +43,6 @@ def test_ptc_log_skips_non_object_json(tmp_path):
 
     assert stats.python_total == 1
     assert stats.by_tool_python == {"search": 1}
-
-
-def test_checkpoint_metrics_persists_midrun(tmp_path):
-    s = Session(tmp_path / "session")
-    metrics = RLMMetrics()
-    metrics._sub_rlm_enabled = True
-    child = s.dir / "sub-cccc"
-    child.mkdir()
-    _write_calls(child, n_python=2)
-
-    s.checkpoint_metrics(metrics, status="incomplete")
-
-    meta = json.loads((s.dir / "meta.json").read_text())
-    assert meta["status"] == "incomplete"
-    assert meta["metrics"]["sub_rlm_num_calls"] == 1
-    assert meta["metrics"]["sub_rlm_num_ptc_calls_python"] == 2
-    assert meta["programmatic_tool_call_stats"]["python_total"] == 2
-
-    # finalize afterwards still wins with the authoritative version
-    s.finalize("answer", turns=3, metrics=metrics)
-    meta = json.loads((s.dir / "meta.json").read_text())
-    assert meta["status"] == "done"
-    assert meta["metrics"]["sub_rlm_num_ptc_calls_python"] == 2
 
 
 def test_sub_rlm_keys_gated_when_disabled(tmp_path):
