@@ -156,6 +156,7 @@ class RLMMetrics:
     # they run within a single tool call and never reach the API proxy).
     num_ptc_calls_python: int = 0
     num_ptc_calls_bash: int = 0
+    has_ptc: int = 0  # 1 if the root or any descendant made a PTC attempt
     sub_rlm_num_calls: int = 0
     has_sub_rlm: int = 0
     sub_rlm_num_ptc_calls_python: int = 0
@@ -208,6 +209,18 @@ class RLMMetrics:
                 self._ipython_input_loc_total / self._ipython_call_count
             )
         self.has_compacted = 1 if self.num_compactions > 0 else 0
+        self.has_ptc = (
+            1
+            if any(
+                (
+                    self.num_ptc_calls_python,
+                    self.num_ptc_calls_bash,
+                    self.sub_rlm_num_ptc_calls_python,
+                    self.sub_rlm_num_ptc_calls_bash,
+                )
+            )
+            else 0
+        )
         self.has_sub_rlm = 1 if self.sub_rlm_num_calls > 0 else 0
         if self.num_compactions:
             self.turns_between_compactions_mean = (
