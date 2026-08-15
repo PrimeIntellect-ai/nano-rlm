@@ -45,9 +45,14 @@ def test_ptc_log_skips_non_object_json(tmp_path):
     assert stats.by_tool_python == {"search": 1}
 
 
-def test_sub_rlm_keys_gated_when_disabled(tmp_path):
+def test_sub_rlm_metrics_are_derived_and_gated():
     metrics = RLMMetrics()  # _sub_rlm_enabled defaults False (max_depth == 0)
     keys = metrics.to_dict().keys()
     assert not any(k.startswith("sub_rlm_") for k in keys)
+    assert "has_sub_rlm" not in keys
+
     metrics._sub_rlm_enabled = True
-    assert "sub_rlm_num_calls" in metrics.to_dict()
+    assert metrics.to_dict()["has_sub_rlm"] == 0
+
+    metrics.sub_rlm_num_calls = 1
+    assert metrics.to_dict()["has_sub_rlm"] == 1

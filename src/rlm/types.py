@@ -157,6 +157,7 @@ class RLMMetrics:
     num_ptc_calls_python: int = 0
     num_ptc_calls_bash: int = 0
     sub_rlm_num_calls: int = 0
+    has_sub_rlm: int = 0
     sub_rlm_num_ptc_calls_python: int = 0
     sub_rlm_num_ptc_calls_bash: int = 0
 
@@ -207,6 +208,7 @@ class RLMMetrics:
                 self._ipython_input_loc_total / self._ipython_call_count
             )
         self.has_compacted = 1 if self.num_compactions > 0 else 0
+        self.has_sub_rlm = 1 if self.sub_rlm_num_calls > 0 else 0
         if self.num_compactions:
             self.turns_between_compactions_mean = (
                 self._turns_between_compactions_total / self.num_compactions
@@ -225,7 +227,10 @@ class RLMMetrics:
             key: value
             for key, value in asdict(self).items()
             if not key.startswith("_")
-            and (sub_rlm_enabled or not key.startswith("sub_rlm_"))
+            and (
+                sub_rlm_enabled
+                or (not key.startswith("sub_rlm_") and key != "has_sub_rlm")
+            )
         }
 
 
