@@ -56,3 +56,16 @@ def test_sub_rlm_metrics_are_derived_and_gated():
 
     metrics.sub_rlm_num_calls = 1
     assert metrics.to_dict()["has_sub_rlm"] == 1
+
+
+def test_has_ptc_covers_direct_and_descendant_calls():
+    metrics = RLMMetrics()
+    assert metrics.to_dict()["has_ptc"] == 0
+
+    metrics.num_ptc_calls_python = 1
+    assert metrics.to_dict()["has_ptc"] == 1
+
+    metrics.num_ptc_calls_python = 0
+    metrics._sub_rlm_enabled = True
+    metrics.sub_rlm_num_ptc_calls_bash = 1
+    assert metrics.to_dict()["has_ptc"] == 1
