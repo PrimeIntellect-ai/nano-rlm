@@ -36,14 +36,13 @@ def get_installed_skills() -> list[str]:
 
 
 def discover_skills(session_dir: Path | None = None) -> list[str]:
-    """All skill module names the kernel should pre-import — from two sources.
-
-    Pip-installed ``rlm-skill-*`` distributions are found via distribution metadata, so they
-    resolve wherever they were installed from (``/task/rlm-skills``, the test venv, ...) and
-    keep their shell CLIs. MCP tool skills are flat modules generated into ``session_dir``
-    (see ``rlm.mcp``); these can't be discovered the same way, so the dir is walked directly.
-    """
-    skills = get_installed_skills()
-    if session_dir is not None:
-        skills += list_skill_modules(session_dir)
-    return skills
+    """Return unambiguous installed and session-local skill module names."""
+    installed = get_installed_skills()
+    generated = list_skill_modules(session_dir) if session_dir is not None else []
+    collisions = sorted(set(installed) & set(generated))
+    if collisions:
+        names = ", ".join(collisions)
+        raise ValueError(
+            f"skill name collision between installed and generated: {names}"
+        )
+    return [*installed, *generated]

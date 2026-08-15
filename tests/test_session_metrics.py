@@ -1,16 +1,9 @@
-"""Sub-agent metric aggregation + mid-run checkpointing (see PR: subagent metrics fix).
-
-Regression context: child stats used to be read from each child's meta.json, which
-only exists after the child's own finalize() — sub-agents cut off mid-run (parent
-rollout ended, gather cancelled, crash) silently contributed zero. And the parent's
-metrics only reached meta.json via finalize(), so a killed rollout lost the whole
-metric family.
-"""
+"""Sub-agent metric aggregation and recoverable metric snapshots."""
 
 import json
 
 from rlm.session import Session
-from rlm.types import RLMMetrics
+from rlm.types import ProgrammaticToolCallStats, RLMMetrics
 
 
 def _write_calls(session_dir, n_python, n_bash=0):
@@ -42,6 +35,16 @@ def test_aggregate_counts_child_with_no_calls(tmp_path):
     agg = s.aggregate_child_metrics()
     assert agg.num_sessions == 1
     assert agg.tool_call_stats.python_total == 0
+
+
+def test_ptc_log_skips_non_object_json(tmp_path):
+    log = tmp_path / "programmatic_tool_calls.jsonl"
+    log.write_text('null\n[]\n"text"\n{"tool": "search", "source": "python"}\n')
+
+    stats = ProgrammaticToolCallStats.from_log(log)
+
+    assert stats.python_total == 1
+    assert stats.by_tool_python == {"search": 1}
 
 
 def test_checkpoint_metrics_persists_midrun(tmp_path):

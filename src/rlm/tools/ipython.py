@@ -161,9 +161,15 @@ class IPythonREPL:
             "-f",
             "{connection_file}",
         ]
+        kernel_env = {**os.environ, **self.env}
+        launcher = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
+        launcher_dir = os.path.dirname(os.path.abspath(launcher))
+        path_entries = kernel_env.get("PATH", "").split(os.pathsep)
+        if launcher_dir not in path_entries:
+            kernel_env["PATH"] = os.pathsep.join([launcher_dir, *path_entries])
         self._km.start_kernel(
             cwd=self.cwd,
-            env={**os.environ, **self.env},
+            env=kernel_env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

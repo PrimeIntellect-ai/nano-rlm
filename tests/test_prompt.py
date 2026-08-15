@@ -22,6 +22,7 @@ def _prompt(
     active_tools: list[_Tool],
     *,
     installed_skills: list[str] | None = None,
+    cli_skills: list[str] | None = None,
 ) -> str:
     return build_system_prompt(
         "/repo",
@@ -30,6 +31,7 @@ def _prompt(
         "/repo/.rlm/messages.jsonl",
         allow_recursion=False,
         active_tools=active_tools,
+        cli_skills=cli_skills,
     )
 
 
@@ -90,3 +92,14 @@ def test_search_skill_prompt_included_only_when_search_is_installed():
     assert SEARCH_SKILL_PROMPT not in _prompt(
         [_Tool("ipython")], installed_skills=["search_docs"]
     )
+
+
+def test_only_cli_skills_are_advertised_as_shell_commands():
+    prompt = _prompt(
+        [_Tool("ipython")],
+        installed_skills=["installed", "generated"],
+        cli_skills=["installed"],
+    )
+
+    assert "Skills with shell commands: `installed`" in prompt
+    assert "`generated` --help" not in prompt

@@ -14,6 +14,11 @@ Kernel startup is ~700ms per test; keep the set here small.
 
 from __future__ import annotations
 
+import os
+import sys
+
+import pytest
+
 from conftest import (
     DummyClient,
     DummyMessage,
@@ -23,6 +28,7 @@ from conftest import (
 )
 
 from rlm.engine import RLMEngine
+from rlm.tools.skills import discover_skills
 
 
 async def test_python_skill_valid(session):
@@ -46,7 +52,7 @@ async def test_python_skill_valid(session):
     assert result.answer == "ok"
 
 
-async def test_bash_skill_valid(session):
+async def test_bash_skill_valid(session, monkeypatch, tmp_path):
     """Bash form: ``!say ...`` in an ipython tool call runs the skill CLI via IPython's shell escape."""
     prompt = "say hello"
     messages = [
@@ -55,6 +61,20 @@ async def test_bash_skill_valid(session):
     ]
 
     client = DummyClient(messages)
+    bin_dir = os.path.dirname(sys.executable)
+    launcher_dir = tmp_path / "launcher-bin"
+    launcher_dir.mkdir()
+    (launcher_dir / "rlm").symlink_to(sys.executable)
+    (launcher_dir / "say").symlink_to(os.path.join(bin_dir, "say"))
+    monkeypatch.setenv(
+        "PATH",
+        os.pathsep.join(
+            p
+            for p in os.environ["PATH"].split(os.pathsep)
+            if p not in {bin_dir, str(launcher_dir)}
+        ),
+    )
+    monkeypatch.setattr(sys, "argv", [str(launcher_dir / "rlm")])
     engine = RLMEngine(client=client, session=session)  # type: ignore
 
     result = await engine.run(prompt)
@@ -63,6 +83,14 @@ async def test_bash_skill_valid(session):
     show_tool_result(output)
     assert "hello" in output
     assert result.answer == "ok"
+
+
+def test_discover_skills_rejects_installed_generated_collision(monkeypatch, tmp_path):
+    monkeypatch.setattr("rlm.tools.skills.get_installed_skills", lambda: ["search"])
+    (tmp_path / "search.py").write_text("async def run(): pass\n")
+
+    with pytest.raises(ValueError, match="skill name collision.*search"):
+        discover_skills(tmp_path)
 
 
 async def test_python_skill_invalid_args(session):

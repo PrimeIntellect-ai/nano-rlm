@@ -38,7 +38,7 @@ BuiltinMetricEvent = IpythonExecuted | CompactionApplied
 
 @dataclass
 class ProgrammaticToolCallStats:
-    """Programmatic tool-call counts (skill CLIs invoked from the ipython REPL)."""
+    """Programmatic tool-call invocation attempts from the IPython REPL."""
 
     python_total: int = 0
     bash_total: int = 0
@@ -62,6 +62,8 @@ class ProgrammaticToolCallStats:
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
                     continue
                 tool = entry.get("tool")
                 source = entry.get("source")
@@ -158,7 +160,7 @@ class RLMMetrics:
     sub_rlm_num_ptc_calls_python: int = 0
     sub_rlm_num_ptc_calls_bash: int = 0
 
-    stop_reason: str = ""  # "done", "token_budget", "request_too_large", "cancelled"
+    stop_reason: str = ""
 
     # Internal counters for derived metrics
     _ipython_call_count: int = field(default=0, repr=False)

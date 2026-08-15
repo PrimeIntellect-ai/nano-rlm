@@ -68,16 +68,7 @@ class Session:
         self.log({"type": "sub_spawn", "child_dir": child_name, "command": command})
 
     def aggregate_child_metrics(self) -> ChildSessionAggregate:
-        """Aggregate programmatic tool-call stats across all recursive descendants.
-
-        Counts from each descendant's per-call ``programmatic_tool_calls.jsonl``
-        rather than its ``meta.json``: meta stats are only written by a child's
-        own ``finalize()``, so a sub-agent that never completes (parent rollout
-        ended first, ``asyncio.gather`` cancelled, crash) would silently drop
-        every call it made. The per-call log is appended from inside the kernel
-        wrapper and survives any exit; ``from_log`` already tolerates
-        partially-written lines.
-        """
+        """Aggregate call logs across all recursive descendant sessions."""
         aggregate = ChildSessionAggregate()
         for child_dir in sorted(p for p in self.dir.rglob("sub-*") if p.is_dir()):
             aggregate.num_sessions += 1
@@ -123,13 +114,7 @@ class Session:
         }
 
     def checkpoint_metrics(self, metrics, status: str | None = None) -> None:
-        """Persist current metrics to meta.json mid-run.
-
-        Called once per turn so a rollout killed at any point (harness RPC
-        failure, timeout, SIGKILL) still leaves its latest metrics on disk —
-        ``finalize()`` only runs on a clean exit, which is exactly when
-        metrics are least at risk.
-        """
+        """Persist a recoverable snapshot of current metrics to meta.json."""
         meta_update = self._metrics_meta(metrics)
         if status is not None:
             meta_update["status"] = status

@@ -32,6 +32,7 @@ from rlm.tools import (
     discover_skills,
     get_active_builtin_tools,
     get_builtin_tool,
+    get_installed_skills,
 )
 from rlm.types import CompactionApplied, RLMMetrics, RLMResult, TokenUsage
 
@@ -259,12 +260,18 @@ class RLMEngine:
         if self._closed:
             raise RuntimeError("RLM engine is closed")
 
-        # Check depth limit
         if self.depth > self.max_depth:
+            answer = f"[depth limit {self.max_depth} reached, cannot start]"
+            self._metrics.stop_reason = "depth_limit"
+            self._last_answer = answer
+            self._has_result = True
             return RLMResult(
-                answer=f"[depth limit {self.max_depth} reached, cannot start]",
+                answer=answer,
                 turns=0,
+                session_dir=self.session.dir if self.session is not None else None,
             )
+
+        self._has_result = False
 
         if not self._started:
             await self._start(prompt)
@@ -333,6 +340,7 @@ class RLMEngine:
             prompt_preview=prompt[:200],
             cwd=self.cwd,
         )
+        self.session.checkpoint_metrics(self._metrics)
 
         # Skills the kernel pre-imports, all written into the session dir (the REPL and prompt
         # read them back from there): enabled built-in skills (rlm.skills) + any wired MCP tools
@@ -487,12 +495,13 @@ class RLMEngine:
                     tool_result = await asyncio.shield(tool_task)
                 except asyncio.CancelledError:
                     repl = self._repl
+                    settled_result = None
                     if repl is not None:
                         repl.interrupt()
                     try:
                         while True:
                             try:
-                                await asyncio.shield(tool_task)
+                                settled_result = await asyncio.shield(tool_task)
                             except asyncio.CancelledError:
                                 if repl is not None:
                                     repl.interrupt()
@@ -506,6 +515,10 @@ class RLMEngine:
                     finally:
                         if repl is not None:
                             repl.finish_interrupt()
+                    if settled_result is not None:
+                        for event in settled_result.metric_events:
+                            self._metrics.record(event)
+                        self.session.checkpoint_metrics(self._metrics)
                     raise
             duration = time.time() - t0
             for event in tool_result.metric_events:
@@ -528,9 +541,6 @@ class RLMEngine:
             # Detect new child sessions spawned via rlm()
             self._detect_new_children()
 
-            # Checkpoint metrics every turn: finalize() only runs on a clean
-            # exit, so without this a rollout killed mid-run (harness RPC
-            # failure, timeout, SIGKILL) loses the whole metric family.
             self.session.checkpoint_metrics(self._metrics)
 
             # Auto-compaction: if this turn's prompt_tokens reached the
@@ -571,28 +581,26 @@ class RLMEngine:
         if self._closed:
             return
         self._closed = True
-        try:
-            if self.session is not None:
-                if self._has_result:
-                    self.session.finalize(
-                        self._last_answer,
-                        usage={
-                            "prompt_tokens": self._total_usage.prompt_tokens,
-                            "completion_tokens": self._total_usage.completion_tokens,
-                        },
-                        turns=self._turn,
-                        metrics=self._metrics,
-                    )
-                else:
-                    # No result — persist whatever metrics accumulated before
-                    # closing, marked incomplete, instead of dropping them.
-                    self.session.checkpoint_metrics(
-                        self._metrics, status="incomplete"
-                    )
-                    self.session.close()
-        finally:
-            if self._repl is not None:
+        if self._repl is not None:
+            try:
                 self._repl.shutdown()
+            except Exception:
+                logger.warning("rlm: failed to stop IPython kernel", exc_info=True)
+            self._repl = None
+        if self.session is not None:
+            if self._has_result:
+                self.session.finalize(
+                    self._last_answer,
+                    usage={
+                        "prompt_tokens": self._total_usage.prompt_tokens,
+                        "completion_tokens": self._total_usage.completion_tokens,
+                    },
+                    turns=self._turn,
+                    metrics=self._metrics,
+                )
+            else:
+                self.session.checkpoint_metrics(self._metrics, status="incomplete")
+                self.session.close()
 
     async def _compact_branch(
         self, messages: list[dict], turn: int, active_tools: list[dict]
@@ -618,7 +626,7 @@ class RLMEngine:
         # checkpoint prompt — otherwise the prompt's own chars get
         # counted as "dropped conversation content", inflating the
         # metric and the session log's dropped_chars field.
-        dropped_chars = _count_messages_chars(messages[2:])
+        dropped_chars = _count_messages_chars(messages[1:])
         turns_since_last = turn + 1 - self._branch_start_turn
 
         # Append the checkpoint prompt and ask the model for a text-only
@@ -677,6 +685,7 @@ class RLMEngine:
         )
         self._branch_start_turn = turn + 1
         self._metrics.turns_since_last_compaction = 0
+        self.session.checkpoint_metrics(self._metrics)
 
     def _load_system_prompt(
         self, messages_path: str, active_tools: list[BuiltinTool]
@@ -690,6 +699,7 @@ class RLMEngine:
             messages_path,
             allow_recursion=self.depth < self.max_depth,
             active_tools=active_tools,
+            cli_skills=get_installed_skills(),
         )
         if self.append_to_system_prompt:
             system_prompt += "\n\n" + self.append_to_system_prompt

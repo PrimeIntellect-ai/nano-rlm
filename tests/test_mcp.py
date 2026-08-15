@@ -11,9 +11,12 @@ import importlib
 import inspect
 import json
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 from mcp.types import Tool
+import pytest
 
 from rlm import mcp
 
@@ -95,6 +98,26 @@ def test_skill_name():
     assert mcp._skill_name("tools", "add_event") == "tools_add_event"
     assert mcp._skill_name("web", "search.run") == "web_search_run"
     assert mcp._skill_name("", "2fa") == "_2fa"
+
+
+async def test_discover_tools_rejects_normalized_name_collision(monkeypatch):
+    class FakeSession:
+        async def initialize(self):
+            pass
+
+        async def list_tools(self):
+            return SimpleNamespace(
+                tools=[Tool(name="search", description="", inputSchema={})]
+            )
+
+    @asynccontextmanager
+    async def fake_client_session(server, cwd=None):
+        yield FakeSession()
+
+    monkeypatch.setattr(mcp, "_client_session", fake_client_session)
+
+    with pytest.raises(ValueError, match="MCP tool name collision.*a_b_search"):
+        await mcp.discover_tools({"a-b": "one", "a_b": "two"})
 
 
 def test_build_signature():
