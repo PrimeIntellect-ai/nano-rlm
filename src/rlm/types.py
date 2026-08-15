@@ -117,6 +117,8 @@ class ChildSessionAggregate:
     tool_call_stats: ProgrammaticToolCallStats = field(
         default_factory=ProgrammaticToolCallStats
     )
+    num_sessions: int = 0
+    """Recursive count of descendant sub-agent sessions (spawned via rlm())."""
 
     def absorb(self, tool_stats: ProgrammaticToolCallStats) -> None:
         """Combine a child session's stats into this aggregate."""
@@ -152,6 +154,7 @@ class RLMMetrics:
     # they run within a single tool call and never reach the API proxy).
     num_ptc_calls_python: int = 0
     num_ptc_calls_bash: int = 0
+    sub_rlm_num_calls: int = 0
     sub_rlm_num_ptc_calls_python: int = 0
     sub_rlm_num_ptc_calls_bash: int = 0
 
@@ -170,9 +173,11 @@ class RLMMetrics:
         self,
         direct: ProgrammaticToolCallStats,
         child: ProgrammaticToolCallStats,
+        num_child_sessions: int = 0,
     ) -> None:
         self.num_ptc_calls_python = direct.python_total
         self.num_ptc_calls_bash = direct.bash_total
+        self.sub_rlm_num_calls = num_child_sessions
         self.sub_rlm_num_ptc_calls_python = child.python_total
         self.sub_rlm_num_ptc_calls_bash = child.bash_total
 

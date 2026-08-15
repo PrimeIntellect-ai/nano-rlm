@@ -528,6 +528,11 @@ class RLMEngine:
             # Detect new child sessions spawned via rlm()
             self._detect_new_children()
 
+            # Checkpoint metrics every turn: finalize() only runs on a clean
+            # exit, so without this a rollout killed mid-run (harness RPC
+            # failure, timeout, SIGKILL) loses the whole metric family.
+            self.session.checkpoint_metrics(self._metrics)
+
             # Auto-compaction: if this turn's prompt_tokens reached the
             # configured threshold, ask the model for a handoff summary and
             # rebuild the branch around it. Fires at most once per loop
@@ -579,6 +584,11 @@ class RLMEngine:
                         metrics=self._metrics,
                     )
                 else:
+                    # No result — persist whatever metrics accumulated before
+                    # closing, marked incomplete, instead of dropping them.
+                    self.session.checkpoint_metrics(
+                        self._metrics, status="incomplete"
+                    )
                     self.session.close()
         finally:
             if self._repl is not None:

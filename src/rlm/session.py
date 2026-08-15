@@ -68,16 +68,24 @@ class Session:
         self.log({"type": "sub_spawn", "child_dir": child_name, "command": command})
 
     def aggregate_child_metrics(self) -> ChildSessionAggregate:
-        """Walk sub-*/meta.json and bundle their programmatic tool-call stats."""
+        """Aggregate programmatic tool-call stats across all recursive descendants.
+
+        Counts from each descendant's per-call ``programmatic_tool_calls.jsonl``
+        rather than its ``meta.json``: meta stats are only written by a child's
+        own ``finalize()``, so a sub-agent that never completes (parent rollout
+        ended first, ``asyncio.gather`` cancelled, crash) would silently drop
+        every call it made. The per-call log is appended from inside the kernel
+        wrapper and survives any exit; ``from_log`` already tolerates
+        partially-written lines.
+        """
         aggregate = ChildSessionAggregate()
-        for child_dir in self.dir.glob("sub-*"):
-            meta_path = child_dir / "meta.json"
-            try:
-                with open(meta_path) as f:
-                    meta = json.load(f)
-            except FileNotFoundError:
-                continue
-            aggregate.absorb(ProgrammaticToolCallStats.from_meta(meta))
+        for child_dir in sorted(p for p in self.dir.rglob("sub-*") if p.is_dir()):
+            aggregate.num_sessions += 1
+            aggregate.absorb(
+                ProgrammaticToolCallStats.from_log(
+                    child_dir / "programmatic_tool_calls.jsonl"
+                )
+            )
         return aggregate
 
     def finalize(
@@ -94,21 +102,38 @@ class Session:
         if usage:
             meta_update["usage"] = usage
         if metrics is not None:
-            direct_tool_stats = ProgrammaticToolCallStats.from_log(
-                self.dir / "programmatic_tool_calls.jsonl"
-            )
-            child = self.aggregate_child_metrics()
-
-            metrics.apply_programmatic_tool_call_stats(
-                direct_tool_stats, child.tool_call_stats
-            )
-
-            meta_update["metrics"] = metrics.to_dict()
-            meta_update["programmatic_tool_call_stats"] = direct_tool_stats.merge(
-                child.tool_call_stats
-            ).to_dict()
+            meta_update.update(self._metrics_meta(metrics))
         self.write_meta(**meta_update)
         self._msg_file.close()
+
+    def _metrics_meta(self, metrics) -> dict:
+        """Assemble the metrics fields for meta.json from live stats on disk."""
+        direct_tool_stats = ProgrammaticToolCallStats.from_log(
+            self.dir / "programmatic_tool_calls.jsonl"
+        )
+        child = self.aggregate_child_metrics()
+        metrics.apply_programmatic_tool_call_stats(
+            direct_tool_stats, child.tool_call_stats, child.num_sessions
+        )
+        return {
+            "metrics": metrics.to_dict(),
+            "programmatic_tool_call_stats": direct_tool_stats.merge(
+                child.tool_call_stats
+            ).to_dict(),
+        }
+
+    def checkpoint_metrics(self, metrics, status: str | None = None) -> None:
+        """Persist current metrics to meta.json mid-run.
+
+        Called once per turn so a rollout killed at any point (harness RPC
+        failure, timeout, SIGKILL) still leaves its latest metrics on disk —
+        ``finalize()`` only runs on a clean exit, which is exactly when
+        metrics are least at risk.
+        """
+        meta_update = self._metrics_meta(metrics)
+        if status is not None:
+            meta_update["status"] = status
+        self.write_meta(**meta_update)
 
     @staticmethod
     def child_dir(parent_dir: Path | str) -> Path:
