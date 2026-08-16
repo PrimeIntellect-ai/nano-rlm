@@ -133,10 +133,16 @@ class IPythonREPL:
         cwd: str,
         session: "Session | None" = None,
         env: dict[str, str] | None = None,
+        depth: int | None = None,
+        max_depth: int | None = None,
     ):
         self.cwd = cwd
         self.session = session
         self.env = env or {}
+        self.depth = int(os.environ.get("RLM_DEPTH", "0") if depth is None else depth)
+        self.max_depth = int(
+            os.environ.get("RLM_MAX_DEPTH", "0") if max_depth is None else max_depth
+        )
         self._km = None
         self._kc = None
         self._ipc_dir = None
@@ -181,8 +187,8 @@ class IPythonREPL:
     def _inject_startup(self):
         """Set up kernel: cwd, env vars, nest_asyncio, skill pre-imports."""
         session_dir = str(self.session.dir) if self.session else None
-        depth = int(os.environ.get("RLM_DEPTH", "0"))
-        max_depth = int(os.environ.get("RLM_MAX_DEPTH", "0"))
+        depth = self.depth
+        max_depth = self.max_depth
         allow_recursion = depth < max_depth
         # Pip-installed skills + the MCP-tool modules generated into the session dir (rlm.mcp);
         # the session dir goes on the kernel's sys.path so those import by name.
@@ -251,8 +257,23 @@ def _wrap_callable(mod, log_source):
 for _name in {skill_names!r}:
     globals()[_name] = _wrap_callable(__import__(_name), 'python')
 
+def _bind_rlm_run(run):
+    async def bounded_run(prompt, **kwargs):
+        kwargs['_depth'] = {depth!r} + 1
+        kwargs['_max_depth'] = {max_depth!r}
+        kwargs['_parent_session_dir'] = {session_dir!r}
+        return await run(prompt, **kwargs)
+
+    bounded_run.__signature__ = inspect.signature(run)
+    bounded_run.__doc__ = run.__doc__
+    return bounded_run
+
+
+_rlm = _wrap_callable(__import__('rlm'), None)
+_rlm.run = _bind_rlm_run(_rlm.run)
 if {allow_recursion!r}:
-    globals()['rlm'] = _wrap_callable(__import__('rlm'), None)
+    globals()['rlm'] = _rlm
+del _bind_rlm_run, _rlm
 """
         self._execute_silent(setup_code)
 

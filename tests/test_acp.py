@@ -16,7 +16,8 @@ import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall
 from rlm.acp import RLMACPAgent
-from rlm.engine import RLMEngine
+from rlm.api import run as run_rlm
+from rlm.engine import HARD_MAX_DEPTH, RLMEngine
 from rlm.session import Session
 from rlm.types import RLMResult, TokenUsage
 
@@ -191,6 +192,37 @@ async def test_depth_limit_is_a_completed_result(monkeypatch, session):
     assert result.answer == "[depth limit 0 reached, cannot start]"
     assert meta["status"] == "done"
     assert meta["metrics"]["stop_reason"] == "depth_limit"
+
+
+async def test_explicit_recursion_context_ignores_mutated_env(monkeypatch, session):
+    monkeypatch.setenv("RLM_DEPTH", "0")
+    monkeypatch.setenv("RLM_MAX_DEPTH", "5")
+    client = DummyClient([])
+
+    result = await run_rlm(
+        "too deep",
+        _depth=2,
+        _max_depth=1,
+        _parent_session_dir=session.dir,
+        client=client,
+        session=session,
+    )
+
+    assert result.answer == "[depth limit 1 reached, cannot start]"
+    assert result.session_dir.parent == session.dir
+    assert client.calls == []
+
+
+def test_max_depth_has_a_hard_ceiling():
+    engine = RLMEngine(
+        client=DummyClient([]),  # type: ignore[arg-type]
+        depth=-1,
+        max_depth=HARD_MAX_DEPTH + 1,
+    )
+
+    assert engine.depth == 0
+    assert engine.max_depth == HARD_MAX_DEPTH
+    engine.close()
 
 
 async def test_compaction_counts_seed_prompt(session):

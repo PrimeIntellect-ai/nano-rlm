@@ -38,6 +38,8 @@ from rlm.types import CompactionApplied, RLMMetrics, RLMResult, TokenUsage
 
 logger = logging.getLogger(__name__)
 
+HARD_MAX_DEPTH = 8
+
 
 # Injected as a user message when the branch's context size reaches the
 # compaction threshold. The model's next reply is expected to be a
@@ -157,6 +159,8 @@ class RLMEngine:
         session: Session | None = None,
         client: AsyncOpenAI | None = None,
         mcp_servers: dict[str, MCPServer] | None = None,
+        depth: int | None = None,
+        max_depth: int | None = None,
     ):
         self.model = model or os.environ.get("RLM_MODEL", "openai/gpt-5-mini")
         self.cwd = cwd or os.getcwd()
@@ -187,8 +191,13 @@ class RLMEngine:
         self.append_to_system_prompt = append_to_system_prompt or os.environ.get(
             "RLM_APPEND_TO_SYSTEM_PROMPT"
         )
-        self.max_depth = int(os.environ.get("RLM_MAX_DEPTH", "0"))
-        self.depth = int(os.environ.get("RLM_DEPTH", "0"))
+        configured_max_depth = int(
+            os.environ.get("RLM_MAX_DEPTH", "0") if max_depth is None else max_depth
+        )
+        self.max_depth = max(0, min(configured_max_depth, HARD_MAX_DEPTH))
+        self.depth = max(
+            0, int(os.environ.get("RLM_DEPTH", "0") if depth is None else depth)
+        )
 
         # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
         # parse RLM_MCP_CONFIG (a standard mcpServers config).
@@ -208,7 +217,7 @@ class RLMEngine:
         _max_tok = int(os.environ.get("RLM_MAX_TOKENS", "0"))
         self.max_tokens = _max_tok if _max_tok > 0 else None
 
-        self.client = client or make_client()
+        self.client = client or make_client(depth=self.depth)
         self.session = session
         self._total_usage = TokenUsage()
         self._last_prompt_tokens = 0
@@ -360,7 +369,13 @@ class RLMEngine:
             if self.mcp_servers
             else None
         )
-        self._repl = IPythonREPL(cwd=self.cwd, session=self.session, env=repl_env)
+        self._repl = IPythonREPL(
+            cwd=self.cwd,
+            session=self.session,
+            env=repl_env,
+            depth=self.depth,
+            max_depth=self.max_depth,
+        )
         try:
             self._repl.start()
             self._known_children = {p.name for p in self.session.dir.glob("sub-*")}
