@@ -92,3 +92,33 @@ def test_ipython_kernel_does_not_inherit_parent_stdio(session, capfd):
     assert captured.out == ""
     assert captured.err == ""
     assert result.strip() == "4 14"
+
+
+def _ipython_ctx():
+    from rlm.tools.base import ToolContext
+    from rlm.types import RLMMetrics, TokenUsage
+
+    return ToolContext(
+        messages=[],
+        metrics=RLMMetrics(),
+        total_usage=TokenUsage(),
+        last_prompt_tokens=0,
+        exec_timeout=30,
+        repl=None,  # error paths return before touching the REPL
+    )
+
+
+def test_ipython_missing_code_key_errors_not_noop():
+    """A tool call under the wrong key (e.g. Laguna's 'cmd') must error loudly."""
+    from rlm.tools.ipython import IpythonTool
+
+    out = IpythonTool().execute({"cmd": "print(1)"}, _ipython_ctx())
+    assert "Error" in out.content and "code" in out.content
+    assert "'cmd'" in out.content
+
+
+def test_ipython_empty_code_errors():
+    from rlm.tools.ipython import IpythonTool
+
+    out = IpythonTool().execute({"code": ""}, _ipython_ctx())
+    assert "Error" in out.content and "code" in out.content

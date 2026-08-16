@@ -74,6 +74,19 @@ class IpythonTool:
         return schema
 
     def execute(self, args: dict[str, Any], context: ToolContext) -> ToolOutcome:
+        # A missing "code" key used to fall through to "" and execute nothing
+        # silently — the model would then hit NameErrors on state it thought it
+        # created. Laguna in particular emits the arg under "cmd". Turn any such
+        # call into a loud, learnable error instead of a no-op.
+        if "code" not in args or args.get("code") in (None, ""):
+            wrong = ", ".join(repr(k) for k in args if k != "timeout") or "none"
+            return ToolOutcome(
+                content=(
+                    "Error: the ipython tool requires a non-empty 'code' argument; "
+                    f"got keys: {wrong}. Pass your Python under the 'code' key."
+                ),
+                metric_events=[IpythonExecuted(input_chars=0, input_loc=0)],
+            )
         code = args.get("code", "")
         if not isinstance(code, str):
             code = str(code)
