@@ -1,8 +1,6 @@
-# rlm - training
+# nano-rlm
 
-⚠️ this is a training only harness, only use this to train on agentic task using verifiers 
-
-A minimal CLI coding agent with a persistent IPython execution environment and optional recursive sub-agents.
+A minimal CLI coding agent with a persistent IPython execution environment and optional recursive sub-agents. For a full-fledged coding agent built on the same RLM principles, see [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
 The model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, shell commands via `!command`, and multi-line shell scripts via `%%bash`. The tool set is not configurable. File edits, shell work, and orchestration all go through it.
 
@@ -15,8 +13,8 @@ Inside the IPython session, a callable `rlm` is pre-injected into the namespace.
 ## Install
 
 ```bash
-git clone https://github.com/PrimeIntellect-ai/rlm.git
-cd rlm
+git clone https://github.com/PrimeIntellect-ai/nano-rlm.git
+cd nano-rlm
 uv sync
 source .venv/bin/activate
 ```
