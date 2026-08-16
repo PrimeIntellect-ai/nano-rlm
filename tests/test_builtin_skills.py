@@ -68,3 +68,27 @@ def test_search_format_results():
 
 def test_search_format_results_empty():
     assert format_results([], "q") == "No results returned for query: q"
+
+
+def test_fetch_enable_writes_stub(tmp_path):
+    from rlm.skills import available_builtin_skills, enable_builtin_skills
+
+    assert "fetch" in available_builtin_skills()
+    assert enable_builtin_skills(["fetch"], tmp_path) == ["fetch"]
+    assert (tmp_path / "fetch.py").read_text() == "from rlm.skills.fetch import run\n"
+
+
+def test_fetch_html_to_text_strips_markup():
+    from rlm.skills.fetch import _html_to_text
+
+    html = "<html><head><style>x{}</style></head><body><h1>T</h1><p>Hello &amp; world</p><script>bad()</script><p>Line2</p></body></html>"
+    out = _html_to_text(html)
+    assert "Hello & world" in out and "Line2" in out
+    assert "bad()" not in out and "<" not in out
+
+
+async def test_fetch_rejects_non_http():
+    from rlm.skills.fetch import run as fetch
+
+    out = await fetch(url="ftp://example.com/x")
+    assert out.startswith("Error") and "http" in out
