@@ -67,7 +67,9 @@ class Session:
     def log_sub_spawn(self, child_name: str, command: str):
         self.log({"type": "sub_spawn", "child_dir": child_name, "command": command})
 
-    def aggregate_child_metrics(self) -> ChildSessionAggregate:
+    def aggregate_child_metrics(
+        self, field: str = "programmatic_tool_call_stats"
+    ) -> ChildSessionAggregate:
         """Walk sub-*/meta.json and bundle their programmatic tool-call stats."""
         aggregate = ChildSessionAggregate()
         for child_dir in self.dir.glob("sub-*"):
@@ -77,11 +79,17 @@ class Session:
                     meta = json.load(f)
             except FileNotFoundError:
                 continue
-            aggregate.absorb(ProgrammaticToolCallStats.from_meta(meta))
+            aggregate.absorb(ProgrammaticToolCallStats.from_meta(meta, field))
         return aggregate
 
     def finalize(
-        self, answer: str, usage: dict | None = None, turns: int = 0, metrics=None
+        self,
+        answer: str,
+        usage: dict | None = None,
+        turns: int = 0,
+        metrics=None,
+        trusted_direct_tool_stats: ProgrammaticToolCallStats | None = None,
+        trusted_child_tool_stats: ProgrammaticToolCallStats | None = None,
     ):
         entry = {"type": "done", "answer": answer[:1000]}
         if usage:
@@ -94,19 +102,33 @@ class Session:
         if usage:
             meta_update["usage"] = usage
         if metrics is not None:
-            direct_tool_stats = ProgrammaticToolCallStats.from_log(
+            local_direct_tool_stats = ProgrammaticToolCallStats.from_log(
                 self.dir / "programmatic_tool_calls.jsonl"
             )
-            child = self.aggregate_child_metrics()
+            local_child_tool_stats = self.aggregate_child_metrics(
+                "local_programmatic_tool_call_stats"
+            ).tool_call_stats
+            direct_tool_stats = local_direct_tool_stats
+            if trusted_direct_tool_stats is not None:
+                direct_tool_stats = direct_tool_stats.merge(trusted_direct_tool_stats)
+            if trusted_child_tool_stats is not None:
+                child_tool_stats = local_child_tool_stats.merge(
+                    trusted_child_tool_stats
+                )
+            else:
+                child_tool_stats = self.aggregate_child_metrics().tool_call_stats
 
             metrics.apply_programmatic_tool_call_stats(
-                direct_tool_stats, child.tool_call_stats
+                direct_tool_stats, child_tool_stats
             )
 
             meta_update["metrics"] = metrics.to_dict()
             meta_update["programmatic_tool_call_stats"] = direct_tool_stats.merge(
-                child.tool_call_stats
+                child_tool_stats
             ).to_dict()
+            meta_update["local_programmatic_tool_call_stats"] = (
+                local_direct_tool_stats.merge(local_child_tool_stats).to_dict()
+            )
         self.write_meta(**meta_update)
         self._msg_file.close()
 

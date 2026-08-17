@@ -327,6 +327,47 @@ async def test_shutdown_closes_incomplete_broker_connections(tmp_path):
         session.close()
 
 
+async def test_incomplete_broker_connections_are_bounded_and_time_out(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("rlm.supervisor.MAX_BROKER_CONNECTIONS", 1)
+    monkeypatch.setattr("rlm.supervisor.BROKER_INITIAL_FRAME_TIMEOUT_SECONDS", 0.05)
+    session = Session(tmp_path / "root")
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=_config(max_depth=1),
+        cwd=str(tmp_path),
+        engine_factory=_FastEngine,
+    )
+    await supervisor.start()
+    endpoint = supervisor.endpoint_for(supervisor.root_id)
+    first_reader, first_writer = await asyncio.open_unix_connection(
+        endpoint.socket_path
+    )
+    for _ in range(100):
+        if supervisor._connection_tasks:
+            break
+        await asyncio.sleep(0.001)
+    second_reader, second_writer = await asyncio.open_unix_connection(
+        endpoint.socket_path
+    )
+
+    try:
+        assert await asyncio.wait_for(second_reader.read(), timeout=1) == b""
+        assert await broker.read_frame(first_reader) == {
+            "error": "broker request timed out"
+        }
+        assert await asyncio.wait_for(first_reader.read(), timeout=1) == b""
+        assert supervisor._connection_tasks == set()
+    finally:
+        first_writer.close()
+        second_writer.close()
+        await first_writer.wait_closed()
+        await second_writer.wait_closed()
+        await supervisor.aclose()
+        session.close()
+
+
 async def test_real_kernel_uses_brokered_rlm_callable(monkeypatch, session):
     _FastEngine.state = _EngineState()
     for name in (

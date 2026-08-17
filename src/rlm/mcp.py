@@ -1,33 +1,27 @@
-"""MCP tool servers exposed as pre-imported IPython skills.
-
-A v1 harness can wire task-specific tool servers to the agent over MCP. rlm has no MCP
-client in its native tool-call loop; instead each MCP tool becomes a *skill* — a generated
-async function the agent calls straight from the IPython REPL (``await tools_add_event(...)``),
-the same programmatic tool-call (PTC) path as installed skills. The servers arrive as a
-standard ``mcpServers`` config in ``RLM_MCP_CONFIG`` (set by the verifiers rlm harness).
-
-Each tool is written to its own flat module in the session directory (added to the kernel's
-``sys.path``); the module's ``run`` carries a signature built from the tool's input schema so
-``help()`` / ``inspect.signature`` show the real arguments.
-"""
+"""Supervisor-owned MCP discovery, registration, and invocation."""
 
 from __future__ import annotations
 
 import inspect
 import json
+import keyword
 import os
 import re
-from collections.abc import AsyncIterator
+import secrets
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
-from mcp.types import Tool
 
 MCP_CONFIG_ENV = "RLM_MCP_CONFIG"
+MAX_MCP_TOOLS = 128
+MAX_MCP_SKILL_NAME_CHARS = 96
+MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
 
 _JSON_TO_PY = {
     "string": str,
@@ -38,8 +32,148 @@ _JSON_TO_PY = {
     "object": dict,
 }
 
-
 MCPServer = str | dict[str, Any]
+
+
+@dataclass(frozen=True)
+class MCPToolDescriptor:
+    """Public information exposed to an IPython kernel for one MCP tool."""
+
+    capability: str
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "capability": self.capability,
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.input_schema,
+        }
+
+
+@dataclass(frozen=True)
+class _RegisteredMCPTool:
+    descriptor: MCPToolDescriptor
+    server: MCPServer
+    tool_name: str
+
+
+class MCPToolError(RuntimeError):
+    """An error intentionally returned by an MCP tool."""
+
+
+class MCPRegistry:
+    """Keep MCP transport configuration private and expose opaque tool capabilities."""
+
+    def __init__(self, servers: dict[str, MCPServer], cwd: str | None = None) -> None:
+        self._servers = {
+            name: _normalize_server(spec) for name, spec in servers.items()
+        }
+        self._cwd = cwd
+        self._tools: dict[str, _RegisteredMCPTool] | None = None
+
+    async def discover(self) -> tuple[MCPToolDescriptor, ...]:
+        if self._tools is not None:
+            return tuple(entry.descriptor for entry in self._tools.values())
+
+        registered: dict[str, _RegisteredMCPTool] = {}
+        names: set[str] = set()
+        descriptor_bytes = 0
+        for server_name, server in self._servers.items():
+            try:
+                async with _client_session(server, self._cwd) as session:
+                    await session.initialize()
+                    tools = (await session.list_tools()).tools
+            except Exception:
+                raise RuntimeError(
+                    f"MCP server {server_name!r} discovery failed"
+                ) from None
+            for tool in tools:
+                if len(registered) >= MAX_MCP_TOOLS:
+                    raise ValueError(f"MCP tool count exceeds {MAX_MCP_TOOLS}")
+                name = _skill_name(server_name, tool.name)
+                if not name.isidentifier() or keyword.iskeyword(name):
+                    raise ValueError(
+                        f"MCP tool name {name!r} is not a Python identifier"
+                    )
+                if len(name) > MAX_MCP_SKILL_NAME_CHARS:
+                    raise ValueError(
+                        f"MCP tool name exceeds {MAX_MCP_SKILL_NAME_CHARS} characters"
+                    )
+                if name in names:
+                    raise ValueError(f"duplicate normalized MCP tool name: {name!r}")
+                names.add(name)
+                capability = secrets.token_urlsafe(24)
+                descriptor = MCPToolDescriptor(
+                    capability=capability,
+                    name=name,
+                    description=tool.description or f"MCP tool {tool.name!r}.",
+                    input_schema=dict(tool.inputSchema),
+                )
+                descriptor_bytes += len(
+                    json.dumps(descriptor.to_dict(), separators=(",", ":")).encode()
+                )
+                if descriptor_bytes > MAX_MCP_DESCRIPTOR_BYTES:
+                    raise ValueError(
+                        "MCP public tool metadata exceeds "
+                        f"{MAX_MCP_DESCRIPTOR_BYTES} bytes"
+                    )
+                registered[capability] = _RegisteredMCPTool(
+                    descriptor=descriptor,
+                    server=server,
+                    tool_name=tool.name,
+                )
+        self._tools = registered
+        return tuple(entry.descriptor for entry in registered.values())
+
+    def descriptor(self, capability: str) -> MCPToolDescriptor:
+        if self._tools is None:
+            raise RuntimeError("MCP tools have not been discovered")
+        try:
+            return self._tools[capability].descriptor
+        except KeyError as exc:
+            raise PermissionError("unknown MCP tool capability") from exc
+
+    async def call(self, capability: str, arguments: dict[str, Any]) -> str:
+        descriptor = self.descriptor(capability)
+        entry = self._tools[capability]
+        try:
+            return await call_tool(
+                entry.server,
+                entry.tool_name,
+                arguments,
+                self._cwd,
+            )
+        except MCPToolError as exc:
+            raise RuntimeError(str(exc)) from None
+        except Exception:
+            raise RuntimeError(f"MCP tool {descriptor.name!r} is unavailable") from None
+
+    def write_skill_modules(
+        self, dest_dir: Path, reserved_names: Iterable[str] = ()
+    ) -> list[str]:
+        if self._tools is None:
+            raise RuntimeError("MCP tools have not been discovered")
+        reserved = set(reserved_names)
+        descriptors = [entry.descriptor for entry in self._tools.values()]
+        conflicts = sorted(
+            descriptor.name for descriptor in descriptors if descriptor.name in reserved
+        )
+        if conflicts:
+            raise ValueError(
+                f"MCP tool names conflict with existing skills: {conflicts}"
+            )
+
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for descriptor in descriptors:
+            source = _MODULE_TEMPLATE.format(
+                description=descriptor.description,
+                descriptor=descriptor.to_dict(),
+            )
+            (dest_dir / f"{descriptor.name}.py").write_text(source)
+        return [descriptor.name for descriptor in descriptors]
 
 
 def load_mcp_servers() -> dict[str, MCPServer]:
@@ -67,7 +201,7 @@ def _normalize_server(server: MCPServer) -> MCPServer:
 
 
 def _skill_name(server: str, tool: str) -> str:
-    """A valid Python identifier (importable + REPL call name) for a server's tool."""
+    """Return the normalized Python name for a server tool."""
     ident = re.sub(r"\W", "_", f"{server}_{tool}")
     return f"_{ident}" if ident[:1].isdigit() else ident
 
@@ -119,30 +253,13 @@ async def _client_session(
         yield session
 
 
-async def discover_tools(
-    servers: dict[str, MCPServer], cwd: str | None = None
-) -> dict[str, tuple[str, Tool]]:
-    """List each server's tools using one discovery session per server."""
-    found: dict[str, tuple[str, Tool]] = {}
-    for server, spec in servers.items():
-        async with _client_session(spec, cwd) as session:
-            await session.initialize()
-            for tool in (await session.list_tools()).tools:
-                found[_skill_name(server, tool.name)] = (server, tool)
-    return found
-
-
 async def call_tool(
     server: MCPServer,
     name: str,
-    arguments: dict,
+    arguments: dict[str, Any],
     cwd: str | None = None,
 ) -> str:
-    """Call an MCP tool and return its text content.
-
-    Raises ``RuntimeError`` on a tool-reported error, so a failed call surfaces as an
-    exception in the REPL rather than a silently-wrong return value.
-    """
+    """Call an MCP tool and return its text content."""
     async with _client_session(server, cwd) as session:
         await session.initialize()
         result = await session.call_tool(name, arguments or {})
@@ -150,15 +267,12 @@ async def call_tool(
         getattr(block, "text", "") or str(block) for block in result.content
     )
     if result.isError:
-        raise RuntimeError(text or f"MCP tool {name!r} failed")
+        raise MCPToolError(text or f"MCP tool {name!r} failed")
     return text
 
 
-def build_signature(schema: dict) -> inspect.Signature:
-    """A keyword-only signature mirroring a tool's input schema (required params first).
-
-    Non-identifier property names are skipped (still reachable via ``**kwargs``).
-    """
+def build_signature(schema: dict[str, Any]) -> inspect.Signature:
+    """Return a keyword-only Python signature for a JSON input schema."""
     properties, required = schema.get("properties", {}), set(schema.get("required", []))
     params = [
         inspect.Parameter(
@@ -168,78 +282,21 @@ def build_signature(schema: dict) -> inspect.Signature:
             annotation=_JSON_TO_PY.get(prop.get("type"), inspect.Parameter.empty),
         )
         for name, prop in properties.items()
-        if name.isidentifier()
+        if name.isidentifier() and not keyword.iskeyword(name)
     ]
-    params.sort(key=lambda p: p.default is not inspect.Parameter.empty)
+    params.sort(key=lambda parameter: parameter.default is not inspect.Parameter.empty)
     return inspect.Signature(params)
 
 
-def make_skill(server: str, tool: Tool, cwd: str | None = None):
-    """Build the async ``run`` for a generated skill module from an MCP ``Tool``.
+_MODULE_TEMPLATE = """\
+from rlm.broker import make_skill
 
-    Generated modules are a single statement (``run = make_skill(server, Tool(...))``). The
-    returned coroutine forwards keyword args to the tool; its ``__signature__`` and
-    ``__doc__`` come from the tool so ``help()`` / ``inspect.signature`` expose the real API.
-    """
-
-    async def run(**kwargs):
-        try:
-            spec = load_mcp_servers()[server]
-        except KeyError as exc:
-            raise RuntimeError(f"MCP server {server!r} is not configured") from exc
-        return await call_tool(spec, tool.name, kwargs, cwd)
-
-    run.__signature__ = build_signature(tool.inputSchema)
-    run.__doc__ = tool.description or f"MCP tool {tool.name!r}."
-    return run
-
-
-_MODULE_TEMPLATE = '''\
-"""{summary}"""
-
-from mcp.types import Tool
-
-from rlm.mcp import make_skill
-
-run = make_skill({server!r}, Tool.model_validate({tool!r}), cwd={cwd!r})
-'''
-
-
-def write_skill_modules(
-    found: dict[str, tuple[str, Tool]],
-    dest_dir: Path,
-    cwd: str | None = None,
-) -> list[str]:
-    """Write one importable ``<skill>.py`` per discovered tool into ``dest_dir``.
-
-    Returns the generated skill names (importable once ``dest_dir`` is on ``sys.path``).
-    """
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    for name, (server, tool) in found.items():
-        summary = next(
-            iter((tool.description or "").splitlines()), f"MCP tool {tool.name}."
-        )
-        source = _MODULE_TEMPLATE.format(
-            summary=summary.replace('"""', "'''"),
-            server=server,
-            tool=tool.model_dump(mode="json"),
-            cwd=cwd,
-        )
-        (dest_dir / f"{name}.py").write_text(source)
-    return list(found)
-
-
-async def generate_mcp_skills(
-    servers: dict[str, MCPServer], dest_dir: Path, cwd: str | None = None
-) -> list[str]:
-    """Discover all tools on ``servers`` and write them as skill modules in ``dest_dir``."""
-    return write_skill_modules(await discover_tools(servers, cwd), dest_dir, cwd)
+__doc__ = {description!r}
+__rlm_brokered__ = True
+run = make_skill({descriptor!r})
+"""
 
 
 def list_skill_modules(skills_dir: Path) -> list[str]:
-    """Names of the MCP-skill modules in ``skills_dir`` (its top-level ``.py`` files).
-
-    The directory the kernel imports from is the source of truth, so callers read it back
-    instead of threading the generated names around.
-    """
+    """Return names of generated skill modules in ``skills_dir``."""
     return sorted(path.stem for path in skills_dir.glob("*.py"))

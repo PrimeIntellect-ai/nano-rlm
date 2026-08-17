@@ -14,13 +14,7 @@ from openai import AsyncOpenAI, BadRequestError
 
 from rlm.client import call_with_retries, extract_usage, make_client
 from rlm.config import RuntimeConfig
-from rlm.mcp import (
-    MCP_CONFIG_ENV,
-    MCPServer,
-    dump_mcp_servers,
-    generate_mcp_skills,
-    load_mcp_servers,
-)
+from rlm.mcp import MCPServer, load_mcp_servers
 from rlm.prompt import build_system_prompt
 from rlm.session import Session
 from rlm.skills import enable_builtin_skills
@@ -302,27 +296,10 @@ class RLMEngine:
             cwd=self.cwd,
         )
 
-        # Skills the kernel pre-imports, all written into the session dir (the REPL and prompt
-        # read them back from there): enabled built-in skills (rlm.skills) + any wired MCP tools
-        # (PTC). ipython is the sole builtin tool, so the kernel always starts.
+        # Skills the kernel pre-imports are written into the session directory.
         enable_builtin_skills(self.skills, self.session.dir)
-        if self.mcp_servers:
-            mcp_skills = await generate_mcp_skills(
-                self.mcp_servers, self.session.dir, self.cwd
-            )
-            logger.info(
-                "rlm: exposed %d MCP tool(s) as skills - %s",
-                len(mcp_skills),
-                ", ".join(mcp_skills),
-            )
-
-        repl_env = (
-            {MCP_CONFIG_ENV: dump_mcp_servers(self.mcp_servers)}
-            if self.mcp_servers
-            else None
-        )
         broker_endpoint = None
-        if self.depth < self.max_depth:
+        if self.depth < self.max_depth or self.mcp_servers:
             if self._supervisor is None:
                 self._supervisor = SessionTreeSupervisor(
                     root_session=self.session,
@@ -332,15 +309,32 @@ class RLMEngine:
                 )
                 self._invocation_id = self._supervisor.root_id
                 self._owns_supervisor = True
-            await self._supervisor.start()
-            if self._invocation_id is None:
-                raise RuntimeError("recursive engine has no supervisor invocation")
-            broker_endpoint = self._supervisor.endpoint_for(self._invocation_id)
+            try:
+                await self._supervisor.start()
+                if self._invocation_id is None:
+                    raise RuntimeError("recursive engine has no supervisor invocation")
+                broker_endpoint = self._supervisor.endpoint_for(self._invocation_id)
+                if self.mcp_servers:
+                    reserved_names = {"rlm", *self.skills, *discover_skills()}
+                    mcp_skills = self._supervisor.write_mcp_skill_modules(
+                        self.session.dir, reserved_names
+                    )
+                    logger.info(
+                        "rlm: exposed %d brokered MCP tool(s) as skills - %s",
+                        len(mcp_skills),
+                        ", ".join(mcp_skills),
+                    )
+            except BaseException:
+                if self._owns_supervisor:
+                    await self._supervisor.aclose()
+                    self._supervisor = None
+                    self._invocation_id = None
+                    self._owns_supervisor = False
+                raise
 
         self._repl = IPythonREPL(
             cwd=self.cwd,
             session=self.session,
-            env=repl_env,
             depth=self.depth,
             max_depth=self.max_depth,
             broker_endpoint=broker_endpoint,
@@ -626,6 +620,14 @@ class RLMEngine:
         try:
             if self.session is not None:
                 if self._has_result:
+                    direct_tool_stats = None
+                    child_tool_stats = None
+                    if self._supervisor is not None and self._invocation_id is not None:
+                        direct_tool_stats, child_tool_stats = (
+                            self._supervisor.programmatic_tool_call_stats(
+                                self._invocation_id
+                            )
+                        )
                     self.session.finalize(
                         self._last_answer,
                         usage={
@@ -634,6 +636,8 @@ class RLMEngine:
                         },
                         turns=self._turn,
                         metrics=self._metrics,
+                        trusted_direct_tool_stats=direct_tool_stats,
+                        trusted_child_tool_stats=child_tool_stats,
                     )
                 else:
                     self.session.close()
