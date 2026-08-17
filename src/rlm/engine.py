@@ -24,6 +24,7 @@ from rlm.mcp import (
 from rlm.prompt import build_system_prompt
 from rlm.session import Session
 from rlm.skills import enable_builtin_skills
+from rlm.supervisor import SessionTreeSupervisor
 from rlm.tools import (
     SKILLS_DIR,
     BuiltinTool,
@@ -127,6 +128,8 @@ class RLMEngine:
         client: AsyncOpenAI | None = None,
         mcp_servers: dict[str, MCPServer] | None = None,
         runtime_config: RuntimeConfig | None = None,
+        supervisor: SessionTreeSupervisor | None = None,
+        invocation_id: str | None = None,
     ):
         if runtime_config is not None and any(
             value is not None
@@ -168,8 +171,12 @@ class RLMEngine:
         self.skills = list(config.skills)
         self.max_tokens = config.policy.max_tokens
 
+        self._owns_client = client is None
         self.client = client or make_client(config.provider, config.invocation)
         self.session = session
+        self._supervisor = supervisor
+        self._invocation_id = invocation_id
+        self._owns_supervisor = False
         self._total_usage = TokenUsage()
         self._last_prompt_tokens = 0
 
@@ -181,7 +188,6 @@ class RLMEngine:
 
         # IPython REPL (started lazily in single-agent execution)
         self._repl: IPythonREPL | None = None
-        self._known_children: set[str] = set()
 
         # Turn index (0-based) at the start of the current branch. Used to
         # report "turns since last compaction" when a compaction fires.
@@ -195,6 +201,7 @@ class RLMEngine:
         self._has_result = False
         self._started = False
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     def _ensure_session(self):
         """Create session if not set."""
@@ -213,11 +220,11 @@ class RLMEngine:
         try:
             return await self.prompt(prompt)
         finally:
-            self.close()
+            await self.aclose()
 
     async def prompt(self, prompt: str) -> RLMResult:
         """Run one user turn while preserving conversation and kernel state."""
-        if self._closed:
+        if self._closed or self._close_task is not None:
             raise RuntimeError("RLM engine is closed")
 
         # Check depth limit
@@ -314,16 +321,32 @@ class RLMEngine:
             if self.mcp_servers
             else None
         )
+        broker_endpoint = None
+        if self.depth < self.max_depth:
+            if self._supervisor is None:
+                self._supervisor = SessionTreeSupervisor(
+                    root_session=self.session,
+                    runtime_config=self.runtime_config,
+                    cwd=self.cwd,
+                    mcp_servers=self.mcp_servers,
+                )
+                self._invocation_id = self._supervisor.root_id
+                self._owns_supervisor = True
+            await self._supervisor.start()
+            if self._invocation_id is None:
+                raise RuntimeError("recursive engine has no supervisor invocation")
+            broker_endpoint = self._supervisor.endpoint_for(self._invocation_id)
+
         self._repl = IPythonREPL(
             cwd=self.cwd,
             session=self.session,
             env=repl_env,
             depth=self.depth,
             max_depth=self.max_depth,
+            broker_endpoint=broker_endpoint,
         )
         try:
             self._repl.start()
-            self._known_children = {p.name for p in self.session.dir.glob("sub-*")}
 
             self._active_tools = get_active_builtin_tools()
             self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
@@ -338,6 +361,11 @@ class RLMEngine:
         except BaseException:
             self._repl.shutdown()
             self._repl = None
+            if self._owns_supervisor and self._supervisor is not None:
+                await self._supervisor.aclose()
+                self._supervisor = None
+                self._invocation_id = None
+                self._owns_supervisor = False
             raise
 
     async def _run_loop(self) -> RLMResult:
@@ -445,35 +473,59 @@ class RLMEngine:
             if tool is None:
                 tool_result = ToolOutcome(content=f"Error: unknown tool '{tool_name}'")
             else:
-                tool_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        tool.execute, tool_args, self._tool_context(messages)
-                    )
-                )
+                repl = self._repl
+                scope_id = None
+                if (
+                    tool_name == "ipython"
+                    and repl is not None
+                    and self._supervisor is not None
+                    and self._invocation_id is not None
+                ):
+                    scope_id = await self._supervisor.open_scope(self._invocation_id)
                 try:
-                    tool_result = await asyncio.shield(tool_task)
-                except asyncio.CancelledError:
-                    repl = self._repl
-                    if repl is not None:
-                        repl.interrupt()
+                    if scope_id is not None:
+                        repl.set_broker_scope(scope_id)
+                    tool_task = asyncio.create_task(
+                        asyncio.to_thread(
+                            tool.execute, tool_args, self._tool_context(messages)
+                        )
+                    )
                     try:
-                        while True:
-                            try:
-                                await asyncio.shield(tool_task)
-                            except asyncio.CancelledError:
-                                if repl is not None:
-                                    repl.interrupt()
-                                continue
-                            except Exception:
-                                logger.warning(
-                                    "rlm: tool failed while cancellation was settling",
-                                    exc_info=True,
-                                )
-                            break
-                    finally:
+                        tool_result = await asyncio.shield(tool_task)
+                    except asyncio.CancelledError:
                         if repl is not None:
-                            repl.finish_interrupt()
-                    raise
+                            repl.interrupt()
+                        try:
+                            while True:
+                                try:
+                                    await asyncio.shield(tool_task)
+                                except asyncio.CancelledError:
+                                    if repl is not None:
+                                        repl.interrupt()
+                                    continue
+                                except Exception:
+                                    logger.warning(
+                                        "rlm: tool failed while cancellation was settling",
+                                        exc_info=True,
+                                    )
+                                break
+                        finally:
+                            if repl is not None:
+                                repl.finish_interrupt()
+                        raise
+                finally:
+                    if scope_id is not None:
+                        try:
+                            await self._supervisor.close_scope(scope_id)
+                        finally:
+                            if repl is not None:
+                                try:
+                                    repl.set_broker_scope(None)
+                                except Exception:
+                                    logger.warning(
+                                        "rlm: failed to clear broker scope",
+                                        exc_info=True,
+                                    )
             duration = time.time() - t0
             for event in tool_result.metric_events:
                 self._metrics.record(event)
@@ -491,9 +543,6 @@ class RLMEngine:
                     "content": result,
                 }
             )
-
-            # Detect new child sessions spawned via rlm()
-            self._detect_new_children()
 
             # Auto-compaction: if this turn's prompt_tokens reached the
             # configured threshold, ask the model for a handoff summary and
@@ -528,11 +577,52 @@ class RLMEngine:
         )
         return result
 
+    async def aclose(self) -> None:
+        """Finalize artifacts and stop the complete recursive session tree."""
+        if self._closed and self._close_task is None:
+            return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._aclose_impl())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(self._close_task)
+                break
+            except asyncio.CancelledError:
+                if self._close_task.done():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _aclose_impl(self) -> None:
+        self._closed = True
+        try:
+            if self._owns_supervisor and self._supervisor is not None:
+                await self._supervisor.aclose()
+        finally:
+            try:
+                if self._owns_client:
+                    await self.client.close()
+            finally:
+                self._close_local()
+
     def close(self) -> None:
-        """Finalize artifacts and stop the persistent kernel."""
+        """Close synchronous resources, or run async cleanup outside an event loop."""
         if self._closed:
             return
+        if self._owns_supervisor or self._owns_client:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(self.aclose())
+            else:
+                raise RuntimeError("use 'await engine.aclose()' inside an event loop")
+            return
         self._closed = True
+        self._close_local()
+
+    def _close_local(self) -> None:
         try:
             if self.session is not None:
                 if self._has_result:
@@ -651,16 +741,6 @@ class RLMEngine:
         if self.append_to_system_prompt:
             system_prompt += "\n\n" + self.append_to_system_prompt
         return system_prompt
-
-    def _detect_new_children(self):
-        """Scan session dir for new sub-* directories and log them."""
-        if not self.session:
-            return
-        current = {p.name for p in self.session.dir.glob("sub-*")}
-        new = current - self._known_children
-        for child_name in sorted(new):
-            self.session.log_sub_spawn(child_name, "(spawned via rlm())")
-        self._known_children = current
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:
         return ToolContext(

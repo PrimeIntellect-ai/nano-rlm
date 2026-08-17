@@ -30,7 +30,7 @@ def test_provider_config_keeps_keys_paired_with_provider():
         "prime-secret",
         {"X-Prime-Team-ID": "team"},
     )
-    assert (openai.base_url, openai.api_key) == (None, None)
+    assert (openai.base_url, openai.api_key) == ("http://openai", "openai-secret")
 
 
 def test_runtime_config_resolves_environment_once():
@@ -59,6 +59,8 @@ def test_runtime_config_resolves_environment_once():
         max_tokens=500,
         summarize_at_tokens=2048,
         max_compactions=3,
+        max_concurrent_subagents=4,
+        max_subagent_calls=64,
     )
     assert config.skills == ("search", "edit")
 
@@ -92,3 +94,24 @@ def test_make_client_uses_explicit_invocation_depth(monkeypatch):
         "max_retries": 7,
         "default_headers": {"X-RLM-Depth": "3", "X-Test": "yes"},
     }
+
+
+def test_runtime_config_validates_recursive_limits():
+    with pytest.raises(ValueError, match="at least RLM_MAX_DEPTH"):
+        RuntimeConfig.from_env(
+            environ={
+                "RLM_MAX_DEPTH": "3",
+                "RLM_MAX_CONCURRENT_SUBAGENTS": "2",
+            }
+        )
+    with pytest.raises(ValueError, match="RLM_MAX_SUBAGENT_CALLS must be positive"):
+        RuntimeConfig.from_env(environ={"RLM_MAX_SUBAGENT_CALLS": "0"})
+
+
+def test_direct_policy_construction_validates_recursive_limits():
+    with pytest.raises(ValueError, match="at least max_depth"):
+        ExecutionPolicy(max_depth=3, max_concurrent_subagents=2)
+    with pytest.raises(ValueError, match="max_subagent_calls must be positive"):
+        ExecutionPolicy(max_subagent_calls=0)
+    with pytest.raises(ValueError, match="depth must be non-negative"):
+        InvocationContext(depth=-1)

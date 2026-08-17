@@ -22,6 +22,13 @@ def _optional_positive_int(value: str | int | None, name: str) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _positive_int(value: str | int, name: str) -> int:
+    parsed = _optional_positive_int(value, name)
+    if parsed is None:
+        raise ValueError(f"{name} must be positive")
+    return parsed
+
+
 def _summarize_at_tokens(value: str | int | None) -> int | None:
     parsed = _optional_positive_int(value, "summarize_at_tokens")
     if value not in (None, "") and parsed is None:
@@ -55,7 +62,11 @@ class ProviderConfig:
                 max_retries=max_retries,
             )
         if env.get("OPENAI_API_KEY"):
-            return cls(None, None, max_retries=max_retries)
+            return cls(
+                env.get("OPENAI_BASE_URL"),
+                env["OPENAI_API_KEY"],
+                max_retries=max_retries,
+            )
         return cls(PI_INFERENCE_BASE_URL, "EMPTY", max_retries=max_retries)
 
 
@@ -64,6 +75,10 @@ class InvocationContext:
     """Trusted identity of one engine within a recursive session tree."""
 
     depth: int = 0
+
+    def __post_init__(self) -> None:
+        if self.depth < 0:
+            raise ValueError("depth must be non-negative")
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> InvocationContext:
@@ -84,6 +99,26 @@ class ExecutionPolicy:
     max_tokens: int | None = None
     summarize_at_tokens: int | None = None
     max_compactions: int | None = None
+    max_concurrent_subagents: int = 4
+    max_subagent_calls: int = 64
+
+    def __post_init__(self) -> None:
+        if self.max_depth < 0:
+            raise ValueError("max_depth must be non-negative")
+        if self.exec_timeout <= 0:
+            raise ValueError("exec_timeout must be positive")
+        if self.max_output == 0 or self.max_output < -1:
+            raise ValueError("max_output must be positive, or -1 to disable truncation")
+        for name in ("max_tokens", "summarize_at_tokens", "max_compactions"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.max_concurrent_subagents <= 0:
+            raise ValueError("max_concurrent_subagents must be positive")
+        if self.max_concurrent_subagents < self.max_depth:
+            raise ValueError("max_concurrent_subagents must be at least max_depth")
+        if self.max_subagent_calls <= 0:
+            raise ValueError("max_subagent_calls must be positive")
 
 
 @dataclass(frozen=True)
@@ -120,12 +155,22 @@ class RuntimeConfig:
             else summarize_at_tokens
         )
         raw_skills = env.get("RLM_SKILLS", "")
+        max_depth = int(env.get("RLM_MAX_DEPTH", "0"))
+        default_concurrency = max(4, max_depth)
+        max_concurrent_subagents = _positive_int(
+            env.get("RLM_MAX_CONCURRENT_SUBAGENTS", str(default_concurrency)),
+            "RLM_MAX_CONCURRENT_SUBAGENTS",
+        )
+        if max_depth > max_concurrent_subagents:
+            raise ValueError(
+                "RLM_MAX_CONCURRENT_SUBAGENTS must be at least RLM_MAX_DEPTH"
+            )
         return cls(
             model=model or env.get("RLM_MODEL", "openai/gpt-5-mini"),
             provider=ProviderConfig.from_env(env),
             invocation=InvocationContext.from_env(env),
             policy=ExecutionPolicy(
-                max_depth=int(env.get("RLM_MAX_DEPTH", "0")),
+                max_depth=max_depth,
                 exec_timeout=int(env.get("RLM_EXEC_TIMEOUT", "300")),
                 max_output=max_output,
                 max_tokens=_optional_positive_int(
@@ -134,6 +179,11 @@ class RuntimeConfig:
                 summarize_at_tokens=_summarize_at_tokens(raw_summarize),
                 max_compactions=_optional_positive_int(
                     env.get("RLM_MAX_COMPACTIONS"), "RLM_MAX_COMPACTIONS"
+                ),
+                max_concurrent_subagents=max_concurrent_subagents,
+                max_subagent_calls=_positive_int(
+                    env.get("RLM_MAX_SUBAGENT_CALLS", "64"),
+                    "RLM_MAX_SUBAGENT_CALLS",
                 ),
             ),
             system_prompt_path=system_prompt_path or env.get("RLM_SYSTEM_PROMPT_PATH"),

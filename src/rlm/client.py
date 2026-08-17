@@ -43,9 +43,9 @@ def resolve_provider() -> tuple[str | None, str | None, dict[str, str]]:
        non-OpenAI custom endpoint.
     2. **PI Inference** — ``PRIME_API_KEY`` at PI's base, with
        ``PRIME_TEAM_ID`` forwarded as ``X-Prime-Team-ID``.
-    3. **OpenAI** — ``OPENAI_API_KEY`` set: delegate to AsyncOpenAI's
-       native env handling (``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``).
-       Covers OpenAI direct and verifiers' rollout tunnel both.
+    3. **OpenAI** — ``OPENAI_API_KEY`` set: capture ``OPENAI_API_KEY`` and
+       ``OPENAI_BASE_URL`` into the trusted provider configuration. Covers
+       OpenAI direct and verifiers' rollout tunnel both.
 
     Falls back to PI + ``"EMPTY"`` so the SDK can't silently inherit
     ``OPENAI_API_KEY`` and ship it to the PI default base.
