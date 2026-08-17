@@ -66,6 +66,19 @@ class _SessionState:
     snapshot_sequence: int = 0
 
 
+def _request_is_cancelling(awaited: asyncio.Task[Any]) -> bool:
+    current = asyncio.current_task()
+    cancelling = getattr(current, "cancelling", None)
+    if cancelling is not None:
+        return bool(cancelling())
+    return not awaited.cancelled()
+
+
+async def _cancel_and_wait(task: asyncio.Task[Any]) -> None:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 def _session_metadata(
     state: _SessionState, status: SessionStatus, *, final: bool = False
 ) -> dict[str, Any]:
@@ -314,10 +327,10 @@ class RLMACPAgent(Agent):
             task = asyncio.create_task(state.engine.prompt(_prompt_text(prompt)))
             state.prompt_task = task
             try:
-                result = await task
+                result = await asyncio.shield(task)
             except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
+                if _request_is_cancelling(task):
+                    await _cancel_and_wait(task)
                     raise
                 state.last_stop_reason = "cancelled"
                 return PromptResponse(
@@ -352,10 +365,10 @@ class RLMACPAgent(Agent):
             )
             state.delivery_task = delivery
             try:
-                await delivery
+                await asyncio.shield(delivery)
             except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
+                if _request_is_cancelling(delivery):
+                    await _cancel_and_wait(delivery)
                     raise
                 if not state.closing:
                     raise
