@@ -133,10 +133,14 @@ class IPythonREPL:
         cwd: str,
         session: "Session | None" = None,
         env: dict[str, str] | None = None,
+        depth: int | None = None,
+        max_depth: int | None = None,
     ):
         self.cwd = cwd
         self.session = session
         self.env = env or {}
+        self.depth = depth
+        self.max_depth = max_depth
         self._km = None
         self._kc = None
         self._ipc_dir = None
@@ -175,8 +179,14 @@ class IPythonREPL:
     def _inject_startup(self):
         """Set up kernel: cwd, env vars, nest_asyncio, skill pre-imports."""
         session_dir = str(self.session.dir) if self.session else None
-        depth = int(os.environ.get("RLM_DEPTH", "0"))
-        max_depth = int(os.environ.get("RLM_MAX_DEPTH", "0"))
+        depth = (
+            int(os.environ.get("RLM_DEPTH", "0")) if self.depth is None else self.depth
+        )
+        max_depth = (
+            int(os.environ.get("RLM_MAX_DEPTH", "0"))
+            if self.max_depth is None
+            else self.max_depth
+        )
         allow_recursion = depth < max_depth
         # Pip-installed skills + the MCP-tool modules generated into the session dir (rlm.mcp);
         # the session dir goes on the kernel's sys.path so those import by name.

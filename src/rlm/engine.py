@@ -13,6 +13,7 @@ from pathlib import Path
 from openai import AsyncOpenAI, BadRequestError
 
 from rlm.client import call_with_retries, extract_usage, make_client
+from rlm.config import RuntimeConfig
 from rlm.mcp import (
     MCP_CONFIG_ENV,
     MCPServer,
@@ -114,37 +115,6 @@ def _parse_tool_call_args(raw: str) -> tuple[dict | None, dict | None]:
     return args, None
 
 
-def _parse_summarize_at_tokens(value: int | str | None) -> int | None:
-    """Normalize ``summarize_at_tokens`` to a positive int or ``None``.
-
-    Accepts:
-      - ``None`` / empty string → disabled.
-      - ``int`` → fixed threshold.
-      - ``str`` (from env var) → "N".
-    """
-    if value is None or value == "":
-        return None
-    if isinstance(value, bool):
-        raise ValueError("summarize_at_tokens must be an int")
-    if isinstance(value, str):
-        try:
-            parsed = int(value.strip())
-        except ValueError as exc:
-            raise ValueError(
-                f"summarize_at_tokens must be an int (got {value!r})"
-            ) from exc
-    elif isinstance(value, int):
-        parsed = value
-    else:
-        raise ValueError(
-            f"summarize_at_tokens must be int or None (got {type(value).__name__})"
-        )
-
-    if parsed <= 0:
-        raise ValueError(f"summarize_at_tokens must be positive (got {parsed})")
-    return parsed
-
-
 class RLMEngine:
     def __init__(
         self,
@@ -156,38 +126,37 @@ class RLMEngine:
         session: Session | None = None,
         client: AsyncOpenAI | None = None,
         mcp_servers: dict[str, MCPServer] | None = None,
+        runtime_config: RuntimeConfig | None = None,
     ):
-        self.model = model or os.environ.get("RLM_MODEL", "openai/gpt-5-mini")
-        self.cwd = cwd or os.getcwd()
-        self.exec_timeout = int(os.environ.get("RLM_EXEC_TIMEOUT", "300"))
-        max_output = int(os.environ.get("RLM_MAX_OUTPUT", "-1"))
-        if max_output == 0:
-            raise ValueError(
-                "RLM_MAX_OUTPUT must be positive, or -1 to disable truncation"
+        if runtime_config is not None and any(
+            value is not None
+            for value in (
+                model,
+                summarize_at_tokens,
+                system_prompt_path,
+                append_to_system_prompt,
             )
-        self.max_output = max_output
-
-        # Auto-compaction threshold: user kwarg wins; otherwise parse env var.
-        if summarize_at_tokens is None:
-            env_value = os.environ.get("RLM_SUMMARIZE_AT_TOKENS")
-        else:
-            env_value = summarize_at_tokens
-        self.summarize_at_tokens = _parse_summarize_at_tokens(env_value)
-
-        # Cap on auto-compactions (RLM_MAX_COMPACTIONS): once reached, the branch is
-        # never compacted again and the context grows to the model's natural limit.
-        # Unset or <= 0 means unlimited.
-        _max_compactions = int(os.environ.get("RLM_MAX_COMPACTIONS", "0"))
-        self.max_compactions = _max_compactions if _max_compactions > 0 else None
-
-        self.system_prompt_path = system_prompt_path or os.environ.get(
-            "RLM_SYSTEM_PROMPT_PATH"
+        ):
+            raise ValueError(
+                "runtime_config cannot be combined with runtime configuration kwargs"
+            )
+        self.runtime_config = runtime_config or RuntimeConfig.from_env(
+            model=model,
+            summarize_at_tokens=summarize_at_tokens,
+            system_prompt_path=system_prompt_path,
+            append_to_system_prompt=append_to_system_prompt,
         )
-        self.append_to_system_prompt = append_to_system_prompt or os.environ.get(
-            "RLM_APPEND_TO_SYSTEM_PROMPT"
-        )
-        self.max_depth = int(os.environ.get("RLM_MAX_DEPTH", "0"))
-        self.depth = int(os.environ.get("RLM_DEPTH", "0"))
+        config = self.runtime_config
+        self.model = config.model
+        self.cwd = cwd or os.getcwd()
+        self.exec_timeout = config.policy.exec_timeout
+        self.max_output = config.policy.max_output
+        self.summarize_at_tokens = config.policy.summarize_at_tokens
+        self.max_compactions = config.policy.max_compactions
+        self.system_prompt_path = config.system_prompt_path
+        self.append_to_system_prompt = config.append_to_system_prompt
+        self.max_depth = config.policy.max_depth
+        self.depth = config.invocation.depth
 
         # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
         # parse RLM_MCP_CONFIG (a standard mcpServers config).
@@ -196,18 +165,10 @@ class RLMEngine:
         )
 
         # Built-in skills (rlm.skills) to enable for this run, from RLM_SKILLS (comma-separated).
-        raw_skills = os.environ.get("RLM_SKILLS")
-        self.skills = (
-            [s.strip() for s in raw_skills.split(",") if s.strip()]
-            if raw_skills
-            else []
-        )
+        self.skills = list(config.skills)
+        self.max_tokens = config.policy.max_tokens
 
-        # Token budget
-        _max_tok = int(os.environ.get("RLM_MAX_TOKENS", "0"))
-        self.max_tokens = _max_tok if _max_tok > 0 else None
-
-        self.client = client or make_client()
+        self.client = client or make_client(config.provider, config.invocation)
         self.session = session
         self._total_usage = TokenUsage()
         self._last_prompt_tokens = 0
@@ -353,7 +314,13 @@ class RLMEngine:
             if self.mcp_servers
             else None
         )
-        self._repl = IPythonREPL(cwd=self.cwd, session=self.session, env=repl_env)
+        self._repl = IPythonREPL(
+            cwd=self.cwd,
+            session=self.session,
+            env=repl_env,
+            depth=self.depth,
+            max_depth=self.max_depth,
+        )
         try:
             self._repl.start()
             self._known_children = {p.name for p in self.session.dir.glob("sub-*")}
