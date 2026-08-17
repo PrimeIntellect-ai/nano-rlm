@@ -67,20 +67,32 @@ class Session:
     def log_sub_spawn(self, child_name: str, command: str):
         self.log({"type": "sub_spawn", "child_dir": child_name, "command": command})
 
-    def aggregate_child_metrics(self) -> ChildSessionAggregate:
-        """Aggregate call logs across all recursive descendant sessions."""
+    def aggregate_child_metrics(
+        self, field: str = "programmatic_tool_call_stats"
+    ) -> ChildSessionAggregate:
+        """Walk sub-*/meta.json and bundle their programmatic tool-call stats."""
         aggregate = ChildSessionAggregate()
-        for child_dir in sorted(p for p in self.dir.rglob("sub-*") if p.is_dir()):
-            aggregate.num_sessions += 1
-            aggregate.absorb(
-                ProgrammaticToolCallStats.from_log(
-                    child_dir / "programmatic_tool_calls.jsonl"
-                )
-            )
+        aggregate.num_sessions = sum(
+            1 for path in self.dir.rglob("sub-*") if path.is_dir()
+        )
+        for child_dir in self.dir.glob("sub-*"):
+            meta_path = child_dir / "meta.json"
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+            except FileNotFoundError:
+                continue
+            aggregate.absorb(ProgrammaticToolCallStats.from_meta(meta, field))
         return aggregate
 
     def finalize(
-        self, answer: str, usage: dict | None = None, turns: int = 0, metrics=None
+        self,
+        answer: str,
+        usage: dict | None = None,
+        turns: int = 0,
+        metrics=None,
+        trusted_direct_tool_stats: ProgrammaticToolCallStats | None = None,
+        trusted_child_tool_stats: ProgrammaticToolCallStats | None = None,
     ):
         entry = {"type": "done", "answer": answer[:1000]}
         if usage:
@@ -93,25 +105,36 @@ class Session:
         if usage:
             meta_update["usage"] = usage
         if metrics is not None:
-            meta_update.update(self._metrics_meta(metrics))
+            local_direct_tool_stats = ProgrammaticToolCallStats.from_log(
+                self.dir / "programmatic_tool_calls.jsonl"
+            )
+            local_child = self.aggregate_child_metrics(
+                "local_programmatic_tool_call_stats"
+            )
+            local_child_tool_stats = local_child.tool_call_stats
+            direct_tool_stats = local_direct_tool_stats
+            if trusted_direct_tool_stats is not None:
+                direct_tool_stats = direct_tool_stats.merge(trusted_direct_tool_stats)
+            if trusted_child_tool_stats is not None:
+                child_tool_stats = local_child_tool_stats.merge(
+                    trusted_child_tool_stats
+                )
+            else:
+                child_tool_stats = self.aggregate_child_metrics().tool_call_stats
+
+            metrics.apply_programmatic_tool_call_stats(
+                direct_tool_stats, child_tool_stats, local_child.num_sessions
+            )
+
+            meta_update["metrics"] = metrics.to_dict()
+            meta_update["programmatic_tool_call_stats"] = direct_tool_stats.merge(
+                child_tool_stats
+            ).to_dict()
+            meta_update["local_programmatic_tool_call_stats"] = (
+                local_direct_tool_stats.merge(local_child_tool_stats).to_dict()
+            )
         self.write_meta(**meta_update)
         self._msg_file.close()
-
-    def _metrics_meta(self, metrics) -> dict:
-        """Assemble the metrics fields for meta.json from live stats on disk."""
-        direct_tool_stats = ProgrammaticToolCallStats.from_log(
-            self.dir / "programmatic_tool_calls.jsonl"
-        )
-        child = self.aggregate_child_metrics()
-        metrics.apply_programmatic_tool_call_stats(
-            direct_tool_stats, child.tool_call_stats, child.num_sessions
-        )
-        return {
-            "metrics": metrics.to_dict(),
-            "programmatic_tool_call_stats": direct_tool_stats.merge(
-                child.tool_call_stats
-            ).to_dict(),
-        }
 
     @staticmethod
     def child_dir(parent_dir: Path | str) -> Path:

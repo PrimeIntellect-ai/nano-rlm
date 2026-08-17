@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import keyword
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +26,15 @@ class BrokerEndpoint:
 
 _endpoint: BrokerEndpoint | None = None
 _scope_id: str | None = None
+
+_JSON_TO_PY = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+}
 
 
 def configure(endpoint: BrokerEndpoint | None) -> None:
@@ -98,16 +109,74 @@ async def run(prompt: str, **kwargs: Any) -> RLMResult:
         raise RuntimeError("recursive RLM calls are unavailable outside an active cell")
     if not isinstance(prompt, str):
         raise TypeError("prompt must be a string")
+    response = await _request(
+        {
+            "op": "rlm.run",
+            "prompt": prompt,
+            "options": kwargs,
+        }
+    )
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("invalid response from RLM supervisor")
+    return result_from_json(result)
+
+
+async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
+    """Invoke a supervisor-owned skill through its opaque capability."""
+    response = await _request(
+        {
+            "op": "skill.call",
+            "skill_capability": capability,
+            "arguments": arguments,
+        }
+    )
+    result = response.get("result")
+    if not isinstance(result, str):
+        raise RuntimeError("invalid skill response from RLM supervisor")
+    return result
+
+
+def make_skill(descriptor: dict[str, Any]):
+    """Build a callable coroutine from a public brokered-skill descriptor."""
+    capability = descriptor["capability"]
+    description = descriptor["description"]
+    schema = descriptor["input_schema"]
+
+    async def run(**kwargs: Any) -> str:
+        return await call_skill(capability, kwargs)
+
+    properties = schema.get("properties", {})
+    required = set(schema.get("required", []))
+    parameters = [
+        inspect.Parameter(
+            name,
+            inspect.Parameter.KEYWORD_ONLY,
+            default=inspect.Parameter.empty if name in required else None,
+            annotation=_JSON_TO_PY.get(value.get("type"), inspect.Parameter.empty),
+        )
+        for name, value in properties.items()
+        if name.isidentifier() and not keyword.iskeyword(name)
+    ]
+    parameters.sort(
+        key=lambda parameter: parameter.default is not inspect.Parameter.empty
+    )
+    run.__signature__ = inspect.Signature(parameters)
+    run.__doc__ = description
+    return run
+
+
+async def _request(payload: dict[str, Any]) -> dict[str, Any]:
+    if _endpoint is None or _scope_id is None:
+        raise RuntimeError("brokered calls are unavailable outside an active cell")
     reader, writer = await asyncio.open_unix_connection(_endpoint.socket_path)
     try:
         await write_frame(
             writer,
             {
-                "op": "rlm.run",
                 "capability": _endpoint.capability,
                 "scope_id": _scope_id,
-                "prompt": prompt,
-                "options": kwargs,
+                **payload,
             },
             MAX_REQUEST_BYTES,
         )
@@ -117,7 +186,4 @@ async def run(prompt: str, **kwargs: Any) -> RLMResult:
         await writer.wait_closed()
     if error := response.get("error"):
         raise RuntimeError(str(error))
-    result = response.get("result")
-    if not isinstance(result, dict):
-        raise RuntimeError("invalid response from RLM supervisor")
-    return result_from_json(result)
+    return response

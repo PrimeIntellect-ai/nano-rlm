@@ -222,7 +222,7 @@ help(tools_add_event)  # signature (typed from the schema) + the tool's descript
 await tools_add_event(day="monday", title="standup")
 ```
 
-Each call connects using the configured transport, invokes the tool, and returns its text content (a tool-reported error is raised as `RuntimeError`). The generated modules are written into the session directory and the kernel imports them from there. Unlike installed skills, MCP skills are IPython-only — they're not exposed as shell commands.
+Each call connects using the configured transport, invokes the tool, and returns its text content (a tool-reported error is raised as `RuntimeError`). Discovery and invocation run in the session supervisor. The generated modules contain only the public tool schema and an opaque capability; server URLs, headers, commands, and environment variables are not copied into the kernel environment or session artifacts. The kernel imports these proxy modules from the session directory and reaches the supervisor over the session-local broker. Unlike installed skills, MCP skills are IPython-only — they're not exposed as shell commands.
 
 ## Kernel
 

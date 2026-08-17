@@ -62,6 +62,7 @@ _KERNEL_SECRET_ENV = {
     "PRIME_TEAM_ID",
     "RLM_API_KEY",
     "RLM_BASE_URL",
+    "RLM_MCP_CONFIG",
 }
 
 
@@ -281,16 +282,20 @@ def _wrap_callable(mod, log_source, register=True):
     return wrapped
 
 
-for _name in {skill_names!r}:
-    globals()[_name] = _wrap_callable(__import__(_name), 'python')
-
-if {allow_recursion!r}:
-    import rlm as _rlm_package
+if {bool(self.broker_endpoint)!r}:
     import rlm.broker as _rlm_broker
     _rlm_broker.configure(_rlm_broker.BrokerEndpoint(
         {self.broker_endpoint.socket_path if self.broker_endpoint else None!r},
         {self.broker_endpoint.capability if self.broker_endpoint else None!r},
     ))
+
+for _name in {skill_names!r}:
+    _module = __import__(_name)
+    _source = None if getattr(_module, '__rlm_brokered__', False) else 'python'
+    globals()[_name] = _wrap_callable(_module, _source)
+
+if {allow_recursion!r}:
+    import rlm as _rlm_package
     _rlm_package.run = _rlm_broker.run
     globals()['rlm'] = _wrap_callable(_rlm_package, None)
 """

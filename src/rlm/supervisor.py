@@ -10,15 +10,21 @@ import tempfile
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Callable
 
 from rlm.broker import BrokerEndpoint, read_frame, result_to_json, write_frame
 from rlm.config import RuntimeConfig
+from rlm.mcp import MCPRegistry, MCPServer
 from rlm.session import Session
-from rlm.types import RLMResult
+from rlm.types import ProgrammaticToolCallStats, RLMResult
 
 if TYPE_CHECKING:
     from rlm.engine import RLMEngine
+
+
+MAX_BROKER_CONNECTIONS = 128
+BROKER_INITIAL_FRAME_TIMEOUT_SECONDS = 5
 
 
 @dataclass
@@ -29,7 +35,7 @@ class _Invocation:
     session: Session
     runtime_config: RuntimeConfig
     cwd: str
-    mcp_servers: dict[str, Any]
+    mcp_servers: dict[str, MCPServer]
 
 
 def depth_capacities(max_depth: int, limit: int, root_depth: int = 0) -> dict[int, int]:
@@ -55,7 +61,7 @@ class SessionTreeSupervisor:
         root_session: Session,
         runtime_config: RuntimeConfig,
         cwd: str,
-        mcp_servers: dict[str, Any] | None = None,
+        mcp_servers: dict[str, MCPServer] | None = None,
         engine_factory: Callable[..., RLMEngine] | None = None,
     ) -> None:
         self._engine_factory = engine_factory
@@ -66,10 +72,12 @@ class SessionTreeSupervisor:
         self._close_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._total_calls = 0
-        self._tasks: set[asyncio.Task[RLMResult]] = set()
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._child_tasks: set[asyncio.Task[RLMResult]] = set()
         self._connection_tasks: set[asyncio.Task[None]] = set()
         self._connection_writers: set[asyncio.StreamWriter] = set()
-        self._scopes: dict[str, tuple[str, set[asyncio.Task[RLMResult]]]] = {}
+        self._scopes: dict[str, tuple[str, set[asyncio.Task[Any]]]] = {}
+        self._mcp_registry = MCPRegistry(mcp_servers, cwd) if mcp_servers else None
 
         root_id = uuid.uuid4().hex
         root = _Invocation(
@@ -83,6 +91,8 @@ class SessionTreeSupervisor:
         )
         self.root_id = root_id
         self._invocations = {root_id: root}
+        self._parents = {root_id: None}
+        self._tool_stats: dict[str, ProgrammaticToolCallStats] = {}
         self._capabilities = {root.capability: root_id}
         capacities = depth_capacities(
             runtime_config.policy.max_depth,
@@ -99,13 +109,15 @@ class SessionTreeSupervisor:
 
     @property
     def active_calls(self) -> int:
-        return len(self._tasks)
+        return len(self._child_tasks)
 
     async def start(self) -> None:
         if self._server is not None:
             return
         if self._closed:
             raise RuntimeError("session supervisor is closed")
+        if self._mcp_registry is not None:
+            await self._mcp_registry.discover()
         self._broker_dir = Path(tempfile.mkdtemp(prefix="rlm-brk-"))
         os.chmod(self._broker_dir, 0o700)
         self._socket_path = str(self._broker_dir / "b.sock")
@@ -114,10 +126,36 @@ class SessionTreeSupervisor:
         )
         os.chmod(self._socket_path, 0o600)
 
+    def write_mcp_skill_modules(
+        self, dest_dir: Path, reserved_names: Iterable[str] = ()
+    ) -> list[str]:
+        if self._mcp_registry is None:
+            return []
+        return self._mcp_registry.write_skill_modules(dest_dir, reserved_names)
+
+    def programmatic_tool_call_stats(
+        self, invocation_id: str
+    ) -> tuple[ProgrammaticToolCallStats, ProgrammaticToolCallStats]:
+        direct = ProgrammaticToolCallStats().merge(
+            self._tool_stats.get(invocation_id, ProgrammaticToolCallStats())
+        )
+        descendants = ProgrammaticToolCallStats()
+        for candidate_id, stats in self._tool_stats.items():
+            parent_id = self._parents.get(candidate_id)
+            while parent_id is not None:
+                if parent_id == invocation_id:
+                    descendants = descendants.merge(stats)
+                    break
+                parent_id = self._parents.get(parent_id)
+        return direct, descendants
+
     def _accept_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         if self._closed or self._close_task is not None:
+            writer.close()
+            return
+        if len(self._connection_tasks) >= MAX_BROKER_CONNECTIONS:
             writer.close()
             return
         self._connection_writers.add(writer)
@@ -171,6 +209,39 @@ class SessionTreeSupervisor:
             self._total_calls += 1
             task = asyncio.create_task(self._run_child(parent_id, prompt))
             self._tasks.add(task)
+            self._child_tasks.add(task)
+            scope[1].add(task)
+            task.add_done_callback(self._tasks.discard)
+            task.add_done_callback(self._child_tasks.discard)
+            task.add_done_callback(scope[1].discard)
+            return task
+
+    async def _start_skill_call(
+        self,
+        capability: str,
+        scope_id: str,
+        skill_capability: str,
+        arguments: dict[str, Any],
+    ) -> asyncio.Task[str]:
+        async with self._lock:
+            invocation_id = self._capabilities.get(capability)
+            scope = self._scopes.get(scope_id)
+            if invocation_id is None or scope is None or scope[0] != invocation_id:
+                raise PermissionError("invalid broker capability")
+            if self._mcp_registry is None:
+                raise PermissionError("MCP tools are unavailable")
+            descriptor = self._mcp_registry.descriptor(skill_capability)
+            stats = self._tool_stats.setdefault(
+                invocation_id, ProgrammaticToolCallStats()
+            )
+            stats.python_total += 1
+            stats.by_tool_python[descriptor.name] = (
+                stats.by_tool_python.get(descriptor.name, 0) + 1
+            )
+            task = asyncio.create_task(
+                self._mcp_registry.call(skill_capability, arguments)
+            )
+            self._tasks.add(task)
             scope[1].add(task)
             task.add_done_callback(self._tasks.discard)
             task.add_done_callback(scope[1].discard)
@@ -205,6 +276,7 @@ class SessionTreeSupervisor:
                     child_session.close()
                     raise asyncio.CancelledError
                 self._invocations[child_id] = child
+                self._parents[child_id] = parent_id
                 self._capabilities[child.capability] = child_id
             try:
                 factory = self._engine_factory
@@ -230,34 +302,56 @@ class SessionTreeSupervisor:
     async def _handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        child_task: asyncio.Task[RLMResult] | None = None
+        operation_task: asyncio.Task[Any] | None = None
         disconnect_task: asyncio.Task[bytes] | None = None
         try:
-            request = await read_frame(reader)
-            if request.get("op") != "rlm.run":
+            try:
+                request = await asyncio.wait_for(
+                    read_frame(reader), timeout=BROKER_INITIAL_FRAME_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
+                raise TimeoutError("broker request timed out") from None
+            operation = request.get("op")
+            if operation not in {"rlm.run", "skill.call"}:
                 raise ValueError("unknown broker operation")
             capability = request.get("capability")
             scope_id = request.get("scope_id")
-            prompt = request.get("prompt")
-            options = request.get("options", {})
-            if not all(
-                isinstance(value, str) for value in (capability, scope_id, prompt)
-            ):
-                raise ValueError("invalid recursive RLM request")
-            if not isinstance(options, dict):
-                raise ValueError("recursive RLM options must be an object")
-            child_task = await self._start_child(capability, scope_id, prompt, options)
+            if not all(isinstance(value, str) for value in (capability, scope_id)):
+                raise ValueError("invalid broker request")
+            if operation == "rlm.run":
+                prompt = request.get("prompt")
+                options = request.get("options", {})
+                if not isinstance(prompt, str) or not isinstance(options, dict):
+                    raise ValueError("invalid recursive RLM request")
+                operation_task = await self._start_child(
+                    capability, scope_id, prompt, options
+                )
+            else:
+                skill_capability = request.get("skill_capability")
+                arguments = request.get("arguments", {})
+                if not isinstance(skill_capability, str) or not isinstance(
+                    arguments, dict
+                ):
+                    raise ValueError("invalid skill request")
+                operation_task = await self._start_skill_call(
+                    capability,
+                    scope_id,
+                    skill_capability,
+                    arguments,
+                )
             disconnect_task = asyncio.create_task(reader.read(1))
             done, _ = await asyncio.wait(
-                {child_task, disconnect_task},
+                {operation_task, disconnect_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if disconnect_task in done and child_task not in done:
-                child_task.cancel()
-                await asyncio.gather(child_task, return_exceptions=True)
+            if disconnect_task in done and operation_task not in done:
+                operation_task.cancel()
+                await asyncio.gather(operation_task, return_exceptions=True)
                 return
-            result = await child_task
-            await write_frame(writer, {"result": result_to_json(result)})
+            result = await operation_task
+            if isinstance(result, RLMResult):
+                result = result_to_json(result)
+            await write_frame(writer, {"result": result})
         except Exception as exc:
             if not writer.is_closing():
                 try:

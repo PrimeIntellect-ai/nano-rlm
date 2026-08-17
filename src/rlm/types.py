@@ -80,9 +80,11 @@ class ProgrammaticToolCallStats:
         return stats
 
     @classmethod
-    def from_meta(cls, meta: dict) -> ProgrammaticToolCallStats:
+    def from_meta(
+        cls, meta: dict, field: str = "programmatic_tool_call_stats"
+    ) -> ProgrammaticToolCallStats:
         """Load tool-call stats previously persisted via ``to_dict``."""
-        raw = meta.get("programmatic_tool_call_stats", {})
+        raw = meta.get(field, {})
         return cls(
             python_total=int(raw.get("python_total", 0)),
             bash_total=int(raw.get("bash_total", 0)),
