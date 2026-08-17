@@ -309,7 +309,7 @@ class SessionTreeSupervisor:
                 request = await asyncio.wait_for(
                     read_frame(reader), timeout=BROKER_INITIAL_FRAME_TIMEOUT_SECONDS
                 )
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 raise TimeoutError("broker request timed out") from None
             operation = request.get("op")
             if operation not in {"rlm.run", "skill.call"}:
