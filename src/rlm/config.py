@@ -58,6 +58,13 @@ class ProviderConfig:
     headers: dict[str, str] = field(default_factory=dict, repr=False)
     max_retries: int = 5
 
+    def __post_init__(self) -> None:
+        reserved = sorted(
+            name for name in self.headers if name.lower().startswith("x-rlm-")
+        )
+        if reserved:
+            raise ValueError(f"provider headers contain reserved names: {reserved}")
+
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> ProviderConfig:
         env = os.environ if environ is None else environ

@@ -45,6 +45,14 @@ class _Invocation:
     mcp_servers: dict[str, MCPServer]
 
 
+@dataclass
+class _Scope:
+    invocation_id: str
+    parent_call_id: str | None
+    segment_id: str | None
+    tasks: set[asyncio.Task[Any]]
+
+
 def depth_capacities(max_depth: int, limit: int, root_depth: int = 0) -> dict[int, int]:
     """Reserve capacity per descendant depth so nested calls cannot deadlock."""
     levels = max_depth - root_depth
@@ -70,6 +78,8 @@ class SessionTreeSupervisor:
         cwd: str,
         mcp_servers: dict[str, MCPServer] | None = None,
         engine_factory: Callable[..., RLMEngine] | None = None,
+        root_invocation_id: str | None = None,
+        lineage_session_id: str | None = None,
     ) -> None:
         self._engine_factory = engine_factory
         self._server: asyncio.AbstractServer | None = None
@@ -83,7 +93,7 @@ class SessionTreeSupervisor:
         self._child_tasks: set[asyncio.Task[RLMResult]] = set()
         self._connection_tasks: set[asyncio.Task[None]] = set()
         self._connection_writers: set[asyncio.StreamWriter] = set()
-        self._scopes: dict[str, tuple[str, set[asyncio.Task[Any]]]] = {}
+        self._scopes: dict[str, _Scope] = {}
         self._mcp_registry = MCPRegistry(mcp_servers, cwd) if mcp_servers else None
         self._brokered_skills: dict[
             str,
@@ -113,7 +123,8 @@ class SessionTreeSupervisor:
             )
             self._brokered_skills[capability] = (descriptor, self._call_search)
 
-        root_id = uuid.uuid4().hex
+        root_id = root_invocation_id or uuid.uuid4().hex
+        self.session_id = lineage_session_id or root_session.dir.name
         root = _Invocation(
             id=root_id,
             parent_id=None,
@@ -209,18 +220,25 @@ class SessionTreeSupervisor:
         invocation = self._invocations[invocation_id]
         return BrokerEndpoint(self._socket_path, invocation.capability)
 
-    async def open_scope(self, invocation_id: str) -> str:
+    async def open_scope(
+        self,
+        invocation_id: str,
+        parent_call_id: str | None = None,
+        segment_id: str | None = None,
+    ) -> str:
         async with self._lock:
             if self._closed or invocation_id not in self._invocations:
                 raise RuntimeError("recursive invocation is no longer active")
             scope_id = secrets.token_urlsafe(24)
-            self._scopes[scope_id] = (invocation_id, set())
+            self._scopes[scope_id] = _Scope(
+                invocation_id, parent_call_id, segment_id, set()
+            )
             return scope_id
 
     async def close_scope(self, scope_id: str) -> None:
         async with self._lock:
             scope = self._scopes.pop(scope_id, None)
-            tasks = list(scope[1]) if scope else []
+            tasks = list(scope.tasks) if scope else []
         for task in tasks:
             task.cancel()
         if tasks:
@@ -234,7 +252,7 @@ class SessionTreeSupervisor:
         async with self._lock:
             parent_id = self._capabilities.get(capability)
             scope = self._scopes.get(scope_id)
-            if parent_id is None or scope is None or scope[0] != parent_id:
+            if parent_id is None or scope is None or scope.invocation_id != parent_id:
                 raise PermissionError("invalid recursive RLM capability")
             parent = self._invocations[parent_id]
             child_depth = parent.runtime_config.invocation.depth + 1
@@ -247,13 +265,17 @@ class SessionTreeSupervisor:
                     self._limit_result(parent, "recursive call limit reached")
                 )
             self._total_calls += 1
-            task = asyncio.create_task(self._run_child(parent_id, prompt))
+            task = asyncio.create_task(
+                self._run_child(
+                    parent_id, prompt, scope.parent_call_id, scope.segment_id
+                )
+            )
             self._tasks.add(task)
             self._child_tasks.add(task)
-            scope[1].add(task)
+            scope.tasks.add(task)
             task.add_done_callback(self._tasks.discard)
             task.add_done_callback(self._child_tasks.discard)
-            task.add_done_callback(scope[1].discard)
+            task.add_done_callback(scope.tasks.discard)
             return task
 
     async def _start_skill_call(
@@ -266,7 +288,11 @@ class SessionTreeSupervisor:
         async with self._lock:
             invocation_id = self._capabilities.get(capability)
             scope = self._scopes.get(scope_id)
-            if invocation_id is None or scope is None or scope[0] != invocation_id:
+            if (
+                invocation_id is None
+                or scope is None
+                or scope.invocation_id != invocation_id
+            ):
                 raise PermissionError("invalid broker capability")
             try:
                 descriptor, handler = self._brokered_skills[skill_capability]
@@ -281,15 +307,21 @@ class SessionTreeSupervisor:
             )
             task = asyncio.create_task(handler(arguments))
             self._tasks.add(task)
-            scope[1].add(task)
+            scope.tasks.add(task)
             task.add_done_callback(self._tasks.discard)
-            task.add_done_callback(scope[1].discard)
+            task.add_done_callback(scope.tasks.discard)
             return task
 
     async def _limit_result(self, parent: _Invocation, message: str) -> RLMResult:
         return RLMResult(answer=f"[{message}]", session_dir=parent.session.dir)
 
-    async def _run_child(self, parent_id: str, prompt: str) -> RLMResult:
+    async def _run_child(
+        self,
+        parent_id: str,
+        prompt: str,
+        parent_call_id: str | None,
+        segment_id: str | None,
+    ) -> RLMResult:
         parent = self._invocations[parent_id]
         child_context = parent.runtime_config.invocation.child()
         semaphore = self._semaphores[child_context.depth]
@@ -330,6 +362,10 @@ class SessionTreeSupervisor:
                     runtime_config=child.runtime_config,
                     supervisor=self,
                     invocation_id=child.id,
+                    parent_invocation_id=parent_id,
+                    parent_call_id=parent_call_id,
+                    lineage_session_id=self.session_id,
+                    segment_id=segment_id,
                 )
                 return await engine.run(prompt)
             finally:

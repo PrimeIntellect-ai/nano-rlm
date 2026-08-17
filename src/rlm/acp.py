@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from importlib.metadata import version
-from typing import Any
+from typing import Any, Literal
 
 from acp import (
     PROTOCOL_VERSION,
@@ -41,8 +42,16 @@ from acp.schema import (
 )
 
 from rlm.engine import RLMEngine
+from rlm.config import ProviderConfig, RuntimeConfig
 from rlm.mcp import MCPServer
 from rlm.session import Session
+from rlm.tools.ipython import RESERVED_KERNEL_ENV_NAMES
+
+SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
+CAPABILITIES_METADATA_KEY = "ai.prime.rlm/capabilities-v1"
+RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
+SessionStatus = Literal["created", "idle", "closing", "closed"]
+_LINEAGE_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
 
 @dataclass
@@ -50,7 +59,131 @@ class _SessionState:
     engine: RLMEngine
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     prompt_task: asyncio.Task | None = None
+    delivery_task: asyncio.Task | None = None
+    close_task: asyncio.Task[dict[str, Any]] | None = None
     closing: bool = False
+    last_stop_reason: str | None = None
+    snapshot_sequence: int = 0
+
+
+def _session_metadata(
+    state: _SessionState, status: SessionStatus, *, final: bool = False
+) -> dict[str, Any]:
+    snapshot = {
+        "schema_version": 1,
+        "sequence": state.snapshot_sequence,
+        "status": status,
+        "final": final,
+        "last_stop_reason": state.last_stop_reason,
+        **state.engine.execution_snapshot(),
+    }
+    state.snapshot_sequence += 1
+    return {SESSION_METADATA_KEY: snapshot}
+
+
+def _runtime_config(
+    field_meta: Any,
+) -> tuple[RuntimeConfig, str | None]:
+    config = RuntimeConfig.from_env()
+    if field_meta is None:
+        return config, None
+    if not isinstance(field_meta, dict):
+        raise RequestError.invalid_params({"reason": "ACP _meta must be an object"})
+    payload = field_meta.get(RUNTIME_METADATA_KEY)
+    if payload is None:
+        return config, None
+    if not isinstance(payload, dict):
+        raise RequestError.invalid_params(
+            {"reason": f"{RUNTIME_METADATA_KEY} must be an object"}
+        )
+    unknown = sorted(
+        set(payload)
+        - {"lineage_session_id", "provider", "kernel_env", "search_api_key"}
+    )
+    if unknown:
+        raise RequestError.invalid_params(
+            {"reason": f"{RUNTIME_METADATA_KEY} has unknown fields: {unknown}"}
+        )
+
+    lineage_session_id = payload.get("lineage_session_id")
+    if lineage_session_id is not None and (
+        not isinstance(lineage_session_id, str)
+        or _LINEAGE_ID_RE.fullmatch(lineage_session_id) is None
+    ):
+        raise RequestError.invalid_params(
+            {"reason": "lineage_session_id must be a bounded opaque identifier"}
+        )
+
+    provider = config.provider
+    if "provider" in payload:
+        provider_payload = payload["provider"]
+        if not isinstance(provider_payload, dict):
+            raise RequestError.invalid_params({"reason": "provider must be an object"})
+        provider_unknown = sorted(
+            set(provider_payload) - {"base_url", "api_key", "headers", "max_retries"}
+        )
+        if provider_unknown:
+            raise RequestError.invalid_params(
+                {"reason": f"provider has unknown fields: {provider_unknown}"}
+            )
+        base_url = provider_payload.get("base_url")
+        api_key = provider_payload.get("api_key")
+        headers = provider_payload.get("headers", {})
+        max_retries = provider_payload.get("max_retries", provider.max_retries)
+        if base_url is not None and not isinstance(base_url, str):
+            raise RequestError.invalid_params(
+                {"reason": "provider base_url is invalid"}
+            )
+        if not isinstance(api_key, str) or not api_key:
+            raise RequestError.invalid_params({"reason": "provider api_key is invalid"})
+        if not isinstance(headers, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in headers.items()
+        ):
+            raise RequestError.invalid_params(
+                {"reason": "provider headers are invalid"}
+            )
+        if (
+            not isinstance(max_retries, int)
+            or isinstance(max_retries, bool)
+            or max_retries < 0
+        ):
+            raise RequestError.invalid_params(
+                {"reason": "provider max_retries is invalid"}
+            )
+        try:
+            provider = ProviderConfig(base_url, api_key, headers, max_retries)
+        except ValueError as error:
+            raise RequestError.invalid_params({"reason": str(error)}) from error
+
+    kernel_env = payload.get("kernel_env")
+    if kernel_env is None:
+        resolved_kernel_env = config.kernel_env
+    elif not isinstance(kernel_env, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in kernel_env.items()
+    ):
+        raise RequestError.invalid_params({"reason": "kernel_env must map strings"})
+    else:
+        resolved_kernel_env = tuple(kernel_env.items())
+        reserved_kernel_env = sorted(RESERVED_KERNEL_ENV_NAMES.intersection(kernel_env))
+        if reserved_kernel_env:
+            raise RequestError.invalid_params(
+                {"reason": f"kernel_env contains reserved names: {reserved_kernel_env}"}
+            )
+
+    search_api_key = payload.get("search_api_key", config.search_api_key)
+    if search_api_key is not None and not isinstance(search_api_key, str):
+        raise RequestError.invalid_params({"reason": "search_api_key is invalid"})
+    return (
+        replace(
+            config,
+            provider=provider,
+            kernel_env=resolved_kernel_env,
+            search_api_key=search_api_key,
+        ),
+        lineage_session_id,
+    )
 
 
 def _mcp_servers(
@@ -122,6 +255,7 @@ class RLMACPAgent(Agent):
                 ),
             ),
             agent_info=Implementation(name="rlm", title="RLM", version=version("rlm")),
+            field_meta={CAPABILITIES_METADATA_KEY: {"session_snapshot_versions": [1]}},
         )
 
     async def new_session(
@@ -137,6 +271,7 @@ class RLMACPAgent(Agent):
                 {"reason": "RLM does not support additional session directories"}
             )
         resolved_mcp_servers = _mcp_servers(mcp_servers)
+        runtime_config, lineage_session_id = _runtime_config(kwargs)
         session = Session()
         session_id = session.dir.name
         try:
@@ -144,12 +279,18 @@ class RLMACPAgent(Agent):
                 cwd=cwd,
                 session=session,
                 mcp_servers=resolved_mcp_servers,
+                runtime_config=runtime_config,
+                lineage_session_id=lineage_session_id,
             )
         except BaseException:
             session.close()
             raise
-        self._sessions[session_id] = _SessionState(engine=engine)
-        return NewSessionResponse(session_id=session_id)
+        state = _SessionState(engine=engine)
+        self._sessions[session_id] = state
+        return NewSessionResponse(
+            session_id=session_id,
+            field_meta=_session_metadata(state, "created"),
+        )
 
     async def prompt(
         self,
@@ -175,19 +316,56 @@ class RLMACPAgent(Agent):
             try:
                 result = await task
             except asyncio.CancelledError:
-                return PromptResponse(stop_reason="cancelled")
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                state.last_stop_reason = "cancelled"
+                return PromptResponse(
+                    stop_reason="cancelled",
+                    field_meta=_session_metadata(
+                        state, "closing" if state.closing else "idle"
+                    ),
+                )
+            except Exception:
+                state.last_stop_reason = "error"
+                raise
             finally:
                 state.prompt_task = None
 
-            await self._client.session_update(
-                session_id=session_id,
-                update=update_agent_message(text_block(result.answer)),
-            )
             stop_reason = (
                 "max_tokens"
                 if state.engine.stop_reason == "token_budget"
                 else "end_turn"
             )
+            state.last_stop_reason = state.engine.stop_reason or stop_reason
+            if state.closing:
+                return PromptResponse(
+                    stop_reason="cancelled",
+                    field_meta=_session_metadata(state, "closing"),
+                )
+
+            delivery = asyncio.create_task(
+                self._client.session_update(
+                    session_id=session_id,
+                    update=update_agent_message(text_block(result.answer)),
+                )
+            )
+            state.delivery_task = delivery
+            try:
+                await delivery
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                if not state.closing:
+                    raise
+                return PromptResponse(
+                    stop_reason="cancelled",
+                    field_meta=_session_metadata(state, "closing"),
+                )
+            finally:
+                state.delivery_task = None
+
             return PromptResponse(
                 stop_reason=stop_reason,
                 usage=Usage(
@@ -195,6 +373,7 @@ class RLMACPAgent(Agent):
                     input_tokens=result.usage.prompt_tokens,
                     output_tokens=result.usage.completion_tokens,
                 ),
+                field_meta=_session_metadata(state, "idle"),
             )
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
@@ -205,19 +384,41 @@ class RLMACPAgent(Agent):
     async def close_session(
         self, session_id: str, **kwargs: Any
     ) -> CloseSessionResponse:
-        state = self._sessions.pop(session_id, None)
+        state = self._sessions.get(session_id)
         if state is None:
             raise RequestError.resource_not_found(session_id)
-        state.closing = True
-        if state.prompt_task is not None:
-            state.prompt_task.cancel()
-        async with state.lock:
-            await state.engine.aclose()
-        return CloseSessionResponse()
+        if state.close_task is None:
+            state.closing = True
+            state.close_task = asyncio.create_task(
+                self._close_session(session_id, state)
+            )
+        metadata = await asyncio.shield(state.close_task)
+        return CloseSessionResponse(field_meta=metadata)
+
+    async def _close_session(
+        self, session_id: str, state: _SessionState
+    ) -> dict[str, Any]:
+        try:
+            if state.prompt_task is not None:
+                state.prompt_task.cancel()
+            if state.delivery_task is not None:
+                state.delivery_task.cancel()
+            async with state.lock:
+                await state.engine.aclose()
+            return _session_metadata(state, "closed", final=True)
+        finally:
+            if self._sessions.get(session_id) is state:
+                self._sessions.pop(session_id)
 
     async def shutdown(self) -> None:
-        for session_id in list(self._sessions):
-            await self.close_session(session_id)
+        results = await asyncio.gather(
+            *(self.close_session(session_id) for session_id in list(self._sessions)),
+            return_exceptions=True,
+        )
+        if error := next(
+            (result for result in results if isinstance(result, BaseException)), None
+        ):
+            raise error
 
 
 async def serve_acp() -> None:

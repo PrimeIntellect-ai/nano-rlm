@@ -8,11 +8,18 @@ import json
 import logging
 import os
 import time
+import uuid
+from copy import deepcopy
 from pathlib import Path
 
 from openai import AsyncOpenAI, BadRequestError
 
-from rlm.client import call_with_retries, extract_usage, make_client
+from rlm.client import (
+    call_with_retries,
+    extract_usage,
+    make_client,
+    model_call_headers,
+)
 from rlm.config import RuntimeConfig
 from rlm.mcp import MCPServer, load_mcp_servers
 from rlm.prompt import build_system_prompt
@@ -30,7 +37,13 @@ from rlm.tools import (
     get_builtin_tool,
     get_installed_skills,
 )
-from rlm.types import CompactionApplied, RLMMetrics, RLMResult, TokenUsage
+from rlm.types import (
+    CompactionApplied,
+    ProgrammaticToolCallStats,
+    RLMMetrics,
+    RLMResult,
+    TokenUsage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +138,10 @@ class RLMEngine:
         runtime_config: RuntimeConfig | None = None,
         supervisor: SessionTreeSupervisor | None = None,
         invocation_id: str | None = None,
+        parent_invocation_id: str | None = None,
+        parent_call_id: str | None = None,
+        lineage_session_id: str | None = None,
+        segment_id: str | None = None,
     ):
         if runtime_config is not None and any(
             value is not None
@@ -171,7 +188,21 @@ class RLMEngine:
         self.client = client or make_client(config.provider, config.invocation)
         self.session = session
         self._supervisor = supervisor
-        self._invocation_id = invocation_id
+        self._invocation_id = invocation_id or (
+            supervisor.root_id if supervisor is not None else uuid.uuid4().hex
+        )
+        self._parent_invocation_id = parent_invocation_id
+        self._last_call_id = parent_call_id
+        if (
+            supervisor is not None
+            and lineage_session_id is not None
+            and lineage_session_id != supervisor.session_id
+        ):
+            raise ValueError("lineage_session_id does not match the session supervisor")
+        self._lineage_session_id = lineage_session_id or (
+            supervisor.session_id if supervisor is not None else None
+        )
+        self._initial_segment_id = segment_id
         self._owns_supervisor = False
         self._total_usage = TokenUsage()
         self._last_prompt_tokens = 0
@@ -242,10 +273,13 @@ class RLMEngine:
             prompt_tokens=self._total_usage.prompt_tokens,
             completion_tokens=self._total_usage.completion_tokens,
         )
+        lineage_head_before = self._last_call_id
 
         self._metrics.stop_reason = ""
+        segment_id = self._initial_segment_id or uuid.uuid4().hex
+        self._initial_segment_id = None
         try:
-            result = await self._run_loop()
+            result = await self._run_loop(segment_id)
         except BaseException as exc:
             attempted_turns = self._turn - turn_before
             try:
@@ -269,6 +303,7 @@ class RLMEngine:
             self._messages[:] = messages_before
             self._branch_start_turn = branch_start_before
             self._turn = turn_before
+            self._last_call_id = lineage_head_before
             if isinstance(exc, asyncio.CancelledError):
                 self._metrics.stop_reason = "cancelled"
             raise
@@ -297,6 +332,8 @@ class RLMEngine:
             prompt_preview=prompt[:200],
             cwd=self.cwd,
         )
+        if self._lineage_session_id is None:
+            self._lineage_session_id = self.session.dir.name
 
         # Credential-free built-ins run locally; privileged skills are brokered.
         local_skills = [name for name in self.skills if name != "search"]
@@ -309,13 +346,12 @@ class RLMEngine:
                     runtime_config=self.runtime_config,
                     cwd=self.cwd,
                     mcp_servers=self.mcp_servers,
+                    root_invocation_id=self._invocation_id,
+                    lineage_session_id=self._lineage_session_id,
                 )
-                self._invocation_id = self._supervisor.root_id
                 self._owns_supervisor = True
             try:
                 await self._supervisor.start()
-                if self._invocation_id is None:
-                    raise RuntimeError("recursive engine has no supervisor invocation")
                 broker_endpoint = self._supervisor.endpoint_for(self._invocation_id)
                 if self.mcp_servers or "search" in self.skills:
                     reserved_names = {"rlm", *local_skills, *discover_skills()}
@@ -331,7 +367,6 @@ class RLMEngine:
                 if self._owns_supervisor:
                     await self._supervisor.aclose()
                     self._supervisor = None
-                    self._invocation_id = None
                     self._owns_supervisor = False
                 raise
 
@@ -362,11 +397,10 @@ class RLMEngine:
             if self._owns_supervisor and self._supervisor is not None:
                 await self._supervisor.aclose()
                 self._supervisor = None
-                self._invocation_id = None
                 self._owns_supervisor = False
             raise
 
-    async def _run_loop(self) -> RLMResult:
+    async def _run_loop(self, segment_id: str) -> RLMResult:
         messages = self._messages
         if messages is None:
             raise RuntimeError("RLM engine is not started")
@@ -376,9 +410,11 @@ class RLMEngine:
         for turn in itertools.count(self._turn):
             self._turn = turn + 1
             # Call LLM
+            call_id = uuid.uuid4().hex
             request_kwargs = {
                 "model": self.model,
                 "messages": messages,
+                "extra_headers": self._model_call_headers(segment_id, call_id, "turn"),
             }
             if self._active_tool_schemas:
                 request_kwargs["tools"] = self._active_tool_schemas
@@ -394,7 +430,6 @@ class RLMEngine:
                 self._metrics.stop_reason = "request_too_large"
                 final_text = "[request body too large]"
                 break
-
             usage = extract_usage(response)
             self._total_usage.prompt_tokens += usage.prompt_tokens
             self._total_usage.completion_tokens += usage.completion_tokens
@@ -408,6 +443,7 @@ class RLMEngine:
             msg_dict = msg.model_dump(exclude_none=True)
             msg_dict.setdefault("content", "")
             messages.append(msg_dict)
+            self._last_call_id = call_id
 
             # Log assistant message; parse tool-call args once, reuse below.
             tool_calls_log: list[dict] | None = None
@@ -479,7 +515,11 @@ class RLMEngine:
                     and self._supervisor is not None
                     and self._invocation_id is not None
                 ):
-                    scope_id = await self._supervisor.open_scope(self._invocation_id)
+                    scope_id = await self._supervisor.open_scope(
+                        self._invocation_id,
+                        parent_call_id=call_id,
+                        segment_id=segment_id,
+                    )
                 try:
                     if scope_id is not None:
                         repl.set_broker_scope(scope_id)
@@ -558,7 +598,7 @@ class RLMEngine:
             ):
                 try:
                     await self._compact_branch(
-                        messages, turn, self._active_tool_schemas
+                        messages, turn, self._active_tool_schemas, segment_id
                     )
                 except BadRequestError as e:
                     if not _is_request_too_large(e):
@@ -649,8 +689,31 @@ class RLMEngine:
             if self._repl is not None:
                 self._repl.shutdown()
 
+    def _programmatic_tool_call_stats(
+        self,
+    ) -> tuple[ProgrammaticToolCallStats, ProgrammaticToolCallStats]:
+        if self.session is None:
+            return ProgrammaticToolCallStats(), ProgrammaticToolCallStats()
+        direct = ProgrammaticToolCallStats.from_log(
+            self.session.dir / "programmatic_tool_calls.jsonl"
+        )
+        child = self.session.aggregate_child_metrics(
+            "local_programmatic_tool_call_stats"
+        ).tool_call_stats
+        if self._supervisor is not None:
+            trusted_direct, trusted_child = (
+                self._supervisor.programmatic_tool_call_stats(self._invocation_id)
+            )
+            direct = direct.merge(trusted_direct)
+            child = child.merge(trusted_child)
+        return direct, child
+
     async def _compact_branch(
-        self, messages: list[dict], turn: int, active_tools: list[dict]
+        self,
+        messages: list[dict],
+        turn: int,
+        active_tools: list[dict],
+        segment_id: str,
     ) -> None:
         """Ask the model for a handoff summary and rebuild ``messages``.
 
@@ -685,14 +748,25 @@ class RLMEngine:
         if self._repl is not None:
             checkpoint_prompt += REPL_RESTART_NOTE
         messages.append({"role": "user", "content": checkpoint_prompt})
-        request_kwargs: dict = {"model": self.model, "messages": messages}
+        call_id = uuid.uuid4().hex
+        request_kwargs: dict = {
+            "model": self.model,
+            "messages": messages,
+            "extra_headers": self._model_call_headers(
+                segment_id, call_id, "compaction"
+            ),
+        }
         if active_tools:
             request_kwargs["tools"] = active_tools
             request_kwargs["tool_choice"] = "none"
-        response = await call_with_retries(
-            self.client.chat.completions.create,
-            **request_kwargs,
-        )
+        try:
+            response = await call_with_retries(
+                self.client.chat.completions.create,
+                **request_kwargs,
+            )
+        except BaseException:
+            messages.pop()
+            raise
         usage = extract_usage(response)
         self._total_usage.prompt_tokens += usage.prompt_tokens
         self._total_usage.completion_tokens += usage.completion_tokens
@@ -732,6 +806,68 @@ class RLMEngine:
         )
         self._branch_start_turn = turn + 1
         self._metrics.turns_since_last_compaction = 0
+        self._last_call_id = call_id
+
+    def _model_call_headers(
+        self, segment_id: str, call_id: str, call_kind: str
+    ) -> dict[str, str]:
+        if self.session is None:
+            raise RuntimeError("RLM session is not initialized")
+        return model_call_headers(
+            session_id=self._lineage_session_id or self.session.dir.name,
+            invocation_id=self._invocation_id,
+            parent_invocation_id=self._parent_invocation_id,
+            segment_id=segment_id,
+            call_id=call_id,
+            parent_call_id=self._last_call_id,
+            depth=self.depth,
+            call_kind=call_kind,
+        )
+
+    def execution_snapshot(self) -> dict:
+        """Return a credential-free snapshot of cumulative execution state."""
+        if self.session is None:
+            raise RuntimeError("RLM session is not initialized")
+        direct_tool_stats, child_tool_stats = self._programmatic_tool_call_stats()
+        metrics = deepcopy(self._metrics)
+        metrics.apply_programmatic_tool_call_stats(direct_tool_stats, child_tool_stats)
+        metric_values = {
+            key: value
+            for key, value in metrics.to_dict().items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+        snapshot = {
+            "session_id": self._lineage_session_id or self.session.dir.name,
+            "root_invocation_id": self._invocation_id,
+            "model": self.model,
+            "turns": self._turn,
+            "usage": {
+                "prompt_tokens": self._total_usage.prompt_tokens,
+                "completion_tokens": self._total_usage.completion_tokens,
+                "total_tokens": self._total_usage.total,
+            },
+            "metrics": metric_values,
+            "programmatic_tool_call_stats": direct_tool_stats.merge(
+                child_tool_stats
+            ).to_dict(),
+            "supervisor": {
+                "subagent_calls": self._supervisor.total_calls
+                if self._supervisor is not None
+                else 0,
+                "active_subagent_calls": self._supervisor.active_calls
+                if self._supervisor is not None
+                else 0,
+            },
+            "limits": {
+                "max_depth": self.runtime_config.policy.max_depth,
+                "max_concurrent_subagents": self.runtime_config.policy.max_concurrent_subagents,
+                "max_subagent_calls": self.runtime_config.policy.max_subagent_calls,
+                "max_tokens": self.runtime_config.policy.max_tokens,
+                "summarize_at_tokens": self.runtime_config.policy.summarize_at_tokens,
+                "max_compactions": self.runtime_config.policy.max_compactions,
+            },
+        }
+        return snapshot
 
     def _load_system_prompt(
         self, messages_path: str, active_tools: list[BuiltinTool]

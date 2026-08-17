@@ -56,6 +56,23 @@ not advertise `session/load`: an arbitrary live Python kernel cannot be
 reconstructed after the ACP process exits, so clients must keep the process
 alive for the lifetime of a session.
 
+ACP clients can pass trusted per-rollout configuration under the
+`ai.prime.rlm/runtime-v1` key in `session/new._meta`. Supported fields are an
+opaque `lineage_session_id`, explicit provider configuration, `kernel_env`, and
+`search_api_key`. This lets a harness deliver credentials over the private ACP
+stdio channel instead of placing them in the agent process environment. RLM
+never echoes those inputs. `session/new`, `session/prompt`, and `session/close`
+responses carry cumulative, credential-free snapshots under
+`ai.prime.rlm/session-v1`; only the close snapshot with `final: true` is
+authoritative for training metrics.
+
+Every inference request carries versioned `X-RLM-*` provenance headers for its
+session, invocation, prompt segment, logical call, causal parent, depth, and
+call kind (`turn` or `compaction`). IDs remain stable across transport retries
+and recursion inherits the spawning call and segment. These headers are
+observability metadata, not authorization, and are visible to the configured
+inference endpoint.
+
 ## Python SDK
 
 ```python
