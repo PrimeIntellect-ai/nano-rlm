@@ -15,8 +15,14 @@ from acp.schema import EnvVariable, HttpHeader, HttpMcpServer, McpServerStdio
 import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall
-from rlm.acp import RLMACPAgent
+from rlm.acp import (
+    CAPABILITIES_METADATA_KEY,
+    RUNTIME_METADATA_KEY,
+    SESSION_METADATA_KEY,
+    RLMACPAgent,
+)
 from rlm.engine import RLMEngine
+from rlm.config import ExecutionPolicy, InvocationContext, ProviderConfig, RuntimeConfig
 from rlm.session import Session
 from rlm.types import RLMResult, TokenUsage
 
@@ -38,10 +44,14 @@ class _Engine:
         cwd: str,
         session,
         mcp_servers: dict[str, Any],
+        runtime_config=None,
+        lineage_session_id: str | None = None,
     ) -> None:
         self.cwd = cwd
         self.session = session
         self.mcp_servers = mcp_servers
+        self.runtime_config = runtime_config
+        self.lineage_session_id = lineage_session_id
         self.prompts: list[str] = []
         self.prompt_started = asyncio.Event()
         self.closed = False
@@ -66,6 +76,23 @@ class _Engine:
 
     async def aclose(self) -> None:
         self.close()
+
+    def execution_snapshot(self) -> dict[str, Any]:
+        return {
+            "session_id": self.lineage_session_id or self.session.dir.name,
+            "root_invocation_id": "root",
+            "model": "test-model",
+            "turns": len(self.prompts),
+            "usage": {
+                "prompt_tokens": len(self.prompts) * 3,
+                "completion_tokens": len(self.prompts) * 2,
+                "total_tokens": len(self.prompts) * 5,
+            },
+            "metrics": {},
+            "programmatic_tool_call_stats": {},
+            "supervisor": {"subagent_calls": 0, "active_subagent_calls": 0},
+            "limits": {},
+        }
 
 
 async def test_engine_prompt_preserves_conversation(session):
@@ -93,9 +120,59 @@ async def test_engine_prompt_preserves_conversation(session):
         {"role": "user", "content": "two"},
         {"role": "assistant", "content": "second"},
     ]
+    first_headers = client.calls[0]["extra_headers"]
+    second_headers = client.calls[1]["extra_headers"]
+    assert first_headers["X-RLM-Session-ID"] == session.dir.name
+    assert first_headers["X-RLM-Invocation-ID"] == second_headers["X-RLM-Invocation-ID"]
+    assert first_headers["X-RLM-Segment-ID"] != second_headers["X-RLM-Segment-ID"]
+    assert "X-RLM-Parent-Call-ID" not in first_headers
+    assert second_headers["X-RLM-Parent-Call-ID"] == first_headers["X-RLM-Call-ID"]
     meta = json.loads((Path(session.dir) / "meta.json").read_text())
     assert meta["turns"] == 2
     assert meta["answer_preview"] == "second"
+
+
+def test_execution_snapshot_after_finalize_is_numeric_and_credential_free(session):
+    config = RuntimeConfig(
+        model="test-model",
+        provider=ProviderConfig(
+            "http://interceptor",
+            "provider-secret",
+            headers={"X-Task": "header-secret"},
+        ),
+        invocation=InvocationContext(),
+        policy=ExecutionPolicy(max_depth=1),
+        kernel_env=(("TASK_TOKEN", "kernel-secret"),),
+        search_api_key="search-secret",
+    )
+    (session.dir / "programmatic_tool_calls.jsonl").write_text(
+        '{"tool":"demo","source":"python"}\n'
+    )
+    engine = RLMEngine(
+        client=DummyClient([]),  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+    )
+    engine._has_result = True
+    engine._last_answer = "answer-secret"
+    engine.close()
+
+    snapshot = engine.execution_snapshot()
+
+    assert snapshot["programmatic_tool_call_stats"]["by_tool_python"] == {"demo": 1}
+    assert all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in snapshot["metrics"].values()
+    )
+    serialized = json.dumps(snapshot)
+    for secret in (
+        "provider-secret",
+        "header-secret",
+        "kernel-secret",
+        "search-secret",
+        "answer-secret",
+    ):
+        assert secret not in serialized
 
 
 async def test_engine_prompt_preserves_ipython_kernel(session):
@@ -156,6 +233,56 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
     ]
+    failed_headers = client.calls[0]["extra_headers"]
+    resumed_headers = client.calls[1]["extra_headers"]
+    assert failed_headers["X-RLM-Call-ID"] != resumed_headers["X-RLM-Call-ID"]
+    assert failed_headers["X-RLM-Segment-ID"] != resumed_headers["X-RLM-Segment-ID"]
+    assert "X-RLM-Parent-Call-ID" not in resumed_headers
+
+
+async def test_model_call_lineage_survives_retries_and_compaction(monkeypatch, session):
+    monkeypatch.setattr("rlm.client._RETRY_DELAYS", (0,))
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "print(1)"})]),
+            DummyMessage(content="summary"),
+            DummyMessage(content="done"),
+        ]
+    )
+    create = client.create
+    attempts = []
+
+    async def flaky_first_call(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise ConnectionResetError("retry")
+        return await create(**kwargs)
+
+    client.create = flaky_first_call
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        summarize_at_tokens=1,
+    )
+
+    try:
+        result = await engine.prompt("compact")
+    finally:
+        engine.close()
+
+    assert result.answer == "done"
+    assert attempts[0]["extra_headers"] == attempts[1]["extra_headers"]
+    turn, compaction, resumed = [call["extra_headers"] for call in client.calls]
+    assert {header["X-RLM-Segment-ID"] for header in (turn, compaction, resumed)} == {
+        turn["X-RLM-Segment-ID"]
+    }
+    assert [
+        turn["X-RLM-Call-Kind"],
+        compaction["X-RLM-Call-Kind"],
+        resumed["X-RLM-Call-Kind"],
+    ] == ["turn", "compaction", "turn"]
+    assert compaction["X-RLM-Parent-Call-ID"] == turn["X-RLM-Call-ID"]
+    assert resumed["X-RLM-Parent-Call-ID"] == compaction["X-RLM-Call-ID"]
 
 
 async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
@@ -251,6 +378,11 @@ async def test_engine_failed_prompt_can_be_retried(session):
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
     ]
+
+    failed_headers = client.calls[0]["extra_headers"]
+    resumed_headers = client.calls[1]["extra_headers"]
+    assert failed_headers["X-RLM-Call-ID"] != resumed_headers["X-RLM-Call-ID"]
+    assert "X-RLM-Parent-Call-ID" not in resumed_headers
 
 
 async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
@@ -436,6 +568,9 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     initialized = await agent.initialize(PROTOCOL_VERSION)
     assert initialized.agent_capabilities.mcp_capabilities.http is True
     assert initialized.agent_capabilities.load_session is False
+    assert initialized.field_meta == {
+        CAPABILITIES_METADATA_KEY: {"session_snapshot_versions": [1]}
+    }
 
     created = await agent.new_session(
         str(tmp_path),
@@ -476,9 +611,94 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     ]
     assert first.usage.total_tokens == 5
     assert second.stop_reason == "end_turn"
+    created_snapshot = created.field_meta[SESSION_METADATA_KEY]
+    first_snapshot = first.field_meta[SESSION_METADATA_KEY]
+    second_snapshot = second.field_meta[SESSION_METADATA_KEY]
+    assert created_snapshot["status"] == "created"
+    assert created_snapshot["sequence"] == 0
+    assert created_snapshot["final"] is False
+    assert first_snapshot["turns"] == 1
+    assert first_snapshot["status"] == "idle"
+    assert first_snapshot["sequence"] == 1
+    assert first_snapshot["last_stop_reason"] == "done"
+    assert second_snapshot["sequence"] == 2
+    assert created.model_dump(mode="json", by_alias=True)["_meta"] == created.field_meta
 
-    await agent.close_session(created.session_id)
+    closed = await agent.close_session(created.session_id)
+    closed_snapshot = closed.field_meta[SESSION_METADATA_KEY]
+    assert closed_snapshot["status"] == "closed"
+    assert closed_snapshot["sequence"] == 3
+    assert closed_snapshot["final"] is True
     assert engine.closed is True
+
+
+async def test_acp_runtime_metadata_keeps_credentials_out_of_responses(
+    monkeypatch, tmp_path
+):
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setenv("RLM_API_KEY", "ambient-provider-secret")
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    agent = RLMACPAgent()
+    metadata = {
+        RUNTIME_METADATA_KEY: {
+            "lineage_session_id": "trace-123",
+            "provider": {
+                "base_url": "http://interceptor",
+                "api_key": "session-provider-secret",
+                "headers": {"X-Task": "header-secret"},
+                "max_retries": 2,
+            },
+            "kernel_env": {"TASK_VISIBLE": "task-secret"},
+            "search_api_key": "search-secret",
+        }
+    }
+
+    created = await agent.new_session(str(tmp_path), **metadata)
+    engine = _Engine.instances[0]
+
+    assert engine.lineage_session_id == "trace-123"
+    assert engine.runtime_config.provider.base_url == "http://interceptor"
+    assert engine.runtime_config.provider.api_key == "session-provider-secret"
+    assert engine.runtime_config.provider.headers == {"X-Task": "header-secret"}
+    assert engine.runtime_config.kernel_env == (("TASK_VISIBLE", "task-secret"),)
+    assert engine.runtime_config.search_api_key == "search-secret"
+    response_json = created.model_dump_json(by_alias=True)
+    for secret in (
+        "session-provider-secret",
+        "header-secret",
+        "task-secret",
+        "search-secret",
+        "ambient-provider-secret",
+    ):
+        assert secret not in response_json
+    assert created.field_meta[SESSION_METADATA_KEY]["session_id"] == "trace-123"
+    await agent.close_session(created.session_id)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"lineage_session_id": "bad id"},
+        {"provider": {}},
+        {
+            "provider": {
+                "api_key": "secret",
+                "headers": {"x-rlm-call-id": "forged"},
+            }
+        },
+        {"kernel_env": {"RLM_API_KEY": "forbidden"}},
+        {"unknown": "value"},
+    ],
+)
+async def test_acp_rejects_invalid_runtime_metadata(monkeypatch, tmp_path, payload):
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    agent = RLMACPAgent()
+
+    with pytest.raises(RequestError):
+        await agent.new_session(str(tmp_path), **{RUNTIME_METADATA_KEY: payload})
+
+    assert agent._sessions == {}
 
 
 async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
@@ -496,13 +716,108 @@ async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
     await engine.prompt_started.wait()
     await agent.cancel(created.session_id)
 
-    assert (await pending).stop_reason == "cancelled"
+    cancelled = await pending
+    assert cancelled.stop_reason == "cancelled"
+    assert cancelled.field_meta[SESSION_METADATA_KEY]["status"] == "idle"
+    assert cancelled.field_meta[SESSION_METADATA_KEY]["last_stop_reason"] == "cancelled"
     assert engine.closed is False
     resumed = await agent.prompt(created.session_id, [text_block("after")])
     assert resumed.stop_reason == "end_turn"
     assert engine.prompts == ["wait", "after"]
 
     await agent.close_session(created.session_id)
+
+
+async def test_acp_transport_cancellation_propagates(monkeypatch, tmp_path):
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    created = await agent.new_session(str(tmp_path))
+    engine = _Engine.instances[0]
+
+    pending = asyncio.create_task(
+        agent.prompt(created.session_id, [text_block("wait")])
+    )
+    await engine.prompt_started.wait()
+    pending.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    resumed = await agent.prompt(created.session_id, [text_block("after")])
+    assert resumed.stop_reason == "end_turn"
+    await agent.close_session(created.session_id)
+
+
+async def test_acp_close_cancels_blocked_answer_delivery(monkeypatch, tmp_path):
+    class BlockingClient(_Client):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+
+        async def session_update(
+            self, session_id: str, update: Any, **kwargs: Any
+        ) -> None:
+            self.started.set()
+            await asyncio.Future()
+
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    client = BlockingClient()
+    agent = RLMACPAgent()
+    agent.on_connect(client)  # type: ignore[arg-type]
+    created = await agent.new_session(str(tmp_path))
+
+    pending = asyncio.create_task(agent.prompt(created.session_id, [text_block("one")]))
+    await client.started.wait()
+    await agent.cancel(created.session_id)
+    await asyncio.sleep(0)
+    assert pending.done() is False
+    closed = await asyncio.wait_for(agent.close_session(created.session_id), timeout=1)
+
+    assert (await pending).stop_reason == "cancelled"
+    assert closed.field_meta[SESSION_METADATA_KEY]["status"] == "closed"
+    assert _Engine.instances[0].closed is True
+
+
+async def test_acp_cancelled_close_remains_owned_by_shutdown(monkeypatch, tmp_path):
+    class SlowCancelEngine(_Engine):
+        release = asyncio.Event()
+
+        async def prompt(self, prompt: str) -> RLMResult:
+            self.prompts.append(prompt)
+            self.prompt_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                await self.release.wait()
+                raise
+
+    SlowCancelEngine.instances.clear()
+    SlowCancelEngine.release = asyncio.Event()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", SlowCancelEngine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    created = await agent.new_session(str(tmp_path))
+    engine = SlowCancelEngine.instances[0]
+    pending = asyncio.create_task(
+        agent.prompt(created.session_id, [text_block("wait")])
+    )
+    await engine.prompt_started.wait()
+    closing = asyncio.create_task(agent.close_session(created.session_id))
+    await asyncio.sleep(0)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    SlowCancelEngine.release.set()
+    assert (await pending).stop_reason == "cancelled"
+    await agent.shutdown()
+    assert engine.closed is True
+    assert agent._sessions == {}
 
 
 async def test_acp_failed_prompt_keeps_session_reusable(monkeypatch, tmp_path):
@@ -522,7 +837,25 @@ async def test_acp_failed_prompt_keeps_session_reusable(monkeypatch, tmp_path):
     assert engine.prompts == ["fail", "after"]
     assert engine.closed is False
 
-    await agent.close_session(created.session_id)
+    closed = await agent.close_session(created.session_id)
+    assert closed.field_meta[SESSION_METADATA_KEY]["last_stop_reason"] == "done"
+
+
+async def test_acp_close_reports_last_prompt_failure(monkeypatch, tmp_path):
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    created = await agent.new_session(str(tmp_path))
+
+    with pytest.raises(RuntimeError, match="transient failure"):
+        await agent.prompt(created.session_id, [text_block("fail")])
+    closed = await agent.close_session(created.session_id)
+
+    snapshot = closed.field_meta[SESSION_METADATA_KEY]
+    assert snapshot["last_stop_reason"] == "error"
+    assert snapshot["final"] is True
 
 
 async def test_acp_close_rejects_queued_prompt(monkeypatch, tmp_path):
@@ -561,7 +894,14 @@ async def test_acp_stdio_lifecycle(tmp_path):
         _process,
     ):
         initialized = await connection.initialize(PROTOCOL_VERSION)
-        created = await connection.new_session(cwd=str(tmp_path), mcp_servers=[])
-        await connection.close_session(created.session_id)
+        created = await connection.new_session(
+            cwd=str(tmp_path),
+            mcp_servers=[],
+            **{RUNTIME_METADATA_KEY: {"lineage_session_id": "wire-session"}},
+        )
+        closed = await connection.close_session(created.session_id)
 
     assert initialized.agent_info.name == "rlm"
+    assert created.field_meta[SESSION_METADATA_KEY]["status"] == "created"
+    assert created.field_meta[SESSION_METADATA_KEY]["session_id"] == "wire-session"
+    assert closed.field_meta[SESSION_METADATA_KEY]["status"] == "closed"

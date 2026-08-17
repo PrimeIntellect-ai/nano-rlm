@@ -1,6 +1,6 @@
 import pytest
 
-from rlm.client import make_client
+from rlm.client import make_client, model_call_headers
 from rlm.config import (
     KERNEL_ENV_CONFIG_ENV,
     PI_INFERENCE_BASE_URL,
@@ -32,6 +32,38 @@ def test_provider_config_keeps_keys_paired_with_provider():
         {"X-Prime-Team-ID": "team"},
     )
     assert (openai.base_url, openai.api_key) == ("http://openai", "openai-secret")
+
+    with pytest.raises(ValueError, match="reserved names"):
+        ProviderConfig(
+            "http://interceptor",
+            "secret",
+            headers={"x-RlM-Parent-Invocation-ID": "forged"},
+        )
+
+
+def test_model_call_headers_encode_versioned_lineage():
+    headers = model_call_headers(
+        session_id="session",
+        invocation_id="child",
+        parent_invocation_id="parent",
+        segment_id="segment",
+        call_id="call",
+        parent_call_id="parent-call",
+        depth=2,
+        call_kind="compaction",
+    )
+
+    assert headers == {
+        "X-RLM-Lineage-Version": "1",
+        "X-RLM-Session-ID": "session",
+        "X-RLM-Invocation-ID": "child",
+        "X-RLM-Parent-Invocation-ID": "parent",
+        "X-RLM-Segment-ID": "segment",
+        "X-RLM-Call-ID": "call",
+        "X-RLM-Parent-Call-ID": "parent-call",
+        "X-RLM-Depth": "2",
+        "X-RLM-Call-Kind": "compaction",
+    }
 
 
 def test_runtime_config_resolves_environment_once():
@@ -102,6 +134,10 @@ def test_make_client_uses_explicit_invocation_depth(monkeypatch):
         "max_retries": 7,
         "default_headers": {"X-RLM-Depth": "3", "X-Test": "yes"},
     }
+
+    provider.headers["X-RLM-Call-ID"] = "forged-after-construction"
+    with pytest.raises(ValueError, match="reserved names"):
+        make_client(provider, InvocationContext(depth=3))
 
 
 def test_runtime_config_validates_recursive_limits():

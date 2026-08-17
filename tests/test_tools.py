@@ -78,19 +78,19 @@ def test_ipython_kernel_does_not_inherit_parent_stdio(session, capfd):
     repl = IPythonREPL(cwd=str(session.dir), session=session)
     repl.start()
     try:
-        result = repl.execute(
+        repl.execute(
             "import os; "
             "stdout_written = os.write(1, b'123\\n'); "
-            "stderr_written = os.write(2, b'kernel stderr\\n'); "
-            "print(stdout_written, stderr_written)"
+            "stderr_written = os.write(2, b'kernel stderr\\n')"
         )
+        result = repl.execute("print(stdout_written, stderr_written)")
     finally:
         repl.shutdown()
 
     captured = capfd.readouterr()
     assert captured.out == ""
     assert captured.err == ""
-    assert "4 14" in result
+    assert result.strip() == "4 14"
 
 
 def test_kernel_environment_is_explicit_and_reserves_supervisor_names(tmp_path):

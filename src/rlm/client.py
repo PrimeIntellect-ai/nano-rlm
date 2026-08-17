@@ -17,6 +17,16 @@ from pydantic import ValidationError
 from rlm.config import InvocationContext, ProviderConfig
 from rlm.types import TokenUsage
 
+RLM_SESSION_ID_HEADER = "X-RLM-Session-ID"
+RLM_INVOCATION_ID_HEADER = "X-RLM-Invocation-ID"
+RLM_PARENT_INVOCATION_ID_HEADER = "X-RLM-Parent-Invocation-ID"
+RLM_SEGMENT_ID_HEADER = "X-RLM-Segment-ID"
+RLM_CALL_ID_HEADER = "X-RLM-Call-ID"
+RLM_PARENT_CALL_ID_HEADER = "X-RLM-Parent-Call-ID"
+RLM_DEPTH_HEADER = "X-RLM-Depth"
+RLM_CALL_KIND_HEADER = "X-RLM-Call-Kind"
+RLM_LINEAGE_VERSION_HEADER = "X-RLM-Lineage-Version"
+
 _RETRYABLE: tuple[type[BaseException], ...] = (
     APIConnectionError,
     APITimeoutError,
@@ -68,13 +78,46 @@ def make_client(
     """
     provider = provider or ProviderConfig.from_env()
     invocation = invocation or InvocationContext.from_env()
-    headers = {"X-RLM-Depth": str(invocation.depth), **provider.headers}
+    reserved = sorted(
+        name for name in provider.headers if name.lower().startswith("x-rlm-")
+    )
+    if reserved:
+        raise ValueError(f"provider headers contain reserved names: {reserved}")
+    headers = {**provider.headers, RLM_DEPTH_HEADER: str(invocation.depth)}
     return AsyncOpenAI(
         base_url=provider.base_url,
         api_key=provider.api_key,
         max_retries=provider.max_retries,
         default_headers=headers,
     )
+
+
+def model_call_headers(
+    *,
+    session_id: str,
+    invocation_id: str,
+    parent_invocation_id: str | None,
+    segment_id: str,
+    call_id: str,
+    parent_call_id: str | None,
+    depth: int,
+    call_kind: str,
+) -> dict[str, str]:
+    """Build provenance headers for one logical model call."""
+    headers = {
+        RLM_LINEAGE_VERSION_HEADER: "1",
+        RLM_SESSION_ID_HEADER: session_id,
+        RLM_INVOCATION_ID_HEADER: invocation_id,
+        RLM_SEGMENT_ID_HEADER: segment_id,
+        RLM_CALL_ID_HEADER: call_id,
+        RLM_DEPTH_HEADER: str(depth),
+        RLM_CALL_KIND_HEADER: call_kind,
+    }
+    if parent_invocation_id is not None:
+        headers[RLM_PARENT_INVOCATION_ID_HEADER] = parent_invocation_id
+    if parent_call_id is not None:
+        headers[RLM_PARENT_CALL_ID_HEADER] = parent_call_id
+    return headers
 
 
 async def call_with_retries(
