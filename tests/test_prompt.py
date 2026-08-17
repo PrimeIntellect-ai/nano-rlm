@@ -90,3 +90,18 @@ def test_search_skill_prompt_included_only_when_search_is_installed():
     assert SEARCH_SKILL_PROMPT not in _prompt(
         [_Tool("ipython")], installed_skills=["search_docs"]
     )
+
+
+def test_prompt_only_advertises_actual_shell_skills():
+    prompt = build_system_prompt(
+        "/repo",
+        None,
+        ["edit", "uploaded"],
+        "/repo/messages.jsonl",
+        allow_recursion=False,
+        active_tools=[_Tool("ipython")],
+        shell_skills=["uploaded"],
+    )
+
+    assert "Shell-enabled installed skills: `uploaded`" in prompt
+    assert "Other listed skills are IPython-only" in prompt

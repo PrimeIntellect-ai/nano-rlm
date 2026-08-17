@@ -156,24 +156,8 @@ class MCPRegistry:
     ) -> list[str]:
         if self._tools is None:
             raise RuntimeError("MCP tools have not been discovered")
-        reserved = set(reserved_names)
         descriptors = [entry.descriptor for entry in self._tools.values()]
-        conflicts = sorted(
-            descriptor.name for descriptor in descriptors if descriptor.name in reserved
-        )
-        if conflicts:
-            raise ValueError(
-                f"MCP tool names conflict with existing skills: {conflicts}"
-            )
-
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        for descriptor in descriptors:
-            source = _MODULE_TEMPLATE.format(
-                description=descriptor.description,
-                descriptor=descriptor.to_dict(),
-            )
-            (dest_dir / f"{descriptor.name}.py").write_text(source)
-        return [descriptor.name for descriptor in descriptors]
+        return write_skill_modules(descriptors, dest_dir, reserved_names)
 
 
 def load_mcp_servers() -> dict[str, MCPServer]:
@@ -295,6 +279,34 @@ __doc__ = {description!r}
 __rlm_brokered__ = True
 run = make_skill({descriptor!r})
 """
+
+
+def write_skill_modules(
+    descriptors: Iterable[MCPToolDescriptor],
+    dest_dir: Path,
+    reserved_names: Iterable[str] = (),
+) -> list[str]:
+    """Write public brokered-skill descriptors as importable proxy modules."""
+    descriptor_list = list(descriptors)
+    reserved = set(reserved_names)
+    names = [descriptor.name for descriptor in descriptor_list]
+    duplicates = sorted(name for name in set(names) if names.count(name) > 1)
+    conflicts = sorted(name for name in names if name in reserved)
+    if duplicates:
+        raise ValueError(f"duplicate brokered skill names: {duplicates}")
+    if conflicts:
+        raise ValueError(
+            f"brokered skill names conflict with existing skills: {conflicts}"
+        )
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for descriptor in descriptor_list:
+        source = _MODULE_TEMPLATE.format(
+            description=descriptor.description,
+            descriptor=descriptor.to_dict(),
+        )
+        (dest_dir / f"{descriptor.name}.py").write_text(source)
+    return names
 
 
 def list_skill_modules(skills_dir: Path) -> list[str]:

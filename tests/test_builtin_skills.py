@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
+from conftest import DummyClient, DummyMessage, DummyToolCall, tool_result
+
+from rlm import broker
+from rlm.config import (
+    ExecutionPolicy,
+    InvocationContext,
+    ProviderConfig,
+    RuntimeConfig,
+)
+from rlm.engine import RLMEngine
+from rlm.session import Session
 from rlm.skills import available_builtin_skills, enable_builtin_skills
 from rlm.skills.edit import run as edit
 from rlm.skills.search import format_results
 from rlm.skills.search import run as run_search
+from rlm.skills.search import run_with_api_key
 
 
 async def test_edit_replaces_unique_string(tmp_path):
@@ -42,10 +57,10 @@ def test_enable_unknown_skill_raises(tmp_path):
         enable_builtin_skills(["nope"], tmp_path)
 
 
-def test_search_enable_writes_stub(tmp_path):
+def test_search_enable_is_supervisor_owned(tmp_path):
     assert "search" in available_builtin_skills()
     assert enable_builtin_skills(["search"], tmp_path) == ["search"]
-    assert (tmp_path / "search.py").read_text() == "from rlm.skills.search import run\n"
+    assert not (tmp_path / "search.py").exists()
 
 
 async def test_search_missing_api_key_returns_error(monkeypatch):
@@ -68,3 +83,157 @@ def test_search_format_results():
 
 def test_search_format_results_empty():
     assert format_results([], "q") == "No results returned for query: q"
+
+
+async def test_search_transport_errors_do_not_expose_key(monkeypatch):
+    secret = "search-secret-do-not-leak"
+
+    class FailingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            raise RuntimeError(f"transport failed with {secret}")
+
+    monkeypatch.setattr("rlm.skills.search.httpx.AsyncClient", FailingClient)
+    with pytest.raises(RuntimeError, match="web search is unavailable") as exc:
+        await run_with_api_key(secret, "query")
+    assert secret not in str(exc.value)
+
+
+async def test_real_kernel_search_is_brokered_without_key(monkeypatch, session):
+    secret = "search-secret-do-not-leak"
+    requests = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "organic": [
+                    {
+                        "title": "Result",
+                        "link": "https://example.com",
+                        "snippet": "Found it",
+                    }
+                ]
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            requests.append((url, kwargs))
+            return Response()
+
+    monkeypatch.setattr("rlm.skills.search.httpx.AsyncClient", FakeClient)
+    monkeypatch.setenv("SERPER_API_KEY", secret)
+    config = RuntimeConfig(
+        model="test-model",
+        provider=ProviderConfig("http://interceptor", "inference-secret"),
+        invocation=InvocationContext(),
+        policy=ExecutionPolicy(),
+        skills=("search",),
+        search_api_key=secret,
+    )
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": """
+import os, subprocess
+print(await search(query='needle'))
+child_env = subprocess.check_output(['env'], text=True)
+print('SERPER_API_KEY' not in os.environ)
+print('SERPER_API_KEY=' not in child_env)
+"""
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+    )
+
+    result = await engine.run("search")
+
+    output = tool_result(client)
+    assert result.answer == "done"
+    assert "Result 1: Result" in output
+    assert output.strip().splitlines()[-2:] == ["True", "True"]
+    assert requests[0][1]["headers"]["X-API-KEY"] == secret
+    source = (session.dir / "search.py").read_text()
+    assert secret not in source
+    meta = json.loads((session.dir / "meta.json").read_text())
+    assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"search": 1}
+
+
+async def test_supervisor_close_cancels_active_search(monkeypatch, tmp_path):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    monkeypatch.setattr("rlm.skills.search.httpx.AsyncClient", BlockingClient)
+    session = Session(tmp_path / "session")
+    config = RuntimeConfig(
+        model="test-model",
+        provider=ProviderConfig("http://interceptor", "inference-secret"),
+        invocation=InvocationContext(),
+        policy=ExecutionPolicy(),
+        skills=("search",),
+        search_api_key="search-secret",
+    )
+    from rlm.supervisor import SessionTreeSupervisor
+
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+    )
+    await supervisor.start()
+    scope = await supervisor.open_scope(supervisor.root_id)
+    broker.configure(supervisor.endpoint_for(supervisor.root_id))
+    broker.set_scope(scope)
+    capability = next(iter(supervisor._brokered_skills))
+    call = asyncio.create_task(broker.call_skill(capability, {"query": "slow"}))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(supervisor.aclose(), timeout=1)
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        await asyncio.gather(call, return_exceptions=True)
+    finally:
+        call.cancel()
+        await asyncio.gather(call, return_exceptions=True)
+        broker.set_scope(None)
+        broker.configure(None)
+        await supervisor.aclose()
+        session.close()
