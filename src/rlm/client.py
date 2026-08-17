@@ -1,7 +1,6 @@
 """Thin LLM client wrapper. Extracts token usage from responses."""
 
 import asyncio
-import os
 from typing import Any, Awaitable, Callable
 
 from openai import (
@@ -15,6 +14,7 @@ from openai import (
 )
 from pydantic import ValidationError
 
+from rlm.config import InvocationContext, ProviderConfig
 from rlm.types import TokenUsage
 
 _RETRYABLE: tuple[type[BaseException], ...] = (
@@ -30,9 +30,6 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
 
 # Widely-spaced delays (seconds) between attempts; total ~5 min wall budget.
 _RETRY_DELAYS: tuple[int, ...] = (15, 30, 60, 90, 120)
-
-
-PI_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1"
 
 
 def resolve_provider() -> tuple[str | None, str | None, dict[str, str]]:
@@ -53,20 +50,15 @@ def resolve_provider() -> tuple[str | None, str | None, dict[str, str]]:
     Falls back to PI + ``"EMPTY"`` so the SDK can't silently inherit
     ``OPENAI_API_KEY`` and ship it to the PI default base.
     """
-    if api_key := os.environ.get("RLM_API_KEY"):
-        return os.environ.get("RLM_BASE_URL"), api_key, {}
-    if api_key := os.environ.get("PRIME_API_KEY"):
-        headers: dict[str, str] = {}
-        if team_id := os.environ.get("PRIME_TEAM_ID"):
-            headers["X-Prime-Team-ID"] = team_id
-        return PI_INFERENCE_BASE_URL, api_key, headers
-    if os.environ.get("OPENAI_API_KEY"):
-        return None, None, {}
-    return PI_INFERENCE_BASE_URL, "EMPTY", {}
+    provider = ProviderConfig.from_env()
+    return provider.base_url, provider.api_key, provider.headers.copy()
 
 
-def make_client() -> AsyncOpenAI:
-    """Create an AsyncOpenAI client from environment variables.
+def make_client(
+    provider: ProviderConfig | None = None,
+    invocation: InvocationContext | None = None,
+) -> AsyncOpenAI:
+    """Create an AsyncOpenAI client from explicit or environment configuration.
 
     See ``resolve_provider`` for provider precedence. Tags every outbound
     request with ``X-RLM-Depth: <RLM_DEPTH>`` so an interceptor (e.g.
@@ -74,12 +66,13 @@ def make_client() -> AsyncOpenAI:
     (depth 0) from sub-agent calls (depth >= 1) and decide whether to
     record them in the rollout's trajectory.
     """
-    base_url, api_key, extra_headers = resolve_provider()
-    headers = {"X-RLM-Depth": os.environ.get("RLM_DEPTH", "0"), **extra_headers}
+    provider = provider or ProviderConfig.from_env()
+    invocation = invocation or InvocationContext.from_env()
+    headers = {"X-RLM-Depth": str(invocation.depth), **provider.headers}
     return AsyncOpenAI(
-        base_url=base_url,
-        api_key=api_key,
-        max_retries=int(os.environ.get("RLM_SDK_MAX_RETRIES", 5)),
+        base_url=provider.base_url,
+        api_key=provider.api_key,
+        max_retries=provider.max_retries,
         default_headers=headers,
     )
 
