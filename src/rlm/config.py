@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Mapping
 
 
 PI_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1"
+KERNEL_ENV_CONFIG_ENV = "RLM_KERNEL_ENV"
 
 
 def _optional_positive_int(value: str | int | None, name: str) -> int | None:
@@ -36,13 +38,24 @@ def _summarize_at_tokens(value: str | int | None) -> int | None:
     return parsed
 
 
+def _kernel_env(value: str | None) -> tuple[tuple[str, str], ...]:
+    if not value:
+        return ()
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict) or not all(
+        isinstance(key, str) and isinstance(item, str) for key, item in parsed.items()
+    ):
+        raise ValueError(f"{KERNEL_ENV_CONFIG_ENV} must be a JSON object of strings")
+    return tuple(parsed.items())
+
+
 @dataclass(frozen=True)
 class ProviderConfig:
     """Credentials and transport options for one inference provider."""
 
     base_url: str | None
-    api_key: str | None
-    headers: dict[str, str] = field(default_factory=dict)
+    api_key: str | None = field(repr=False)
+    headers: dict[str, str] = field(default_factory=dict, repr=False)
     max_retries: int = 5
 
     @classmethod
@@ -132,6 +145,8 @@ class RuntimeConfig:
     system_prompt_path: str | None = None
     append_to_system_prompt: str | None = None
     skills: tuple[str, ...] = ()
+    kernel_env: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    search_api_key: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(
@@ -190,4 +205,6 @@ class RuntimeConfig:
             append_to_system_prompt=append_to_system_prompt
             or env.get("RLM_APPEND_TO_SYSTEM_PROMPT"),
             skills=tuple(s.strip() for s in raw_skills.split(",") if s.strip()),
+            kernel_env=_kernel_env(env.get(KERNEL_ENV_CONFIG_ENV)),
+            search_api_key=env.get("SERPER_API_KEY"),
         )

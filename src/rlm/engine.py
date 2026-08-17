@@ -164,6 +164,7 @@ class RLMEngine:
 
         # Built-in skills (rlm.skills) to enable for this run, from RLM_SKILLS (comma-separated).
         self.skills = list(config.skills)
+        self.kernel_env = dict(config.kernel_env)
         self.max_tokens = config.policy.max_tokens
 
         self._owns_client = client is None
@@ -303,10 +304,11 @@ class RLMEngine:
             cwd=self.cwd,
         )
 
-        # Skills the kernel pre-imports are written into the session directory.
-        enable_builtin_skills(self.skills, self.session.dir)
+        # Credential-free built-ins run locally; privileged skills are brokered.
+        local_skills = [name for name in self.skills if name != "search"]
+        enable_builtin_skills(local_skills, self.session.dir)
         broker_endpoint = None
-        if self.depth < self.max_depth or self.mcp_servers:
+        if self.depth < self.max_depth or self.mcp_servers or "search" in self.skills:
             if self._supervisor is None:
                 self._supervisor = SessionTreeSupervisor(
                     root_session=self.session,
@@ -321,15 +323,15 @@ class RLMEngine:
                 if self._invocation_id is None:
                     raise RuntimeError("recursive engine has no supervisor invocation")
                 broker_endpoint = self._supervisor.endpoint_for(self._invocation_id)
-                if self.mcp_servers:
-                    reserved_names = {"rlm", *self.skills, *discover_skills()}
-                    mcp_skills = self._supervisor.write_mcp_skill_modules(
+                if self.mcp_servers or "search" in self.skills:
+                    reserved_names = {"rlm", *local_skills, *discover_skills()}
+                    brokered_skills = self._supervisor.write_brokered_skill_modules(
                         self.session.dir, reserved_names
                     )
                     logger.info(
-                        "rlm: exposed %d brokered MCP tool(s) as skills - %s",
-                        len(mcp_skills),
-                        ", ".join(mcp_skills),
+                        "rlm: exposed %d supervisor-owned skill(s) - %s",
+                        len(brokered_skills),
+                        ", ".join(brokered_skills),
                     )
             except BaseException:
                 if self._owns_supervisor:
@@ -342,6 +344,7 @@ class RLMEngine:
         self._repl = IPythonREPL(
             cwd=self.cwd,
             session=self.session,
+            kernel_env=self.kernel_env,
             depth=self.depth,
             max_depth=self.max_depth,
             broker_endpoint=broker_endpoint,
@@ -754,7 +757,7 @@ class RLMEngine:
             messages_path,
             allow_recursion=self.depth < self.max_depth,
             active_tools=active_tools,
-            cli_skills=get_installed_skills(),
+            shell_skills=get_installed_skills(),
         )
         if self.append_to_system_prompt:
             system_prompt += "\n\n" + self.append_to_system_prompt

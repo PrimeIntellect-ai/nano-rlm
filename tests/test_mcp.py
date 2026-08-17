@@ -236,7 +236,7 @@ async def test_broker_round_trip_records_trusted_metric(tmp_path):
     )
     await supervisor.start()
     skills_dir = tmp_path / "skills"
-    supervisor.write_mcp_skill_modules(skills_dir)
+    supervisor.write_brokered_skill_modules(skills_dir)
     sys.path.insert(0, str(skills_dir))
     skill = importlib.import_module("local_echo")
     scope = await supervisor.open_scope(supervisor.root_id)
@@ -248,7 +248,7 @@ async def test_broker_round_trip_records_trusted_metric(tmp_path):
             skill.run(text="one"),
             skill.run(text="two"),
         )
-        with pytest.raises(RuntimeError, match="unknown MCP tool capability"):
+        with pytest.raises(RuntimeError, match="unknown brokered skill capability"):
             await broker.call_skill("invalid", {})
         broker.configure(broker.BrokerEndpoint(endpoint.socket_path, "invalid"))
         with pytest.raises(RuntimeError, match="invalid broker capability"):

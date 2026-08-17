@@ -72,11 +72,12 @@ All configuration is via environment variables:
 | `RLM_HOME` | `~/.rlm` | Root directory for sessions and data |
 | `RLM_MODEL` | `openai/gpt-5-mini` | Model name (PI Inference slug). Override with `--model` or `RLM_MODEL` for OpenAI/Anthropic direct (e.g. `gpt-4o`, `claude-sonnet-4-5`) |
 | `RLM_API_KEY` / `RLM_BASE_URL` | — / SDK default (`https://api.openai.com/v1`) | Explicit override (highest priority). Independent: setting `RLM_API_KEY` alone targets the SDK default endpoint; set `RLM_BASE_URL` too for a custom endpoint. For PI, use `PRIME_API_KEY` (below) which owns the full pair. |
-| `SERPER_API_KEY` | — | API key for the built-in `search` skill (Serper backend). Required when `search` is enabled. |
+| `SERPER_API_KEY` | — | API key for the built-in `search` skill (Serper backend). Resolved by the supervisor and not copied into the kernel. |
 | `PRIME_API_KEY` | — | PI Inference pair: targets `https://api.pinference.ai/api/v1` and forwards `PRIME_TEAM_ID` as `X-Prime-Team-ID` when set. |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` | resolved at startup | OpenAI pair (covers OpenAI direct and verifiers' rollout tunnel). Provider precedence: explicit → PI → OpenAI. Keys are scoped to their own base URL so an `OPENAI_API_KEY` lying around can't leak to PI Inference. |
 | `RLM_SKILLS` | — | Comma-separated built-in skills to enable (`edit`, `search`); pre-imported into the kernel. Unknown names raise. See [Skills](#skills). |
 | `RLM_MCP_CONFIG` | — | Standard `mcpServers` config (streamable HTTP or stdio); each server's tools become pre-imported IPython skills (`<server>_<tool>`). See [MCP tools as skills](#mcp-tools-as-skills). |
+| `RLM_KERNEL_ENV` | `{}` | JSON object of task variables explicitly passed to IPython and its subprocesses. Supervisor, provider, MCP, and broker configuration names are reserved. |
 | `RLM_MAX_DEPTH` | `0` | Max recursion depth (`0` means no sub-agents) |
 | `RLM_MAX_CONCURRENT_SUBAGENTS` | `max(4, RLM_MAX_DEPTH)` | Maximum live recursive agents in a session tree. Capacity is reserved per depth to prevent nested-call deadlocks. |
 | `RLM_MAX_SUBAGENT_CALLS` | `64` | Maximum accepted recursive calls across the complete session tree. |
@@ -137,7 +138,7 @@ These artifacts are consumable for debugging, visualization, or training-data ex
 
 ## Skills
 
-`rlm` ships a small set of built-in skills enabled per run via `RLM_SKILLS` (`edit`, `search`; see [MCP tools as skills](#mcp-tools-as-skills) for the related MCP path). `search` does web search through Serper and needs `SERPER_API_KEY`; it returns title/URL/snippet for a single query (`await search(query="...")`). Additional skills are supplied by the host environment: before `install.sh` runs, the environment places skill packages under `/task/rlm-skills/<name>/`, and `install.sh` installs them alongside `rlm` so they're both importable and on `$PATH`.
+`rlm` ships a small set of built-in skills enabled per run via `RLM_SKILLS` (`edit`, `search`; see [MCP tools as skills](#mcp-tools-as-skills) for the related MCP path). `edit` runs in the kernel. Credentialed `search` runs in the supervisor through the capability broker, so `SERPER_API_KEY` is unavailable to IPython and its subprocesses; it returns title/URL/snippet for a single query (`await search(query="...")`). Additional skills are supplied by the host environment: before `install.sh` runs, the environment places skill packages under `/task/rlm-skills/<name>/`, and `install.sh` installs them alongside `rlm` so they're both importable and on `$PATH`.
 
 From IPython, import a skill and call its async `run(...)` entrypoint:
 
@@ -148,7 +149,7 @@ help(websearch)  # signature + docstring
 results = await websearch(queries=["latest jupyter_client release"])
 ```
 
-From the shell, invoke the same skill by command name:
+Uploaded `rlm-skill-*` packages also expose their declared console command. Session-generated built-in and MCP proxy skills are IPython-only:
 
 ```bash
 websearch --queries "latest jupyter_client release"
@@ -227,6 +228,8 @@ Each call connects using the configured transport, invokes the tool, and returns
 ## Kernel
 
 The IPython kernel always runs in rlm's own Python (`sys.executable`). `install.sh` puts `rlm` and all discovered skills into the same `uv tool install` environment, so `from rlm import run`, `import edit`, etc. work natively from inside an IPython cell.
+
+The kernel starts from a small platform environment (`PATH`, home/user/shell, locale, temporary-directory, certificate, and virtual-environment variables) plus the explicit `RLM_KERNEL_ENV` mapping. It receives private Jupyter/IPython config directories and does not inherit the rest of the supervisor process environment. This de-ambients credentials; it is not hostile-code containment because the kernel still shares the sandbox user, filesystem, process namespace, and network with the supervisor.
 
 To exercise packages from the target project's `.venv` (e.g. running its test suite), shell out from an IPython cell: `!./.venv/bin/python3 -m pytest`. The kernel itself stays isolated from whatever project venv the agent is working on — no cross-cell state involving sandbox packages.
 

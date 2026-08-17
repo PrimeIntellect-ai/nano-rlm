@@ -2,6 +2,7 @@ import pytest
 
 from rlm.client import make_client
 from rlm.config import (
+    KERNEL_ENV_CONFIG_ENV,
     PI_INFERENCE_BASE_URL,
     ExecutionPolicy,
     InvocationContext,
@@ -47,6 +48,8 @@ def test_runtime_config_resolves_environment_once():
             "RLM_MAX_TOKENS": "500",
             "RLM_MAX_COMPACTIONS": "3",
             "RLM_SKILLS": "search, edit",
+            KERNEL_ENV_CONFIG_ENV: '{"TASK_TOKEN": "task-secret"}',
+            "SERPER_API_KEY": "search-secret",
         },
     )
 
@@ -63,6 +66,11 @@ def test_runtime_config_resolves_environment_once():
         max_subagent_calls=64,
     )
     assert config.skills == ("search", "edit")
+    assert config.kernel_env == (("TASK_TOKEN", "task-secret"),)
+    assert config.search_api_key == "search-secret"
+    assert "task-secret" not in repr(config)
+    assert "search-secret" not in repr(config)
+    assert "test-key" not in repr(config.provider)
 
 
 @pytest.mark.parametrize("value", [0, -1, "bad", True])
@@ -115,3 +123,12 @@ def test_direct_policy_construction_validates_recursive_limits():
         ExecutionPolicy(max_subagent_calls=0)
     with pytest.raises(ValueError, match="depth must be non-negative"):
         InvocationContext(depth=-1)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['["not", "an object"]', '{"NUMBER": 1}', "not-json"],
+)
+def test_runtime_config_rejects_invalid_kernel_environment(value):
+    with pytest.raises((ValueError, TypeError)):
+        RuntimeConfig.from_env(environ={KERNEL_ENV_CONFIG_ENV: value})

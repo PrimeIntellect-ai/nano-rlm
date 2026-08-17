@@ -8,15 +8,22 @@ import secrets
 import shutil
 import tempfile
 import uuid
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from rlm.broker import BrokerEndpoint, read_frame, result_to_json, write_frame
 from rlm.config import RuntimeConfig
-from rlm.mcp import MCPRegistry, MCPServer
+from rlm.mcp import (
+    MCPRegistry,
+    MCPServer,
+    MCPToolDescriptor,
+    write_skill_modules,
+)
 from rlm.session import Session
+from rlm.skills.search import run_with_api_key as run_search
 from rlm.types import ProgrammaticToolCallStats, RLMResult
 
 if TYPE_CHECKING:
@@ -78,6 +85,33 @@ class SessionTreeSupervisor:
         self._connection_writers: set[asyncio.StreamWriter] = set()
         self._scopes: dict[str, tuple[str, set[asyncio.Task[Any]]]] = {}
         self._mcp_registry = MCPRegistry(mcp_servers, cwd) if mcp_servers else None
+        self._brokered_skills: dict[
+            str,
+            tuple[
+                MCPToolDescriptor,
+                Callable[[dict[str, Any]], Awaitable[str]],
+            ],
+        ] = {}
+        self._root_config = runtime_config
+        if "search" in runtime_config.skills:
+            capability = secrets.token_urlsafe(24)
+            descriptor = MCPToolDescriptor(
+                capability=capability,
+                name="search",
+                description=(
+                    "Run a web search via Serper and return formatted title, URL, "
+                    "and snippet results."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "num_results": {"type": "integer"},
+                    },
+                    "required": ["query"],
+                },
+            )
+            self._brokered_skills[capability] = (descriptor, self._call_search)
 
         root_id = uuid.uuid4().hex
         root = _Invocation(
@@ -117,7 +151,11 @@ class SessionTreeSupervisor:
         if self._closed:
             raise RuntimeError("session supervisor is closed")
         if self._mcp_registry is not None:
-            await self._mcp_registry.discover()
+            for descriptor in await self._mcp_registry.discover():
+                self._brokered_skills[descriptor.capability] = (
+                    descriptor,
+                    partial(self._mcp_registry.call, descriptor.capability),
+                )
         self._broker_dir = Path(tempfile.mkdtemp(prefix="rlm-brk-"))
         os.chmod(self._broker_dir, 0o700)
         self._socket_path = str(self._broker_dir / "b.sock")
@@ -126,12 +164,14 @@ class SessionTreeSupervisor:
         )
         os.chmod(self._socket_path, 0o600)
 
-    def write_mcp_skill_modules(
+    def write_brokered_skill_modules(
         self, dest_dir: Path, reserved_names: Iterable[str] = ()
     ) -> list[str]:
-        if self._mcp_registry is None:
-            return []
-        return self._mcp_registry.write_skill_modules(dest_dir, reserved_names)
+        descriptors = [entry[0] for entry in self._brokered_skills.values()]
+        return write_skill_modules(descriptors, dest_dir, reserved_names)
+
+    async def _call_search(self, arguments: dict[str, Any]) -> str:
+        return await run_search(self._root_config.search_api_key, **arguments)
 
     def programmatic_tool_call_stats(
         self, invocation_id: str
@@ -228,9 +268,10 @@ class SessionTreeSupervisor:
             scope = self._scopes.get(scope_id)
             if invocation_id is None or scope is None or scope[0] != invocation_id:
                 raise PermissionError("invalid broker capability")
-            if self._mcp_registry is None:
-                raise PermissionError("MCP tools are unavailable")
-            descriptor = self._mcp_registry.descriptor(skill_capability)
+            try:
+                descriptor, handler = self._brokered_skills[skill_capability]
+            except KeyError as exc:
+                raise PermissionError("unknown brokered skill capability") from exc
             stats = self._tool_stats.setdefault(
                 invocation_id, ProgrammaticToolCallStats()
             )
@@ -238,9 +279,7 @@ class SessionTreeSupervisor:
             stats.by_tool_python[descriptor.name] = (
                 stats.by_tool_python.get(descriptor.name, 0) + 1
             )
-            task = asyncio.create_task(
-                self._mcp_registry.call(skill_capability, arguments)
-            )
+            task = asyncio.create_task(handler(arguments))
             self._tasks.add(task)
             scope[1].add(task)
             task.add_done_callback(self._tasks.discard)

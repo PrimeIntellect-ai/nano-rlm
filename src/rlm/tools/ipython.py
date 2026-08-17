@@ -12,6 +12,8 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
@@ -55,15 +57,96 @@ IPYTHON_SCHEMA = {
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 IPYTHON_TIMEOUT_MAX_SECONDS = 600
-_KERNEL_SECRET_ENV = {
+_KERNEL_BASE_ENV_NAMES = {
+    "CURL_CA_BUNDLE",
+    "HOME",
+    "LANG",
+    "LOGNAME",
+    "PATH",
+    "REQUESTS_CA_BUNDLE",
+    "SHELL",
+    "SSL_CERT_FILE",
+    "TERM",
+    "TMPDIR",
+    "TZ",
+    "USER",
+    "VIRTUAL_ENV",
+}
+RESERVED_KERNEL_ENV_NAMES = {
+    "IPYTHONDIR",
+    "JUPYTER_CONFIG_DIR",
+    "JUPYTER_DATA_DIR",
+    "JUPYTER_RUNTIME_DIR",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "PRIME_API_KEY",
     "PRIME_TEAM_ID",
     "RLM_API_KEY",
+    "RLM_ALLOW_GIT",
+    "RLM_APPEND_TO_SYSTEM_PROMPT",
     "RLM_BASE_URL",
+    "RLM_DEPTH",
+    "RLM_EXEC_TIMEOUT",
+    "RLM_EXTRA_UV_ARGS",
+    "RLM_HOME",
+    "RLM_KERNEL_ENV",
+    "RLM_MAX_COMPACTIONS",
+    "RLM_MAX_CONCURRENT_SUBAGENTS",
+    "RLM_MAX_DEPTH",
+    "RLM_MAX_OUTPUT",
+    "RLM_MAX_SUBAGENT_CALLS",
+    "RLM_MAX_TOKENS",
+    "RLM_MAX_TOOL_OUTPUT_CHARS",
     "RLM_MCP_CONFIG",
+    "RLM_MODEL",
+    "RLM_SDK_MAX_RETRIES",
+    "RLM_SESSION_DIR",
+    "RLM_SKILLS",
+    "RLM_SUMMARIZE_AT_TOKENS",
+    "RLM_SYSTEM_PROMPT_PATH",
+    "SERPER_API_KEY",
 }
+
+
+def build_kernel_env(
+    task_env: Mapping[str, str] | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    private_dir: str | None = None,
+) -> dict[str, str]:
+    """Build a minimal kernel environment plus explicitly supplied task variables."""
+    source = os.environ if environ is None else environ
+    explicit = dict(task_env or {})
+    invalid_types = [
+        key
+        for key, value in explicit.items()
+        if not isinstance(key, str) or not isinstance(value, str)
+    ]
+    if invalid_types:
+        raise TypeError("kernel environment keys and values must be strings")
+    reserved = sorted(RESERVED_KERNEL_ENV_NAMES.intersection(explicit))
+    if reserved:
+        raise ValueError(f"kernel environment contains reserved names: {reserved}")
+
+    kernel_env = {
+        key: value
+        for key, value in source.items()
+        if key in _KERNEL_BASE_ENV_NAMES or key.startswith("LC_")
+    }
+    kernel_env.update(explicit)
+    kernel_env["NO_COLOR"] = "1"
+    if private_dir is not None:
+        root = Path(private_dir)
+        private_paths = {
+            "IPYTHONDIR": root / "ipython",
+            "JUPYTER_CONFIG_DIR": root / "jupyter-config",
+            "JUPYTER_DATA_DIR": root / "jupyter-data",
+            "JUPYTER_RUNTIME_DIR": root / "jupyter-runtime",
+        }
+        for path in private_paths.values():
+            path.mkdir(mode=0o700, exist_ok=True)
+        kernel_env.update({name: str(path) for name, path in private_paths.items()})
+    return kernel_env
 
 
 class IpythonTool:
@@ -142,14 +225,14 @@ class IPythonREPL:
         self,
         cwd: str,
         session: "Session | None" = None,
-        env: dict[str, str] | None = None,
+        kernel_env: Mapping[str, str] | None = None,
         depth: int | None = None,
         max_depth: int | None = None,
         broker_endpoint: BrokerEndpoint | None = None,
     ):
         self.cwd = cwd
         self.session = session
-        self.env = env or {}
+        self.kernel_env = dict(kernel_env or {})
         self.depth = depth
         self.max_depth = max_depth
         self.broker_endpoint = broker_endpoint
@@ -177,17 +260,10 @@ class IPythonREPL:
             "-f",
             "{connection_file}",
         ]
-        kernel_env = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in _KERNEL_SECRET_ENV
-        }
-        kernel_env.update(
-            {
-                key: value
-                for key, value in self.env.items()
-                if key not in _KERNEL_SECRET_ENV
-            }
+        self._km.kernel_spec.env = {}
+        kernel_env = build_kernel_env(
+            self.kernel_env,
+            private_dir=self._ipc_dir,
         )
         launcher = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
         launcher_dir = os.path.dirname(os.path.abspath(launcher))
@@ -422,8 +498,9 @@ if {allow_recursion!r}:
         if self._kc:
             self._kc.stop_channels()
             self._kc = None
-        if self._km:
+        if self._km and self._km.has_kernel:
             self._km.shutdown_kernel(now=True)
+        if self._km:
             self._km = None
         if self._ipc_dir:
             shutil.rmtree(self._ipc_dir, ignore_errors=True)
