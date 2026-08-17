@@ -20,6 +20,7 @@ from rlm.tools.skills import discover_skills
 from rlm.types import IpythonExecuted
 
 if TYPE_CHECKING:
+    from rlm.broker import BrokerEndpoint
     from rlm.session import Session
 
 
@@ -54,6 +55,14 @@ IPYTHON_SCHEMA = {
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 IPYTHON_TIMEOUT_MAX_SECONDS = 600
+_KERNEL_SECRET_ENV = {
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "PRIME_API_KEY",
+    "PRIME_TEAM_ID",
+    "RLM_API_KEY",
+    "RLM_BASE_URL",
+}
 
 
 class IpythonTool:
@@ -135,12 +144,14 @@ class IPythonREPL:
         env: dict[str, str] | None = None,
         depth: int | None = None,
         max_depth: int | None = None,
+        broker_endpoint: BrokerEndpoint | None = None,
     ):
         self.cwd = cwd
         self.session = session
         self.env = env or {}
         self.depth = depth
         self.max_depth = max_depth
+        self.broker_endpoint = broker_endpoint
         self._km = None
         self._kc = None
         self._ipc_dir = None
@@ -165,7 +176,18 @@ class IPythonREPL:
             "-f",
             "{connection_file}",
         ]
-        kernel_env = {**os.environ, **self.env}
+        kernel_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in _KERNEL_SECRET_ENV
+        }
+        kernel_env.update(
+            {
+                key: value
+                for key, value in self.env.items()
+                if key not in _KERNEL_SECRET_ENV
+            }
+        )
         launcher = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
         launcher_dir = os.path.dirname(os.path.abspath(launcher))
         path_entries = kernel_env.get("PATH", "").split(os.pathsep)
@@ -193,7 +215,7 @@ class IPythonREPL:
             if self.max_depth is None
             else self.max_depth
         )
-        allow_recursion = depth < max_depth
+        allow_recursion = depth < max_depth and self.broker_endpoint is not None
         # Pip-installed skills + the MCP-tool modules generated into the session dir (rlm.mcp);
         # the session dir goes on the kernel's sys.path so those import by name.
         skill_names = discover_skills(self.session.dir if self.session else None)
@@ -236,7 +258,7 @@ class _CallableModule(types.ModuleType):
         return await self.run(*args, **kwargs)
 
 
-def _wrap_callable(mod, log_source):
+def _wrap_callable(mod, log_source, register=True):
     # log_source: 'python' for skills (logged to programmatic_tool_calls.jsonl),
     # None for rlm (already aggregated via Session.aggregate_child_metrics).
     wrapped = _CallableModule(mod.__name__)
@@ -254,7 +276,8 @@ def _wrap_callable(mod, log_source):
     # and the file-level module docstring.
     wrapped.__signature__ = inspect.signature(wrapped.run)
     wrapped.__doc__ = wrapped.run.__doc__
-    sys.modules[mod.__name__] = wrapped
+    if register:
+        sys.modules[mod.__name__] = wrapped
     return wrapped
 
 
@@ -262,9 +285,21 @@ for _name in {skill_names!r}:
     globals()[_name] = _wrap_callable(__import__(_name), 'python')
 
 if {allow_recursion!r}:
-    globals()['rlm'] = _wrap_callable(__import__('rlm'), None)
+    import rlm as _rlm_package
+    import rlm.broker as _rlm_broker
+    _rlm_broker.configure(_rlm_broker.BrokerEndpoint(
+        {self.broker_endpoint.socket_path if self.broker_endpoint else None!r},
+        {self.broker_endpoint.capability if self.broker_endpoint else None!r},
+    ))
+    _rlm_package.run = _rlm_broker.run
+    globals()['rlm'] = _wrap_callable(_rlm_package, None)
 """
         self._execute_silent(setup_code)
+
+    def set_broker_scope(self, scope_id: str | None) -> None:
+        """Set the active recursive-call scope inside the kernel."""
+        if self.broker_endpoint is not None:
+            self._execute_silent(f"_rlm_broker.set_scope({scope_id!r})")
 
     def _execute_silent(self, code: str):
         """Execute code without capturing output (for setup)."""

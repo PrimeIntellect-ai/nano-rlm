@@ -1,0 +1,327 @@
+"""Trusted lifecycle manager for one recursive RLM session tree."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import secrets
+import shutil
+import tempfile
+import uuid
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
+
+from rlm.broker import BrokerEndpoint, read_frame, result_to_json, write_frame
+from rlm.config import RuntimeConfig
+from rlm.session import Session
+from rlm.types import RLMResult
+
+if TYPE_CHECKING:
+    from rlm.engine import RLMEngine
+
+
+@dataclass
+class _Invocation:
+    id: str
+    parent_id: str | None
+    capability: str
+    session: Session
+    runtime_config: RuntimeConfig
+    cwd: str
+    mcp_servers: dict[str, Any]
+
+
+def depth_capacities(max_depth: int, limit: int, root_depth: int = 0) -> dict[int, int]:
+    """Reserve capacity per descendant depth so nested calls cannot deadlock."""
+    levels = max_depth - root_depth
+    if levels <= 0:
+        return {}
+    if limit < levels:
+        raise ValueError("subagent concurrency must cover every recursive depth")
+    per_level, extra = divmod(limit, levels)
+    return {
+        depth: per_level + (1 if offset < extra else 0)
+        for offset, depth in enumerate(range(root_depth + 1, max_depth + 1))
+    }
+
+
+class SessionTreeSupervisor:
+    """Own child engines, recursion limits, and the kernel broker endpoint."""
+
+    def __init__(
+        self,
+        *,
+        root_session: Session,
+        runtime_config: RuntimeConfig,
+        cwd: str,
+        mcp_servers: dict[str, Any] | None = None,
+        engine_factory: Callable[..., RLMEngine] | None = None,
+    ) -> None:
+        self._engine_factory = engine_factory
+        self._server: asyncio.AbstractServer | None = None
+        self._broker_dir: Path | None = None
+        self._socket_path: str | None = None
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
+        self._lock = asyncio.Lock()
+        self._total_calls = 0
+        self._tasks: set[asyncio.Task[RLMResult]] = set()
+        self._connection_tasks: set[asyncio.Task[None]] = set()
+        self._connection_writers: set[asyncio.StreamWriter] = set()
+        self._scopes: dict[str, tuple[str, set[asyncio.Task[RLMResult]]]] = {}
+
+        root_id = uuid.uuid4().hex
+        root = _Invocation(
+            id=root_id,
+            parent_id=None,
+            capability=secrets.token_urlsafe(32),
+            session=root_session,
+            runtime_config=runtime_config,
+            cwd=cwd,
+            mcp_servers=dict(mcp_servers or {}),
+        )
+        self.root_id = root_id
+        self._invocations = {root_id: root}
+        self._capabilities = {root.capability: root_id}
+        capacities = depth_capacities(
+            runtime_config.policy.max_depth,
+            runtime_config.policy.max_concurrent_subagents,
+            runtime_config.invocation.depth,
+        )
+        self._semaphores = {
+            depth: asyncio.Semaphore(capacity) for depth, capacity in capacities.items()
+        }
+
+    @property
+    def total_calls(self) -> int:
+        return self._total_calls
+
+    @property
+    def active_calls(self) -> int:
+        return len(self._tasks)
+
+    async def start(self) -> None:
+        if self._server is not None:
+            return
+        if self._closed:
+            raise RuntimeError("session supervisor is closed")
+        self._broker_dir = Path(tempfile.mkdtemp(prefix="rlm-brk-"))
+        os.chmod(self._broker_dir, 0o700)
+        self._socket_path = str(self._broker_dir / "b.sock")
+        self._server = await asyncio.start_unix_server(
+            self._accept_connection, path=self._socket_path
+        )
+        os.chmod(self._socket_path, 0o600)
+
+    def _accept_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        if self._closed or self._close_task is not None:
+            writer.close()
+            return
+        self._connection_writers.add(writer)
+        task = asyncio.create_task(self._handle_connection(reader, writer))
+        self._connection_tasks.add(task)
+        task.add_done_callback(self._connection_tasks.discard)
+
+    def endpoint_for(self, invocation_id: str) -> BrokerEndpoint:
+        if self._socket_path is None:
+            raise RuntimeError("session supervisor has not started")
+        invocation = self._invocations[invocation_id]
+        return BrokerEndpoint(self._socket_path, invocation.capability)
+
+    async def open_scope(self, invocation_id: str) -> str:
+        async with self._lock:
+            if self._closed or invocation_id not in self._invocations:
+                raise RuntimeError("recursive invocation is no longer active")
+            scope_id = secrets.token_urlsafe(24)
+            self._scopes[scope_id] = (invocation_id, set())
+            return scope_id
+
+    async def close_scope(self, scope_id: str) -> None:
+        async with self._lock:
+            scope = self._scopes.pop(scope_id, None)
+            tasks = list(scope[1]) if scope else []
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _start_child(
+        self, capability: str, scope_id: str, prompt: str, options: dict[str, Any]
+    ) -> asyncio.Task[RLMResult]:
+        if options:
+            raise ValueError("recursive RLM options are not supported")
+        async with self._lock:
+            parent_id = self._capabilities.get(capability)
+            scope = self._scopes.get(scope_id)
+            if parent_id is None or scope is None or scope[0] != parent_id:
+                raise PermissionError("invalid recursive RLM capability")
+            parent = self._invocations[parent_id]
+            child_depth = parent.runtime_config.invocation.depth + 1
+            if child_depth > parent.runtime_config.policy.max_depth:
+                return asyncio.create_task(
+                    self._limit_result(parent, "depth limit reached")
+                )
+            if self._total_calls >= parent.runtime_config.policy.max_subagent_calls:
+                return asyncio.create_task(
+                    self._limit_result(parent, "recursive call limit reached")
+                )
+            self._total_calls += 1
+            task = asyncio.create_task(self._run_child(parent_id, prompt))
+            self._tasks.add(task)
+            scope[1].add(task)
+            task.add_done_callback(self._tasks.discard)
+            task.add_done_callback(scope[1].discard)
+            return task
+
+    async def _limit_result(self, parent: _Invocation, message: str) -> RLMResult:
+        return RLMResult(answer=f"[{message}]", session_dir=parent.session.dir)
+
+    async def _run_child(self, parent_id: str, prompt: str) -> RLMResult:
+        parent = self._invocations[parent_id]
+        child_context = parent.runtime_config.invocation.child()
+        semaphore = self._semaphores[child_context.depth]
+        async with semaphore:
+            child_session = Session(Session.child_dir(parent.session.dir))
+            child_id = uuid.uuid4().hex
+            child_config = replace(
+                parent.runtime_config,
+                invocation=child_context,
+            )
+            child = _Invocation(
+                id=child_id,
+                parent_id=parent_id,
+                capability=secrets.token_urlsafe(32),
+                session=child_session,
+                runtime_config=child_config,
+                cwd=parent.cwd,
+                mcp_servers=parent.mcp_servers,
+            )
+            parent.session.log_sub_spawn(child_session.dir.name, "(brokered rlm())")
+            async with self._lock:
+                if self._closed:
+                    child_session.close()
+                    raise asyncio.CancelledError
+                self._invocations[child_id] = child
+                self._capabilities[child.capability] = child_id
+            try:
+                factory = self._engine_factory
+                if factory is None:
+                    from rlm.engine import RLMEngine
+
+                    factory = RLMEngine
+                engine = factory(
+                    cwd=child.cwd,
+                    session=child.session,
+                    mcp_servers=child.mcp_servers,
+                    runtime_config=child.runtime_config,
+                    supervisor=self,
+                    invocation_id=child.id,
+                )
+                return await engine.run(prompt)
+            finally:
+                async with self._lock:
+                    self._capabilities.pop(child.capability, None)
+                    self._invocations.pop(child.id, None)
+                child_session.close()
+
+    async def _handle_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        child_task: asyncio.Task[RLMResult] | None = None
+        disconnect_task: asyncio.Task[bytes] | None = None
+        try:
+            request = await read_frame(reader)
+            if request.get("op") != "rlm.run":
+                raise ValueError("unknown broker operation")
+            capability = request.get("capability")
+            scope_id = request.get("scope_id")
+            prompt = request.get("prompt")
+            options = request.get("options", {})
+            if not all(
+                isinstance(value, str) for value in (capability, scope_id, prompt)
+            ):
+                raise ValueError("invalid recursive RLM request")
+            if not isinstance(options, dict):
+                raise ValueError("recursive RLM options must be an object")
+            child_task = await self._start_child(capability, scope_id, prompt, options)
+            disconnect_task = asyncio.create_task(reader.read(1))
+            done, _ = await asyncio.wait(
+                {child_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnect_task in done and child_task not in done:
+                child_task.cancel()
+                await asyncio.gather(child_task, return_exceptions=True)
+                return
+            result = await child_task
+            await write_frame(writer, {"result": result_to_json(result)})
+        except Exception as exc:
+            if not writer.is_closing():
+                try:
+                    await write_frame(writer, {"error": str(exc)})
+                except (ConnectionError, OSError, asyncio.IncompleteReadError):
+                    pass
+        finally:
+            if disconnect_task is not None:
+                disconnect_task.cancel()
+                await asyncio.gather(disconnect_task, return_exceptions=True)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+            self._connection_writers.discard(writer)
+
+    async def aclose(self) -> None:
+        if self._closed and self._close_task is None:
+            return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._aclose_impl())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(self._close_task)
+                break
+            except asyncio.CancelledError:
+                if self._close_task.done():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _aclose_impl(self) -> None:
+        self._closed = True
+        if self._server is not None:
+            self._server.close()
+        for scope_id in list(self._scopes):
+            await self.close_scope(scope_id)
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        connection_writers = list(self._connection_writers)
+        for writer in connection_writers:
+            writer.close()
+        connection_tasks = list(self._connection_tasks)
+        for task in connection_tasks:
+            task.cancel()
+        if connection_tasks:
+            await asyncio.gather(*connection_tasks, return_exceptions=True)
+        if connection_writers:
+            await asyncio.gather(
+                *(writer.wait_closed() for writer in connection_writers),
+                return_exceptions=True,
+            )
+        if self._server is not None:
+            await self._server.wait_closed()
+            self._server = None
+        self._capabilities.clear()
+        self._invocations.clear()
+        if self._broker_dir is not None and self._broker_dir.exists():
+            shutil.rmtree(self._broker_dir)
+        self._broker_dir = None
+        self._socket_path = None

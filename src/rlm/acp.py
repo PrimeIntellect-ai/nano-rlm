@@ -212,7 +212,7 @@ class RLMACPAgent(Agent):
         if state.prompt_task is not None:
             state.prompt_task.cancel()
         async with state.lock:
-            state.engine.close()
+            await state.engine.aclose()
         return CloseSessionResponse()
 
     async def shutdown(self) -> None:

@@ -64,6 +64,9 @@ class _Engine:
     def close(self) -> None:
         self.closed = True
 
+    async def aclose(self) -> None:
+        self.close()
+
 
 async def test_engine_prompt_preserves_conversation(session):
     client = DummyClient(
@@ -365,6 +368,7 @@ async def test_engine_cancelled_tool_recovers_kernel(session, tmp_path):
 async def test_engine_failed_start_cleans_kernel_before_retry(
     monkeypatch, session, tmp_path
 ):
+    monkeypatch.setenv("RLM_MAX_DEPTH", "1")
     repls = []
 
     class FakeREPL:
@@ -396,7 +400,7 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
 
     system_prompt.write_text("system")
     result = await engine.prompt("retry")
-    engine.close()
+    await engine.aclose()
 
     assert result.answer == "continued"
     assert len(repls) == 2
