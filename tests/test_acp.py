@@ -568,9 +568,14 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     initialized = await agent.initialize(PROTOCOL_VERSION)
     assert initialized.agent_capabilities.mcp_capabilities.http is True
     assert initialized.agent_capabilities.load_session is False
-    assert initialized.field_meta == {
-        CAPABILITIES_METADATA_KEY: {"session_snapshot_versions": [1]}
+    assert initialized.agent_capabilities.field_meta == {
+        CAPABILITIES_METADATA_KEY: {
+            "runtime_versions": [1],
+            "session_snapshot_versions": [1],
+            "lineage_versions": [1],
+        }
     }
+    assert initialized.field_meta is None
 
     created = await agent.new_session(
         str(tmp_path),

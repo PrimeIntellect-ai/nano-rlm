@@ -50,6 +50,11 @@ from rlm.tools.ipython import RESERVED_KERNEL_ENV_NAMES
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 CAPABILITIES_METADATA_KEY = "ai.prime.rlm/capabilities-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
+CAPABILITIES_METADATA = {
+    "runtime_versions": [1],
+    "session_snapshot_versions": [1],
+    "lineage_versions": [1],
+}
 SessionStatus = Literal["created", "idle", "closing", "closed"]
 _LINEAGE_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
@@ -266,9 +271,9 @@ class RLMACPAgent(Agent):
                 session_capabilities=SessionCapabilities(
                     close=SessionCloseCapabilities()
                 ),
+                field_meta={CAPABILITIES_METADATA_KEY: CAPABILITIES_METADATA},
             ),
             agent_info=Implementation(name="rlm", title="RLM", version=version("rlm")),
-            field_meta={CAPABILITIES_METADATA_KEY: {"session_snapshot_versions": [1]}},
         )
 
     async def new_session(
