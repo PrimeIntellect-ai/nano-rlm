@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Mapping, Self
+from typing import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing_extensions import Self
 
 
 PI_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1"
