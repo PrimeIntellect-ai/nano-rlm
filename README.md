@@ -55,8 +55,8 @@ reconstructed after the ACP process exits, so clients must keep the process
 alive for the lifetime of a session.
 
 RLM's ACP surface is a versioned training contract, not a compatibility layer
-over the standalone CLI. Clients must request every version advertised under
-`ai.prime.rlm/capabilities-v1` during `initialize`, then provide one complete
+over the standalone CLI. Clients must require the exact
+`ai.prime.rlm/contract-v1` marker during `initialize`, then provide one complete
 `ai.prime.rlm/runtime-v1` object in `session/new._meta`. The runtime object
 contains the lineage session ID, model, provider, execution policy, prompt
 configuration, enabled built-in skills, explicit kernel environment, and

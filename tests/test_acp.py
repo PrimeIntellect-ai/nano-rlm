@@ -16,8 +16,8 @@ import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall
 from rlm.acp import (
-    CAPABILITIES_METADATA,
-    CAPABILITIES_METADATA_KEY,
+    CONTRACT_METADATA,
+    CONTRACT_METADATA_KEY,
     RUNTIME_METADATA_KEY,
     SESSION_METADATA_KEY,
     RLMACPAgent,
@@ -29,12 +29,7 @@ from rlm.types import RLMResult, TokenUsage
 
 
 def _contract_metadata() -> dict[str, Any]:
-    return {
-        CAPABILITIES_METADATA_KEY: {
-            name: list(versions)
-            for name, versions in CAPABILITIES_METADATA.items()
-        }
-    }
+    return CONTRACT_METADATA.copy()
 
 
 def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
@@ -618,13 +613,8 @@ async def test_acp_failed_session_creation_closes_session(monkeypatch, tmp_path)
     "metadata",
     [
         {},
-        {
-            CAPABILITIES_METADATA_KEY: {
-                "runtime_versions": [0],
-                "session_snapshot_versions": [1],
-                "lineage_versions": [1],
-            }
-        },
+        {CONTRACT_METADATA_KEY: False},
+        {CONTRACT_METADATA_KEY: "v1"},
     ],
 )
 async def test_acp_rejects_missing_or_unsupported_contract(tmp_path, metadata):
@@ -664,13 +654,7 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     initialized = await _initialize(agent)
     assert initialized.agent_capabilities.mcp_capabilities.http is True
     assert initialized.agent_capabilities.load_session is False
-    assert initialized.agent_capabilities.field_meta == {
-        CAPABILITIES_METADATA_KEY: {
-            "runtime_versions": [1],
-            "session_snapshot_versions": [1],
-            "lineage_versions": [1],
-        }
-    }
+    assert initialized.agent_capabilities.field_meta == CONTRACT_METADATA
     assert initialized.field_meta is None
 
     created = await agent.new_session(

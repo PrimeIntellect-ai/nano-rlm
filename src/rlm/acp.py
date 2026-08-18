@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass, field
 from importlib.metadata import version
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from acp import (
     PROTOCOL_VERSION,
@@ -40,6 +39,7 @@ from acp.schema import (
     TextContentBlock,
     Usage,
 )
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from rlm.engine import RLMEngine
 from rlm.config import (
@@ -53,39 +53,48 @@ from rlm.session import Session
 from rlm.tools.ipython import RESERVED_KERNEL_ENV_NAMES
 
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
-CAPABILITIES_METADATA_KEY = "ai.prime.rlm/capabilities-v1"
+CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
-CAPABILITIES_METADATA = {
-    "runtime_versions": [1],
-    "session_snapshot_versions": [1],
-    "lineage_versions": [1],
-}
+CONTRACT_METADATA = {CONTRACT_METADATA_KEY: True}
 SessionStatus = Literal["created", "idle", "closing", "closed"]
-_LINEAGE_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
-_RUNTIME_FIELDS = {
-    "lineage_session_id",
-    "model",
-    "provider",
-    "policy",
-    "system_prompt_path",
-    "append_to_system_prompt",
-    "skills",
-    "kernel_env",
-    "search_api_key",
-}
-_PROVIDER_FIELDS = {"base_url", "api_key", "headers", "max_retries"}
-_POLICY_FIELDS = {
-    "max_depth",
-    "exec_timeout",
-    "max_output",
-    "max_tokens",
-    "summarize_at_tokens",
-    "max_compactions",
-    "max_concurrent_subagents",
-    "max_subagent_calls",
-    "max_tool_output_chars",
-    "allow_git",
-}
+
+
+class _ContractModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class _ProviderMetadata(_ContractModel):
+    base_url: str | None
+    api_key: str = Field(min_length=1)
+    headers: dict[str, str]
+    max_retries: int = Field(ge=0)
+
+
+class _PolicyMetadata(_ContractModel):
+    max_depth: int
+    exec_timeout: int
+    max_output: int
+    max_tokens: int | None
+    summarize_at_tokens: int | None
+    max_compactions: int | None
+    max_concurrent_subagents: int
+    max_subagent_calls: int
+    max_tool_output_chars: int | None
+    allow_git: bool
+
+
+class _RuntimeMetadata(_ContractModel):
+    lineage_session_id: str = Field(
+        pattern=r"^[A-Za-z0-9._:-]{1,128}$",
+    )
+    model: str = Field(min_length=1)
+    provider: _ProviderMetadata
+    policy: _PolicyMetadata
+    system_prompt_path: str | None
+    append_to_system_prompt: str | None
+    skills: list[Annotated[str, Field(min_length=1)]]
+    kernel_env: dict[str, str]
+    search_api_key: str | None
 
 
 @dataclass
@@ -128,191 +137,64 @@ def _session_metadata(
     return {SESSION_METADATA_KEY: snapshot}
 
 
-def _require_fields(payload: dict[str, Any], expected: set[str], name: str) -> None:
-    missing = sorted(expected - set(payload))
-    if missing:
-        raise RequestError.invalid_params(
-            {"reason": f"{name} is missing fields: {missing}"}
-        )
-    unknown = sorted(set(payload) - expected)
-    if unknown:
-        raise RequestError.invalid_params(
-            {"reason": f"{name} has unknown fields: {unknown}"}
-        )
-
-
-def _integer(value: Any, name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise RequestError.invalid_params({"reason": f"{name} must be an integer"})
-    return value
-
-
-def _nullable_integer(value: Any, name: str) -> int | None:
-    return None if value is None else _integer(value, name)
-
-
-def _nullable_string(value: Any, name: str) -> str | None:
-    if value is not None and not isinstance(value, str):
-        raise RequestError.invalid_params({"reason": f"{name} must be a string or null"})
-    return value
-
-
-def _boolean(value: Any, name: str) -> bool:
-    if not isinstance(value, bool):
-        raise RequestError.invalid_params({"reason": f"{name} must be a boolean"})
-    return value
-
-
 def _require_contract(field_meta: Any) -> None:
-    if not isinstance(field_meta, dict):
-        raise RequestError.invalid_params({"reason": "ACP _meta must be an object"})
-    payload = field_meta.get(CAPABILITIES_METADATA_KEY)
-    if not isinstance(payload, dict):
+    if (
+        not isinstance(field_meta, dict)
+        or field_meta.get(CONTRACT_METADATA_KEY) is not True
+    ):
         raise RequestError.invalid_params(
-            {"reason": f"{CAPABILITIES_METADATA_KEY} must be an object"}
+            {"reason": f"{CONTRACT_METADATA_KEY} must be true"}
         )
-    _require_fields(
-        payload,
-        set(CAPABILITIES_METADATA),
-        CAPABILITIES_METADATA_KEY,
-    )
-    for name, supported in CAPABILITIES_METADATA.items():
-        requested = payload[name]
-        if not isinstance(requested, list) or not all(
-            isinstance(item, int) and not isinstance(item, bool) for item in requested
-        ):
-            raise RequestError.invalid_params(
-                {"reason": f"{CAPABILITIES_METADATA_KEY}.{name} must be integer versions"}
-            )
-        if not set(requested).intersection(supported):
-            raise RequestError.invalid_params(
-                {"reason": f"no supported {CAPABILITIES_METADATA_KEY}.{name}"}
-            )
+
+
+def _validation_fields(error: ValidationError) -> list[str]:
+    return [".".join(str(part) for part in item["loc"]) for item in error.errors()]
 
 
 def _runtime_config(field_meta: Any) -> tuple[RuntimeConfig, str]:
     if not isinstance(field_meta, dict):
         raise RequestError.invalid_params({"reason": "ACP _meta must be an object"})
-    payload = field_meta.get(RUNTIME_METADATA_KEY)
-    if not isinstance(payload, dict):
-        raise RequestError.invalid_params(
-            {"reason": f"{RUNTIME_METADATA_KEY} must be an object"}
-        )
-    _require_fields(payload, _RUNTIME_FIELDS, RUNTIME_METADATA_KEY)
-
-    lineage_session_id = payload["lineage_session_id"]
-    if (
-        not isinstance(lineage_session_id, str)
-        or _LINEAGE_ID_RE.fullmatch(lineage_session_id) is None
-    ):
-        raise RequestError.invalid_params(
-            {"reason": "lineage_session_id must be a bounded opaque identifier"}
-        )
-
-    model = payload["model"]
-    if not isinstance(model, str) or not model:
-        raise RequestError.invalid_params({"reason": "model must be a non-empty string"})
-
-    provider_payload = payload["provider"]
-    if not isinstance(provider_payload, dict):
-        raise RequestError.invalid_params({"reason": "provider must be an object"})
-    _require_fields(provider_payload, _PROVIDER_FIELDS, "provider")
-    base_url = _nullable_string(provider_payload["base_url"], "provider.base_url")
-    api_key = provider_payload["api_key"]
-    headers = provider_payload["headers"]
-    max_retries = _integer(provider_payload["max_retries"], "provider.max_retries")
-    if max_retries < 0:
-        raise RequestError.invalid_params(
-            {"reason": "provider.max_retries must be non-negative"}
-        )
-    if not isinstance(api_key, str) or not api_key:
-        raise RequestError.invalid_params({"reason": "provider.api_key is invalid"})
-    if not isinstance(headers, dict) or not all(
-        isinstance(key, str) and isinstance(value, str)
-        for key, value in headers.items()
-    ):
-        raise RequestError.invalid_params({"reason": "provider.headers must map strings"})
     try:
-        provider = ProviderConfig(base_url, api_key, headers, max_retries)
+        payload = _RuntimeMetadata.model_validate(
+            field_meta.get(RUNTIME_METADATA_KEY),
+        )
+    except ValidationError as error:
+        raise RequestError.invalid_params(
+            {
+                "reason": (
+                    f"{RUNTIME_METADATA_KEY} has invalid fields: "
+                    f"{_validation_fields(error)}"
+                )
+            }
+        ) from error
+
+    try:
+        provider = ProviderConfig(**payload.provider.model_dump())
+        policy = ExecutionPolicy(**payload.policy.model_dump())
     except ValueError as error:
         raise RequestError.invalid_params({"reason": str(error)}) from error
 
-    policy_payload = payload["policy"]
-    if not isinstance(policy_payload, dict):
-        raise RequestError.invalid_params({"reason": "policy must be an object"})
-    _require_fields(policy_payload, _POLICY_FIELDS, "policy")
-    try:
-        policy = ExecutionPolicy(
-            max_depth=_integer(policy_payload["max_depth"], "policy.max_depth"),
-            exec_timeout=_integer(
-                policy_payload["exec_timeout"], "policy.exec_timeout"
-            ),
-            max_output=_integer(policy_payload["max_output"], "policy.max_output"),
-            max_tokens=_nullable_integer(
-                policy_payload["max_tokens"], "policy.max_tokens"
-            ),
-            summarize_at_tokens=_nullable_integer(
-                policy_payload["summarize_at_tokens"],
-                "policy.summarize_at_tokens",
-            ),
-            max_compactions=_nullable_integer(
-                policy_payload["max_compactions"], "policy.max_compactions"
-            ),
-            max_concurrent_subagents=_integer(
-                policy_payload["max_concurrent_subagents"],
-                "policy.max_concurrent_subagents",
-            ),
-            max_subagent_calls=_integer(
-                policy_payload["max_subagent_calls"],
-                "policy.max_subagent_calls",
-            ),
-            max_tool_output_chars=_nullable_integer(
-                policy_payload["max_tool_output_chars"],
-                "policy.max_tool_output_chars",
-            ),
-            allow_git=_boolean(policy_payload["allow_git"], "policy.allow_git"),
-        )
-    except ValueError as error:
-        raise RequestError.invalid_params({"reason": str(error)}) from error
-
-    system_prompt_path = _nullable_string(
-        payload["system_prompt_path"], "system_prompt_path"
+    reserved_kernel_env = sorted(
+        RESERVED_KERNEL_ENV_NAMES.intersection(payload.kernel_env)
     )
-    append_to_system_prompt = _nullable_string(
-        payload["append_to_system_prompt"], "append_to_system_prompt"
-    )
-    skills = payload["skills"]
-    if not isinstance(skills, list) or not all(
-        isinstance(skill, str) and skill for skill in skills
-    ):
-        raise RequestError.invalid_params({"reason": "skills must be non-empty strings"})
-
-    kernel_env = payload["kernel_env"]
-    if not isinstance(kernel_env, dict) or not all(
-        isinstance(key, str) and isinstance(value, str)
-        for key, value in kernel_env.items()
-    ):
-        raise RequestError.invalid_params({"reason": "kernel_env must map strings"})
-    reserved_kernel_env = sorted(RESERVED_KERNEL_ENV_NAMES.intersection(kernel_env))
     if reserved_kernel_env:
         raise RequestError.invalid_params(
             {"reason": f"kernel_env contains reserved names: {reserved_kernel_env}"}
         )
 
-    search_api_key = _nullable_string(payload["search_api_key"], "search_api_key")
     return (
         RuntimeConfig(
-            model=model,
+            model=payload.model,
             provider=provider,
             invocation=InvocationContext(),
             policy=policy,
-            system_prompt_path=system_prompt_path,
-            append_to_system_prompt=append_to_system_prompt,
-            skills=tuple(skills),
-            kernel_env=tuple(kernel_env.items()),
-            search_api_key=search_api_key,
+            system_prompt_path=payload.system_prompt_path,
+            append_to_system_prompt=payload.append_to_system_prompt,
+            skills=tuple(payload.skills),
+            kernel_env=tuple(payload.kernel_env.items()),
+            search_api_key=payload.search_api_key,
         ),
-        lineage_session_id,
+        payload.lineage_session_id,
     )
 
 
@@ -387,7 +269,7 @@ class RLMACPAgent(Agent):
                 session_capabilities=SessionCapabilities(
                     close=SessionCloseCapabilities()
                 ),
-                field_meta={CAPABILITIES_METADATA_KEY: CAPABILITIES_METADATA},
+                field_meta=CONTRACT_METADATA,
             ),
             agent_info=Implementation(name="rlm", title="RLM", version=version("rlm")),
         )
