@@ -148,6 +148,7 @@ def test_execution_snapshot_after_finalize_is_numeric_and_credential_free(sessio
     (session.dir / "programmatic_tool_calls.jsonl").write_text(
         '{"tool":"demo","source":"python"}\n'
     )
+    (session.dir / "sub-child").mkdir()
     engine = RLMEngine(
         client=DummyClient([]),  # type: ignore[arg-type]
         session=session,
@@ -160,6 +161,8 @@ def test_execution_snapshot_after_finalize_is_numeric_and_credential_free(sessio
     snapshot = engine.execution_snapshot()
 
     assert snapshot["programmatic_tool_call_stats"]["by_tool_python"] == {"demo": 1}
+    assert snapshot["metrics"]["sub_rlm_num_calls"] == 1
+    assert snapshot["metrics"]["has_sub_rlm"] == 1
     assert all(
         isinstance(value, (int, float)) and not isinstance(value, bool)
         for value in snapshot["metrics"].values()

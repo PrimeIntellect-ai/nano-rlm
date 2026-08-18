@@ -703,22 +703,23 @@ class RLMEngine:
 
     def _programmatic_tool_call_stats(
         self,
-    ) -> tuple[ProgrammaticToolCallStats, ProgrammaticToolCallStats]:
+    ) -> tuple[ProgrammaticToolCallStats, ProgrammaticToolCallStats, int]:
         if self.session is None:
-            return ProgrammaticToolCallStats(), ProgrammaticToolCallStats()
+            return ProgrammaticToolCallStats(), ProgrammaticToolCallStats(), 0
         direct = ProgrammaticToolCallStats.from_log(
             self.session.dir / "programmatic_tool_calls.jsonl"
         )
-        child = self.session.aggregate_child_metrics(
+        child_aggregate = self.session.aggregate_child_metrics(
             "local_programmatic_tool_call_stats"
-        ).tool_call_stats
+        )
+        child = child_aggregate.tool_call_stats
         if self._supervisor is not None:
             trusted_direct, trusted_child = (
                 self._supervisor.programmatic_tool_call_stats(self._invocation_id)
             )
             direct = direct.merge(trusted_direct)
             child = child.merge(trusted_child)
-        return direct, child
+        return direct, child, child_aggregate.num_sessions
 
     async def _compact_branch(
         self,
@@ -840,9 +841,13 @@ class RLMEngine:
         """Return a credential-free snapshot of cumulative execution state."""
         if self.session is None:
             raise RuntimeError("RLM session is not initialized")
-        direct_tool_stats, child_tool_stats = self._programmatic_tool_call_stats()
+        direct_tool_stats, child_tool_stats, num_child_sessions = (
+            self._programmatic_tool_call_stats()
+        )
         metrics = deepcopy(self._metrics)
-        metrics.apply_programmatic_tool_call_stats(direct_tool_stats, child_tool_stats)
+        metrics.apply_programmatic_tool_call_stats(
+            direct_tool_stats, child_tool_stats, num_child_sessions
+        )
         metric_values = {
             key: value
             for key, value in metrics.to_dict().items()
