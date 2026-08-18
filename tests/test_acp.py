@@ -333,7 +333,9 @@ async def test_compaction_counts_seed_prompt(session):
     ]
 
     try:
-        await engine._compact_branch(messages, turn=0, active_tools=[])
+        await engine._compact_branch(
+            messages, turn=0, active_tools=[], segment_id="test-segment"
+        )
     finally:
         engine.close()
 

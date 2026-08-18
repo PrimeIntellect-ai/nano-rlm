@@ -70,19 +70,32 @@ class Session:
     def aggregate_child_metrics(
         self, field: str = "programmatic_tool_call_stats"
     ) -> ChildSessionAggregate:
-        """Walk sub-*/meta.json and bundle their programmatic tool-call stats."""
+        """Aggregate finalized metadata or live logs across recursive children."""
+
+        def subtree_stats(child_dir: Path) -> ProgrammaticToolCallStats:
+            meta_path = child_dir / "meta.json"
+            try:
+                meta = json.loads(meta_path.read_text())
+            except FileNotFoundError:
+                meta = None
+            if meta is not None and field in meta:
+                return ProgrammaticToolCallStats.from_meta(meta, field)
+
+            stats = ProgrammaticToolCallStats.from_log(
+                child_dir / "programmatic_tool_calls.jsonl"
+            )
+            for grandchild in child_dir.glob("sub-*"):
+                if grandchild.is_dir():
+                    stats = stats.merge(subtree_stats(grandchild))
+            return stats
+
         aggregate = ChildSessionAggregate()
         aggregate.num_sessions = sum(
             1 for path in self.dir.rglob("sub-*") if path.is_dir()
         )
         for child_dir in self.dir.glob("sub-*"):
-            meta_path = child_dir / "meta.json"
-            try:
-                with open(meta_path) as f:
-                    meta = json.load(f)
-            except FileNotFoundError:
-                continue
-            aggregate.absorb(ProgrammaticToolCallStats.from_meta(meta, field))
+            if child_dir.is_dir():
+                aggregate.absorb(subtree_stats(child_dir))
         return aggregate
 
     def finalize(

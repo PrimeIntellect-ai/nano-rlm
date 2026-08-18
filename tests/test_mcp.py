@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 from mcp.types import Tool
-import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall, tool_result
 from rlm import broker, mcp
