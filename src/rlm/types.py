@@ -5,13 +5,18 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
+
+
+NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 
 
 @dataclass
 class TokenUsage:
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    prompt_tokens: NonNegativeInt = 0
+    completion_tokens: NonNegativeInt = 0
 
     @property
     def total(self) -> int:
@@ -254,4 +259,4 @@ class RLMResult:
     answer: str
     session_dir: Path | None = None
     usage: TokenUsage = field(default_factory=TokenUsage)
-    turns: int = 0
+    turns: NonNegativeInt = 0

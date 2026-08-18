@@ -9,12 +9,18 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from rlm.broker import BrokerEndpoint, read_frame, result_to_json, write_frame
+from rlm.broker import (
+    BrokerEndpoint,
+    parse_request,
+    read_frame,
+    result_to_payload,
+    write_frame,
+)
 from rlm.config import RuntimeConfig
 from rlm.mcp import (
     MCPRegistry,
@@ -245,10 +251,8 @@ class SessionTreeSupervisor:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _start_child(
-        self, capability: str, scope_id: str, prompt: str, options: dict[str, Any]
+        self, capability: str, scope_id: str, prompt: str
     ) -> asyncio.Task[RLMResult]:
-        if options:
-            raise ValueError("recursive RLM options are not supported")
         async with self._lock:
             parent_id = self._capabilities.get(capability)
             scope = self._scopes.get(scope_id)
@@ -328,9 +332,8 @@ class SessionTreeSupervisor:
         async with semaphore:
             child_session = Session(Session.child_dir(parent.session.dir))
             child_id = uuid.uuid4().hex
-            child_config = replace(
-                parent.runtime_config,
-                invocation=child_context,
+            child_config = parent.runtime_config.model_copy(
+                update={"invocation": child_context},
             )
             child = _Invocation(
                 id=child_id,
@@ -386,33 +389,19 @@ class SessionTreeSupervisor:
                 )
             except asyncio.TimeoutError:
                 raise TimeoutError("broker request timed out") from None
-            operation = request.get("op")
-            if operation not in {"rlm.run", "skill.call"}:
-                raise ValueError("unknown broker operation")
-            capability = request.get("capability")
-            scope_id = request.get("scope_id")
-            if not all(isinstance(value, str) for value in (capability, scope_id)):
-                raise ValueError("invalid broker request")
-            if operation == "rlm.run":
-                prompt = request.get("prompt")
-                options = request.get("options", {})
-                if not isinstance(prompt, str) or not isinstance(options, dict):
-                    raise ValueError("invalid recursive RLM request")
+            request = parse_request(request)
+            if request["op"] == "rlm.run":
                 operation_task = await self._start_child(
-                    capability, scope_id, prompt, options
+                    request["capability"],
+                    request["scope_id"],
+                    request["prompt"],
                 )
             else:
-                skill_capability = request.get("skill_capability")
-                arguments = request.get("arguments", {})
-                if not isinstance(skill_capability, str) or not isinstance(
-                    arguments, dict
-                ):
-                    raise ValueError("invalid skill request")
                 operation_task = await self._start_skill_call(
-                    capability,
-                    scope_id,
-                    skill_capability,
-                    arguments,
+                    request["capability"],
+                    request["scope_id"],
+                    request["skill_capability"],
+                    request["arguments"],
                 )
             disconnect_task = asyncio.create_task(reader.read(1))
             done, _ = await asyncio.wait(
@@ -425,7 +414,7 @@ class SessionTreeSupervisor:
                 return
             result = await operation_task
             if isinstance(result, RLMResult):
-                result = result_to_json(result)
+                result = result_to_payload(result)
             await write_frame(writer, {"result": result})
         except Exception as exc:
             if not writer.is_closing():

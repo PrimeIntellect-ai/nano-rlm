@@ -25,7 +25,7 @@ def _config(
 ) -> RuntimeConfig:
     return RuntimeConfig(
         model="test-model",
-        provider=ProviderConfig("http://interceptor", "secret"),
+        provider=ProviderConfig(base_url="http://interceptor", api_key="secret"),
         invocation=InvocationContext(),
         policy=ExecutionPolicy(
             max_depth=max_depth,
@@ -33,6 +33,32 @@ def _config(
             max_subagent_calls=max_calls,
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"op": "unknown", "capability": "cap", "scope_id": "scope"},
+        {
+            "op": "rlm.run",
+            "capability": "cap",
+            "scope_id": "scope",
+            "prompt": "work",
+            "options": {"legacy": True},
+        },
+        {
+            "op": "skill.call",
+            "capability": "cap",
+            "scope_id": "scope",
+            "skill_capability": "skill",
+            "arguments": {},
+            "unexpected": True,
+        },
+    ],
+)
+def test_broker_requests_are_strict(payload):
+    with pytest.raises(ValueError, match="invalid broker request"):
+        broker.parse_request(payload)
 
 
 @dataclass
@@ -130,7 +156,7 @@ class _NestedEngine:
         endpoint = self.supervisor.endpoint_for(self.invocation_id)
         try:
             task = await self.supervisor._start_child(
-                endpoint.capability, scope, prompt, {}
+                endpoint.capability, scope, prompt
             )
             result = await task
         finally:
@@ -181,9 +207,7 @@ async def test_child_inherits_trusted_session_segment_and_parent_call(tmp_path):
     )
     endpoint = supervisor.endpoint_for(supervisor.root_id)
     try:
-        child = await supervisor._start_child(
-            endpoint.capability, scope, "delegate", {}
-        )
+        child = await supervisor._start_child(endpoint.capability, scope, "delegate")
         await child
     finally:
         await supervisor.close_scope(scope)
@@ -211,7 +235,7 @@ async def test_parallel_children_respect_depth_capacity(tmp_path):
     endpoint = supervisor.endpoint_for(supervisor.root_id)
     try:
         tasks = [
-            await supervisor._start_child(endpoint.capability, scope, str(i), {})
+            await supervisor._start_child(endpoint.capability, scope, str(i))
             for i in range(6)
         ]
         results = await asyncio.gather(*tasks)
@@ -239,7 +263,7 @@ async def test_total_call_limit_is_atomic(tmp_path):
     endpoint = supervisor.endpoint_for(supervisor.root_id)
     try:
         tasks = [
-            await supervisor._start_child(endpoint.capability, scope, str(i), {})
+            await supervisor._start_child(endpoint.capability, scope, str(i))
             for i in range(3)
         ]
         results = await asyncio.gather(*tasks)
@@ -268,7 +292,7 @@ async def test_saturated_nested_calls_do_not_deadlock(tmp_path):
     endpoint = supervisor.endpoint_for(supervisor.root_id)
     try:
         tasks = [
-            await supervisor._start_child(endpoint.capability, scope, str(i), {})
+            await supervisor._start_child(endpoint.capability, scope, str(i))
             for i in range(2)
         ]
         results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)

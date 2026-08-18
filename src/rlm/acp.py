@@ -48,7 +48,7 @@ from rlm.config import (
     ProviderConfig,
     RuntimeConfig,
 )
-from rlm.mcp import MCPServer
+from rlm.mcp import MCPHTTPServer, MCPServer, MCPStdioServer
 from rlm.session import Session
 from rlm.tools.ipython import RESERVED_KERNEL_ENV_NAMES
 
@@ -63,33 +63,13 @@ class _ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class _ProviderMetadata(_ContractModel):
-    base_url: str | None
-    api_key: str = Field(min_length=1)
-    headers: dict[str, str]
-    max_retries: int = Field(ge=0)
-
-
-class _PolicyMetadata(_ContractModel):
-    max_depth: int
-    exec_timeout: int
-    max_output: int
-    max_tokens: int | None
-    summarize_at_tokens: int | None
-    max_compactions: int | None
-    max_concurrent_subagents: int
-    max_subagent_calls: int
-    max_tool_output_chars: int | None
-    allow_git: bool
-
-
 class _RuntimeMetadata(_ContractModel):
     lineage_session_id: str = Field(
         pattern=r"^[A-Za-z0-9._:-]{1,128}$",
     )
     model: str = Field(min_length=1)
-    provider: _ProviderMetadata
-    policy: _PolicyMetadata
+    provider: ProviderConfig
+    policy: ExecutionPolicy
     system_prompt_path: str | None
     append_to_system_prompt: str | None
     skills: list[Annotated[str, Field(min_length=1)]]
@@ -168,12 +148,6 @@ def _runtime_config(field_meta: Any) -> tuple[RuntimeConfig, str]:
             }
         ) from error
 
-    try:
-        provider = ProviderConfig(**payload.provider.model_dump())
-        policy = ExecutionPolicy(**payload.policy.model_dump())
-    except ValueError as error:
-        raise RequestError.invalid_params({"reason": str(error)}) from error
-
     reserved_kernel_env = sorted(
         RESERVED_KERNEL_ENV_NAMES.intersection(payload.kernel_env)
     )
@@ -185,9 +159,9 @@ def _runtime_config(field_meta: Any) -> tuple[RuntimeConfig, str]:
     return (
         RuntimeConfig(
             model=payload.model,
-            provider=provider,
+            provider=payload.provider,
             invocation=InvocationContext(),
-            policy=policy,
+            policy=payload.policy,
             system_prompt_path=payload.system_prompt_path,
             append_to_system_prompt=payload.append_to_system_prompt,
             skills=tuple(payload.skills),
@@ -205,15 +179,16 @@ def _mcp_servers(
     for server in servers or []:
         if isinstance(server, HttpMcpServer):
             headers = {header.name: header.value for header in server.headers}
-            resolved[server.name] = (
-                {"url": server.url, "headers": headers} if headers else server.url
+            resolved[server.name] = MCPHTTPServer(
+                url=server.url,
+                headers=headers,
             )
         elif isinstance(server, McpServerStdio):
-            resolved[server.name] = {
-                "command": server.command,
-                "args": list(server.args),
-                "env": {item.name: item.value for item in server.env},
-            }
+            resolved[server.name] = MCPStdioServer(
+                command=server.command,
+                args=list(server.args),
+                env={item.name: item.value for item in server.env},
+            )
         else:
             raise RequestError.invalid_params(
                 {"reason": "RLM supports stdio and streamable HTTP MCP servers only"}

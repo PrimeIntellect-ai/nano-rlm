@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Mapping, Self
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 PI_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1"
@@ -49,56 +50,63 @@ def _kernel_env(value: str | None) -> tuple[tuple[str, str], ...]:
     return tuple(parsed.items())
 
 
-@dataclass(frozen=True)
-class ProviderConfig:
+class _ConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class ProviderConfig(_ConfigModel):
     """Credentials and transport options for one inference provider."""
 
     base_url: str | None
-    api_key: str | None = field(repr=False)
-    headers: dict[str, str] = field(default_factory=dict, repr=False)
-    max_retries: int = 5
+    api_key: str = Field(min_length=1, repr=False)
+    headers: dict[str, str] = Field(default_factory=dict, repr=False)
+    max_retries: int = Field(default=5, ge=0)
 
-    def __post_init__(self) -> None:
-        reserved = sorted(
-            name for name in self.headers if name.lower().startswith("x-rlm-")
-        )
+    @field_validator("headers")
+    @classmethod
+    def _reserve_lineage_headers(cls, headers: dict[str, str]) -> dict[str, str]:
+        reserved = sorted(name for name in headers if name.lower().startswith("x-rlm-"))
         if reserved:
             raise ValueError(f"provider headers contain reserved names: {reserved}")
+        return headers
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> ProviderConfig:
         env = os.environ if environ is None else environ
         max_retries = int(env.get("RLM_SDK_MAX_RETRIES", "5"))
         if api_key := env.get("RLM_API_KEY"):
-            return cls(env.get("RLM_BASE_URL"), api_key, max_retries=max_retries)
+            return cls(
+                base_url=env.get("RLM_BASE_URL"),
+                api_key=api_key,
+                max_retries=max_retries,
+            )
         if api_key := env.get("PRIME_API_KEY"):
             headers = {}
             if team_id := env.get("PRIME_TEAM_ID"):
                 headers["X-Prime-Team-ID"] = team_id
             return cls(
-                PI_INFERENCE_BASE_URL,
-                api_key,
+                base_url=PI_INFERENCE_BASE_URL,
+                api_key=api_key,
                 headers=headers,
                 max_retries=max_retries,
             )
         if env.get("OPENAI_API_KEY"):
             return cls(
-                env.get("OPENAI_BASE_URL"),
-                env["OPENAI_API_KEY"],
+                base_url=env.get("OPENAI_BASE_URL"),
+                api_key=env["OPENAI_API_KEY"],
                 max_retries=max_retries,
             )
-        return cls(PI_INFERENCE_BASE_URL, "EMPTY", max_retries=max_retries)
+        return cls(
+            base_url=PI_INFERENCE_BASE_URL,
+            api_key="EMPTY",
+            max_retries=max_retries,
+        )
 
 
-@dataclass(frozen=True)
-class InvocationContext:
+class InvocationContext(_ConfigModel):
     """Trusted identity of one engine within a recursive session tree."""
 
-    depth: int = 0
-
-    def __post_init__(self) -> None:
-        if self.depth < 0:
-            raise ValueError("depth must be non-negative")
+    depth: int = Field(default=0, ge=0)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> InvocationContext:
@@ -109,60 +117,46 @@ class InvocationContext:
         return InvocationContext(depth=self.depth + 1)
 
 
-@dataclass(frozen=True)
-class ExecutionPolicy:
+class ExecutionPolicy(_ConfigModel):
     """Resource and context-management policy for one RLM engine."""
 
-    max_depth: int = 0
-    exec_timeout: int = 300
+    max_depth: int = Field(default=0, ge=0)
+    exec_timeout: int = Field(default=300, gt=0)
     max_output: int = -1
-    max_tokens: int | None = None
-    summarize_at_tokens: int | None = None
-    max_compactions: int | None = None
-    max_concurrent_subagents: int = 4
-    max_subagent_calls: int = 64
-    max_tool_output_chars: int | None = None
+    max_tokens: int | None = Field(default=None, gt=0)
+    summarize_at_tokens: int | None = Field(default=None, gt=0)
+    max_compactions: int | None = Field(default=None, gt=0)
+    max_concurrent_subagents: int = Field(default=4, gt=0)
+    max_subagent_calls: int = Field(default=64, gt=0)
+    max_tool_output_chars: int | None = Field(default=None, gt=0)
     allow_git: bool = False
 
-    def __post_init__(self) -> None:
-        if self.max_depth < 0:
-            raise ValueError("max_depth must be non-negative")
-        if self.exec_timeout <= 0:
-            raise ValueError("exec_timeout must be positive")
-        if self.max_output == 0 or self.max_output < -1:
-            raise ValueError("max_output must be positive, or -1 to disable truncation")
-        for name in (
-            "max_tokens",
-            "summarize_at_tokens",
-            "max_compactions",
-            "max_tool_output_chars",
-        ):
-            value = getattr(self, name)
-            if value is not None and value <= 0:
-                raise ValueError(f"{name} must be positive")
-        if self.max_concurrent_subagents <= 0:
-            raise ValueError("max_concurrent_subagents must be positive")
+    @field_validator("max_output")
+    @classmethod
+    def _validate_max_output(cls, value: int) -> int:
+        if value == 0 or value < -1:
+            raise ValueError("must be positive, or -1 to disable truncation")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_concurrency(self) -> Self:
         if self.max_concurrent_subagents < self.max_depth:
             raise ValueError("max_concurrent_subagents must be at least max_depth")
-        if self.max_subagent_calls <= 0:
-            raise ValueError("max_subagent_calls must be positive")
-        if not isinstance(self.allow_git, bool):
-            raise ValueError("allow_git must be a bool")
+        return self
 
 
-@dataclass(frozen=True)
-class RuntimeConfig:
+class RuntimeConfig(_ConfigModel):
     """Configuration resolved once at an RLM process boundary."""
 
-    model: str
+    model: str = Field(min_length=1)
     provider: ProviderConfig
     invocation: InvocationContext
     policy: ExecutionPolicy
     system_prompt_path: str | None = None
     append_to_system_prompt: str | None = None
     skills: tuple[str, ...] = ()
-    kernel_env: tuple[tuple[str, str], ...] = field(default=(), repr=False)
-    search_api_key: str | None = field(default=None, repr=False)
+    kernel_env: tuple[tuple[str, str], ...] = Field(default=(), repr=False)
+    search_api_key: str | None = Field(default=None, repr=False)
 
     @classmethod
     def from_env(

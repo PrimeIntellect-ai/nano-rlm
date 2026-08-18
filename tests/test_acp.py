@@ -24,6 +24,7 @@ from rlm.acp import (
 )
 from rlm.engine import RLMEngine
 from rlm.config import ExecutionPolicy, InvocationContext, ProviderConfig, RuntimeConfig
+from rlm.mcp import MCPHTTPServer, MCPStdioServer
 from rlm.session import Session
 from rlm.types import RLMResult, TokenUsage
 
@@ -182,8 +183,8 @@ def test_execution_snapshot_after_finalize_is_numeric_and_credential_free(sessio
     config = RuntimeConfig(
         model="test-model",
         provider=ProviderConfig(
-            "http://interceptor",
-            "provider-secret",
+            base_url="http://interceptor",
+            api_key="provider-secret",
             headers={"X-Task": "header-secret"},
         ),
         invocation=InvocationContext(),
@@ -681,15 +682,15 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     engine = _Engine.instances[0]
     assert engine.prompts == ["one", "two"]
     assert engine.mcp_servers == {
-        "tools": {
-            "url": "http://127.0.0.1:8000/mcp",
-            "headers": {"Authorization": "Bearer task"},
-        },
-        "local": {
-            "command": "/usr/bin/tool-server",
-            "args": ["--stdio"],
-            "env": {"TOKEN": "task-secret"},
-        },
+        "tools": MCPHTTPServer(
+            url="http://127.0.0.1:8000/mcp",
+            headers={"Authorization": "Bearer task"},
+        ),
+        "local": MCPStdioServer(
+            command="/usr/bin/tool-server",
+            args=["--stdio"],
+            env={"TOKEN": "task-secret"},
+        ),
     }
     assert [update.content.text for _, update in client.updates] == [
         "reply:one",

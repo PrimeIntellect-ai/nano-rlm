@@ -41,7 +41,7 @@ SCHEMA = {
 def _config() -> RuntimeConfig:
     return RuntimeConfig(
         model="test-model",
-        provider=ProviderConfig("http://interceptor", "secret"),
+        provider=ProviderConfig(base_url="http://interceptor", api_key="secret"),
         invocation=InvocationContext(),
         policy=ExecutionPolicy(),
     )
@@ -81,16 +81,16 @@ def test_load_mcp_servers(monkeypatch):
     )
     servers = mcp.load_mcp_servers()
     assert servers == {
-        "tools": "http://h/mcp",
-        "web": {
-            "url": "http://h/web",
-            "headers": {"Authorization": "secret"},
-        },
-        "local": {
-            "command": "/bin/server",
-            "args": ["--stdio"],
-            "env": {"TOKEN": "secret"},
-        },
+        "tools": mcp.MCPHTTPServer(url="http://h/mcp"),
+        "web": mcp.MCPHTTPServer(
+            url="http://h/web",
+            headers={"Authorization": "secret"},
+        ),
+        "local": mcp.MCPStdioServer(
+            command="/bin/server",
+            args=["--stdio"],
+            env={"TOKEN": "secret"},
+        ),
     }
     assert json.loads(mcp.dump_mcp_servers(servers)) == {
         "mcpServers": {
@@ -106,6 +106,13 @@ def test_load_mcp_servers(monkeypatch):
             },
         }
     }
+
+    monkeypatch.setenv(
+        mcp.MCP_CONFIG_ENV,
+        '{"mcpServers":{"bad":{"url":123,"command":"also-bad"}}}',
+    )
+    with pytest.raises(ValueError):
+        mcp.load_mcp_servers()
 
 
 async def test_registry_keeps_transport_private_and_calls_stdio(tmp_path):
@@ -166,11 +173,16 @@ async def test_registry_rejects_normalized_and_existing_name_collisions(
         yield FakeSession()
 
     monkeypatch.setattr(mcp, "_client_session", fake_client_session)
-    duplicate = mcp.MCPRegistry({"a-b": "one", "a_b": "two"})
+    duplicate = mcp.MCPRegistry(
+        {
+            "a-b": {"url": "http://one"},
+            "a_b": {"url": "http://two"},
+        }
+    )
     with pytest.raises(ValueError, match="duplicate normalized MCP tool name"):
         await duplicate.discover()
 
-    registry = mcp.MCPRegistry({"local": "one"})
+    registry = mcp.MCPRegistry({"local": {"url": "http://one"}})
     await registry.discover()
     with pytest.raises(ValueError, match="conflict with existing skills"):
         registry.write_skill_modules(tmp_path, {"local_echo"})
@@ -188,7 +200,7 @@ async def test_registry_redacts_discovery_errors_and_bounds_metadata(monkeypatch
     with pytest.raises(
         RuntimeError, match="MCP server 'public' discovery failed"
     ) as exc:
-        await mcp.MCPRegistry({"public": "ignored"}).discover()
+        await mcp.MCPRegistry({"public": {"url": "http://ignored"}}).discover()
     assert sentinel not in str(exc.value)
 
     tools = [
@@ -210,7 +222,7 @@ async def test_registry_redacts_discovery_errors_and_bounds_metadata(monkeypatch
     monkeypatch.setattr(mcp, "_client_session", fake_client_session)
     monkeypatch.setattr(mcp, "MAX_MCP_TOOLS", 1)
     with pytest.raises(ValueError, match="tool count exceeds 1"):
-        await mcp.MCPRegistry({"public": "ignored"}).discover()
+        await mcp.MCPRegistry({"public": {"url": "http://ignored"}}).discover()
 
 
 def test_build_signature():

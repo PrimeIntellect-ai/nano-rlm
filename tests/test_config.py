@@ -35,8 +35,8 @@ def test_provider_config_keeps_keys_paired_with_provider():
 
     with pytest.raises(ValueError, match="reserved names"):
         ProviderConfig(
-            "http://interceptor",
-            "secret",
+            base_url="http://interceptor",
+            api_key="secret",
             headers={"x-RlM-Parent-Invocation-ID": "forged"},
         )
 
@@ -159,10 +159,14 @@ def test_runtime_config_validates_recursive_limits():
 def test_direct_policy_construction_validates_recursive_limits():
     with pytest.raises(ValueError, match="at least max_depth"):
         ExecutionPolicy(max_depth=3, max_concurrent_subagents=2)
-    with pytest.raises(ValueError, match="max_subagent_calls must be positive"):
+    with pytest.raises(ValueError):
         ExecutionPolicy(max_subagent_calls=0)
-    with pytest.raises(ValueError, match="depth must be non-negative"):
+    with pytest.raises(ValueError):
         InvocationContext(depth=-1)
+    with pytest.raises(ValueError):
+        ExecutionPolicy(max_depth=True)
+    with pytest.raises(ValueError):
+        ProviderConfig(base_url=None, api_key="secret", max_retries=-1)
 
 
 @pytest.mark.parametrize(

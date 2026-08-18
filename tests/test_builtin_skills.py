@@ -138,7 +138,9 @@ async def test_real_kernel_search_is_brokered_without_key(monkeypatch, session):
     monkeypatch.setenv("SERPER_API_KEY", secret)
     config = RuntimeConfig(
         model="test-model",
-        provider=ProviderConfig("http://interceptor", "inference-secret"),
+        provider=ProviderConfig(
+            base_url="http://interceptor", api_key="inference-secret"
+        ),
         invocation=InvocationContext(),
         policy=ExecutionPolicy(),
         skills=("search",),
@@ -206,7 +208,9 @@ async def test_supervisor_close_cancels_active_search(monkeypatch, tmp_path):
     session = Session(tmp_path / "session")
     config = RuntimeConfig(
         model="test-model",
-        provider=ProviderConfig("http://interceptor", "inference-secret"),
+        provider=ProviderConfig(
+            base_url="http://interceptor", api_key="inference-secret"
+        ),
         invocation=InvocationContext(),
         policy=ExecutionPolicy(),
         skills=("search",),

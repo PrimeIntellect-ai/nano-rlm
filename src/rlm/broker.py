@@ -8,10 +8,12 @@ import json
 import keyword
 import struct
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from rlm.types import RLMResult, TokenUsage
+from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
+from typing_extensions import TypedDict
+
+from rlm.types import RLMResult
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -35,6 +37,73 @@ _JSON_TO_PY = {
     "array": list,
     "object": dict,
 }
+
+
+class BrokerRunRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+    op: Literal["rlm.run"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    prompt: str
+    options: Annotated[dict[str, Any], Field(max_length=0)]
+
+
+class BrokerSkillRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+    op: Literal["skill.call"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    skill_capability: Annotated[str, Field(min_length=1)]
+    arguments: dict[str, Any]
+
+
+BrokerRequest = Annotated[
+    BrokerRunRequest | BrokerSkillRequest,
+    Field(discriminator="op"),
+]
+_REQUEST_ADAPTER = TypeAdapter(BrokerRequest)
+
+
+class _BrokerSuccess(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+    result: dict[str, Any] | str
+
+
+class _BrokerFailure(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+    error: str
+
+
+BrokerResponse = _BrokerSuccess | _BrokerFailure
+_RESPONSE_ADAPTER = TypeAdapter(BrokerResponse)
+
+
+_RESULT_ADAPTER = TypeAdapter(RLMResult)
+_RESULT_FIELDS = {"answer", "session_dir", "usage", "turns"}
+_USAGE_FIELDS = {"prompt_tokens", "completion_tokens"}
+
+
+def parse_request(value: dict[str, Any]) -> BrokerRequest:
+    try:
+        return _REQUEST_ADAPTER.validate_python(value)
+    except ValidationError:
+        raise ValueError("invalid broker request") from None
+
+
+def result_to_payload(result: RLMResult) -> dict[str, Any]:
+    return _RESULT_ADAPTER.dump_python(result, mode="json")
+
+
+def result_from_payload(value: dict[str, Any]) -> RLMResult:
+    usage = value.get("usage")
+    if set(value) != _RESULT_FIELDS or not isinstance(usage, dict):
+        raise RuntimeError("invalid response from RLM supervisor")
+    if set(usage) != _USAGE_FIELDS:
+        raise RuntimeError("invalid response from RLM supervisor")
+    try:
+        return _RESULT_ADAPTER.validate_python(value)
+    except ValidationError:
+        raise RuntimeError("invalid response from RLM supervisor") from None
 
 
 def configure(endpoint: BrokerEndpoint | None) -> None:
@@ -77,32 +146,6 @@ async def write_frame(
     await writer.drain()
 
 
-def result_to_json(result: RLMResult) -> dict[str, Any]:
-    return {
-        "answer": result.answer,
-        "session_dir": str(result.session_dir) if result.session_dir else None,
-        "usage": {
-            "prompt_tokens": result.usage.prompt_tokens,
-            "completion_tokens": result.usage.completion_tokens,
-        },
-        "turns": result.turns,
-    }
-
-
-def result_from_json(value: dict[str, Any]) -> RLMResult:
-    usage = value.get("usage") or {}
-    session_dir = value.get("session_dir")
-    return RLMResult(
-        answer=str(value.get("answer", "")),
-        session_dir=Path(session_dir) if session_dir else None,
-        usage=TokenUsage(
-            prompt_tokens=int(usage.get("prompt_tokens", 0)),
-            completion_tokens=int(usage.get("completion_tokens", 0)),
-        ),
-        turns=int(value.get("turns", 0)),
-    )
-
-
 async def run(prompt: str, **kwargs: Any) -> RLMResult:
     """Run a recursive RLM through the trusted session supervisor."""
     if _endpoint is None or _scope_id is None:
@@ -112,6 +155,8 @@ async def run(prompt: str, **kwargs: Any) -> RLMResult:
     response = await _request(
         {
             "op": "rlm.run",
+            "capability": _endpoint.capability,
+            "scope_id": _scope_id,
             "prompt": prompt,
             "options": kwargs,
         }
@@ -119,14 +164,18 @@ async def run(prompt: str, **kwargs: Any) -> RLMResult:
     result = response.get("result")
     if not isinstance(result, dict):
         raise RuntimeError("invalid response from RLM supervisor")
-    return result_from_json(result)
+    return result_from_payload(result)
 
 
 async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
     """Invoke a supervisor-owned skill through its opaque capability."""
+    if _endpoint is None or _scope_id is None:
+        raise RuntimeError("brokered calls are unavailable outside an active cell")
     response = await _request(
         {
             "op": "skill.call",
+            "capability": _endpoint.capability,
+            "scope_id": _scope_id,
             "skill_capability": capability,
             "arguments": arguments,
         }
@@ -166,24 +215,24 @@ def make_skill(descriptor: dict[str, Any]):
     return run
 
 
-async def _request(payload: dict[str, Any]) -> dict[str, Any]:
-    if _endpoint is None or _scope_id is None:
+async def _request(payload: BrokerRequest) -> BrokerResponse:
+    if _endpoint is None:
         raise RuntimeError("brokered calls are unavailable outside an active cell")
     reader, writer = await asyncio.open_unix_connection(_endpoint.socket_path)
     try:
         await write_frame(
             writer,
-            {
-                "capability": _endpoint.capability,
-                "scope_id": _scope_id,
-                **payload,
-            },
+            payload,
             MAX_REQUEST_BYTES,
         )
-        response = await read_frame(reader, MAX_RESPONSE_BYTES)
+        raw_response = await read_frame(reader, MAX_RESPONSE_BYTES)
     finally:
         writer.close()
         await writer.wait_closed()
-    if error := response.get("error"):
-        raise RuntimeError(str(error))
+    try:
+        response = _RESPONSE_ADAPTER.validate_python(raw_response)
+    except ValidationError:
+        raise RuntimeError("invalid response from RLM supervisor") from None
+    if "error" in response:
+        raise RuntimeError(response["error"])
     return response

@@ -21,7 +21,7 @@ from rlm.client import (
     model_call_headers,
 )
 from rlm.config import RuntimeConfig
-from rlm.mcp import MCPServer, load_mcp_servers
+from rlm.mcp import MCPServer, load_mcp_servers, validate_mcp_servers
 from rlm.prompt import build_system_prompt
 from rlm.session import Session
 from rlm.skills import enable_builtin_skills
@@ -177,7 +177,7 @@ class RLMEngine:
 
         # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
         # parse RLM_MCP_CONFIG (a standard mcpServers config).
-        self.mcp_servers = (
+        self.mcp_servers = validate_mcp_servers(
             mcp_servers if mcp_servers is not None else load_mcp_servers()
         )
 

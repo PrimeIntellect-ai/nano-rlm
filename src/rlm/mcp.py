@@ -12,11 +12,12 @@ from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 MCP_CONFIG_ENV = "RLM_MCP_CONFIG"
 MAX_MCP_TOOLS = 128
@@ -32,7 +33,37 @@ _JSON_TO_PY = {
     "object": dict,
 }
 
-MCPServer = str | dict[str, Any]
+
+class _MCPConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class MCPHTTPServer(_MCPConfigModel):
+    url: str = Field(min_length=1)
+    headers: dict[str, str] = Field(default_factory=dict, repr=False)
+
+    @field_validator("url")
+    @classmethod
+    def _require_http_url(cls, url: str) -> str:
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("MCP URL must use HTTP or HTTPS")
+        return url
+
+
+class MCPStdioServer(_MCPConfigModel):
+    command: str = Field(min_length=1)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict, repr=False)
+
+
+MCPServer = MCPHTTPServer | MCPStdioServer
+_MCP_SERVERS_ADAPTER = TypeAdapter(dict[Annotated[str, Field(min_length=1)], MCPServer])
+
+
+class _MCPServersDocument(_MCPConfigModel):
+    mcp_servers: dict[Annotated[str, Field(min_length=1)], MCPServer] = Field(
+        alias="mcpServers"
+    )
 
 
 @dataclass(frozen=True)
@@ -68,9 +99,7 @@ class MCPRegistry:
     """Keep MCP transport configuration private and expose opaque tool capabilities."""
 
     def __init__(self, servers: dict[str, MCPServer], cwd: str | None = None) -> None:
-        self._servers = {
-            name: _normalize_server(spec) for name, spec in servers.items()
-        }
+        self._servers = validate_mcp_servers(servers)
         self._cwd = cwd
         self._tools: dict[str, _RegisteredMCPTool] | None = None
 
@@ -161,27 +190,11 @@ class MCPRegistry:
 
 
 def load_mcp_servers() -> dict[str, MCPServer]:
-    """Parse ``RLM_MCP_CONFIG`` into normalized HTTP or stdio servers."""
+    """Parse ``RLM_MCP_CONFIG`` into validated HTTP or stdio servers."""
     raw = os.environ.get(MCP_CONFIG_ENV)
-    servers = json.loads(raw)["mcpServers"] if raw else {}
-    return {name: _normalize_server(spec) for name, spec in servers.items()}
-
-
-def _normalize_server(server: MCPServer) -> MCPServer:
-    if isinstance(server, str):
-        return server
-    if "url" in server:
-        headers = dict(server.get("headers") or {})
-        return (
-            {"url": str(server["url"]), "headers": headers}
-            if headers
-            else str(server["url"])
-        )
-    return {
-        "command": str(server["command"]),
-        "args": list(server.get("args") or []),
-        "env": dict(server.get("env") or {}),
-    }
+    if not raw:
+        return {}
+    return _MCPServersDocument.model_validate_json(raw).mcp_servers
 
 
 def _skill_name(server: str, tool: str) -> str:
@@ -190,44 +203,36 @@ def _skill_name(server: str, tool: str) -> str:
     return f"_{ident}" if ident[:1].isdigit() else ident
 
 
-def _http_connection(server: MCPServer) -> tuple[str, dict[str, str]]:
-    if isinstance(server, str):
-        return server, {}
-    if "url" not in server:
-        raise TypeError("expected an HTTP MCP server")
-    return str(server["url"]), dict(server.get("headers") or {})
+def validate_mcp_servers(servers: dict[str, Any]) -> dict[str, MCPServer]:
+    return _MCP_SERVERS_ADAPTER.validate_python(servers)
 
 
 def dump_mcp_servers(servers: dict[str, MCPServer]) -> str:
     """Serialize servers as a standard ``mcpServers`` configuration."""
-    specs = {}
-    for name, server in servers.items():
-        normalized = _normalize_server(server)
-        if isinstance(normalized, str):
-            specs[name] = {"url": normalized}
-        else:
-            specs[name] = normalized
-    return json.dumps({"mcpServers": specs})
+    document = _MCPServersDocument(mcpServers=validate_mcp_servers(servers))
+    return document.model_dump_json(by_alias=True, exclude_defaults=True)
 
 
 @asynccontextmanager
 async def _client_session(
     server: MCPServer, cwd: str | None = None
 ) -> AsyncIterator[ClientSession]:
-    normalized = _normalize_server(server)
-    if isinstance(normalized, str) or "url" in normalized:
-        url, headers = _http_connection(normalized)
+    if isinstance(server, MCPHTTPServer):
         async with (
-            streamablehttp_client(url, headers=headers or None) as (read, write, _),
+            streamablehttp_client(server.url, headers=server.headers or None) as (
+                read,
+                write,
+                _,
+            ),
             ClientSession(read, write) as session,
         ):
             yield session
         return
 
     params = StdioServerParameters(
-        command=normalized["command"],
-        args=normalized["args"],
-        env=normalized["env"],
+        command=server.command,
+        args=server.args,
+        env=server.env,
         cwd=cwd,
     )
     async with (
