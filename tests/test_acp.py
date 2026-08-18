@@ -16,6 +16,7 @@ import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall
 from rlm.acp import (
+    CAPABILITIES_METADATA,
     CAPABILITIES_METADATA_KEY,
     RUNTIME_METADATA_KEY,
     SESSION_METADATA_KEY,
@@ -25,6 +26,54 @@ from rlm.engine import RLMEngine
 from rlm.config import ExecutionPolicy, InvocationContext, ProviderConfig, RuntimeConfig
 from rlm.session import Session
 from rlm.types import RLMResult, TokenUsage
+
+
+def _contract_metadata() -> dict[str, Any]:
+    return {
+        CAPABILITIES_METADATA_KEY: {
+            name: list(versions)
+            for name, versions in CAPABILITIES_METADATA.items()
+        }
+    }
+
+
+def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
+    payload = {
+        "lineage_session_id": "test-session",
+        "model": "test-model",
+        "provider": {
+            "base_url": "http://interceptor",
+            "api_key": "test-secret",
+            "headers": {},
+            "max_retries": 2,
+        },
+        "policy": {
+            "max_depth": 0,
+            "exec_timeout": 300,
+            "max_output": -1,
+            "max_tokens": None,
+            "summarize_at_tokens": None,
+            "max_compactions": None,
+            "max_concurrent_subagents": 4,
+            "max_subagent_calls": 64,
+        },
+        "system_prompt_path": None,
+        "append_to_system_prompt": None,
+        "skills": [],
+        "kernel_env": {},
+        "search_api_key": None,
+    }
+    payload.update(overrides)
+    return {RUNTIME_METADATA_KEY: payload}
+
+
+async def _initialize(agent: RLMACPAgent):
+    return await agent.initialize(PROTOCOL_VERSION, **_contract_metadata())
+
+
+async def _new_session(agent: RLMACPAgent, cwd: str, **kwargs: Any):
+    await _initialize(agent)
+    return await agent.new_session(cwd, **kwargs, **_runtime_metadata())
 
 
 class _Client:
@@ -554,11 +603,51 @@ async def test_acp_failed_session_creation_closes_session(monkeypatch, tmp_path)
     monkeypatch.setattr("rlm.acp.Session", lambda: session)
     monkeypatch.setattr("rlm.acp.RLMEngine", FailingEngine)
     agent = RLMACPAgent()
+    await _initialize(agent)
 
     with pytest.raises(RuntimeError, match="engine init failed"):
-        await agent.new_session(str(tmp_path))
+        await agent.new_session(str(tmp_path), **_runtime_metadata())
 
     assert session._msg_file.closed is True
+    assert agent._sessions == {}
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {
+            CAPABILITIES_METADATA_KEY: {
+                "runtime_versions": [0],
+                "session_snapshot_versions": [1],
+                "lineage_versions": [1],
+            }
+        },
+    ],
+)
+async def test_acp_rejects_missing_or_unsupported_contract(tmp_path, metadata):
+    agent = RLMACPAgent()
+
+    with pytest.raises(RequestError):
+        await agent.initialize(PROTOCOL_VERSION, **metadata)
+    with pytest.raises(RequestError):
+        await agent.new_session(str(tmp_path), **_runtime_metadata())
+
+    assert agent._sessions == {}
+
+
+async def test_acp_requires_complete_runtime_metadata(tmp_path):
+    agent = RLMACPAgent()
+    await _initialize(agent)
+
+    with pytest.raises(RequestError):
+        await agent.new_session(str(tmp_path))
+    with pytest.raises(RequestError):
+        await agent.new_session(
+            str(tmp_path),
+            **{RUNTIME_METADATA_KEY: {"lineage_session_id": "old-client"}},
+        )
+
     assert agent._sessions == {}
 
 
@@ -570,7 +659,7 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     agent = RLMACPAgent()
     agent.on_connect(client)  # type: ignore[arg-type]
 
-    initialized = await agent.initialize(PROTOCOL_VERSION)
+    initialized = await _initialize(agent)
     assert initialized.agent_capabilities.mcp_capabilities.http is True
     assert initialized.agent_capabilities.load_session is False
     assert initialized.agent_capabilities.field_meta == {
@@ -598,6 +687,7 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
                 env=[EnvVariable(name="TOKEN", value="task-secret")],
             ),
         ],
+        **_runtime_metadata(),
     )
     first = await agent.prompt(created.session_id, [text_block("one")])
     second = await agent.prompt(created.session_id, [text_block("two")])
@@ -648,22 +738,38 @@ async def test_acp_runtime_metadata_keeps_credentials_out_of_responses(
     _Engine.instances.clear()
     monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
     monkeypatch.setenv("RLM_API_KEY", "ambient-provider-secret")
+    monkeypatch.setenv("RLM_MODEL", "ambient-model")
+    monkeypatch.setenv("RLM_MAX_DEPTH", "9")
+    monkeypatch.setenv("RLM_SKILLS", "search")
+    monkeypatch.setenv("SERPER_API_KEY", "ambient-search-secret")
     monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
     agent = RLMACPAgent()
-    metadata = {
-        RUNTIME_METADATA_KEY: {
-            "lineage_session_id": "trace-123",
-            "provider": {
-                "base_url": "http://interceptor",
-                "api_key": "session-provider-secret",
-                "headers": {"X-Task": "header-secret"},
-                "max_retries": 2,
-            },
-            "kernel_env": {"TASK_VISIBLE": "task-secret"},
-            "search_api_key": "search-secret",
-        }
-    }
+    metadata = _runtime_metadata(
+        lineage_session_id="trace-123",
+        model="session-model",
+        provider={
+            "base_url": "http://interceptor",
+            "api_key": "session-provider-secret",
+            "headers": {"X-Task": "header-secret"},
+            "max_retries": 2,
+        },
+        policy={
+            "max_depth": 2,
+            "exec_timeout": 30,
+            "max_output": 1000,
+            "max_tokens": 500,
+            "summarize_at_tokens": 300,
+            "max_compactions": 2,
+            "max_concurrent_subagents": 4,
+            "max_subagent_calls": 8,
+        },
+        append_to_system_prompt="session instructions",
+        skills=["edit"],
+        kernel_env={"TASK_VISIBLE": "task-secret"},
+        search_api_key="search-secret",
+    )
 
+    await _initialize(agent)
     created = await agent.new_session(str(tmp_path), **metadata)
     engine = _Engine.instances[0]
 
@@ -671,6 +777,12 @@ async def test_acp_runtime_metadata_keeps_credentials_out_of_responses(
     assert engine.runtime_config.provider.base_url == "http://interceptor"
     assert engine.runtime_config.provider.api_key == "session-provider-secret"
     assert engine.runtime_config.provider.headers == {"X-Task": "header-secret"}
+    assert engine.runtime_config.model == "session-model"
+    assert engine.runtime_config.policy.max_depth == 2
+    assert engine.runtime_config.policy.exec_timeout == 30
+    assert engine.runtime_config.policy.max_tokens == 500
+    assert engine.runtime_config.append_to_system_prompt == "session instructions"
+    assert engine.runtime_config.skills == ("edit",)
     assert engine.runtime_config.kernel_env == (("TASK_VISIBLE", "task-secret"),)
     assert engine.runtime_config.search_api_key == "search-secret"
     response_json = created.model_dump_json(by_alias=True)
@@ -704,9 +816,10 @@ async def test_acp_runtime_metadata_keeps_credentials_out_of_responses(
 async def test_acp_rejects_invalid_runtime_metadata(monkeypatch, tmp_path, payload):
     monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
     agent = RLMACPAgent()
+    await _initialize(agent)
 
     with pytest.raises(RequestError):
-        await agent.new_session(str(tmp_path), **{RUNTIME_METADATA_KEY: payload})
+        await agent.new_session(str(tmp_path), **_runtime_metadata(**payload))
 
     assert agent._sessions == {}
 
@@ -717,7 +830,7 @@ async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
     monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
     agent = RLMACPAgent()
     agent.on_connect(_Client())  # type: ignore[arg-type]
-    created = await agent.new_session(str(tmp_path))
+    created = await _new_session(agent, str(tmp_path))
     engine = _Engine.instances[0]
 
     pending = asyncio.create_task(
@@ -744,7 +857,7 @@ async def test_acp_transport_cancellation_propagates(monkeypatch, tmp_path):
     monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
     agent = RLMACPAgent()
     agent.on_connect(_Client())  # type: ignore[arg-type]
-    created = await agent.new_session(str(tmp_path))
+    created = await _new_session(agent, str(tmp_path))
     engine = _Engine.instances[0]
 
     pending = asyncio.create_task(
@@ -778,7 +891,7 @@ async def test_acp_close_cancels_blocked_answer_delivery(monkeypatch, tmp_path):
     client = BlockingClient()
     agent = RLMACPAgent()
     agent.on_connect(client)  # type: ignore[arg-type]
-    created = await agent.new_session(str(tmp_path))
+    created = await _new_session(agent, str(tmp_path))
 
     pending = asyncio.create_task(agent.prompt(created.session_id, [text_block("one")]))
     await client.started.wait()
@@ -811,7 +924,7 @@ async def test_acp_cancelled_close_remains_owned_by_shutdown(monkeypatch, tmp_pa
     monkeypatch.setattr("rlm.acp.RLMEngine", SlowCancelEngine)
     agent = RLMACPAgent()
     agent.on_connect(_Client())  # type: ignore[arg-type]
-    created = await agent.new_session(str(tmp_path))
+    created = await _new_session(agent, str(tmp_path))
     engine = SlowCancelEngine.instances[0]
     pending = asyncio.create_task(
         agent.prompt(created.session_id, [text_block("wait")])
@@ -836,7 +949,7 @@ async def test_acp_failed_prompt_keeps_session_reusable(monkeypatch, tmp_path):
     monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
     agent = RLMACPAgent()
     agent.on_connect(_Client())  # type: ignore[arg-type]
-    created = await agent.new_session(str(tmp_path))
+    created = await _new_session(agent, str(tmp_path))
     engine = _Engine.instances[0]
 
     with pytest.raises(RuntimeError, match="transient failure"):
@@ -857,7 +970,7 @@ async def test_acp_close_reports_last_prompt_failure(monkeypatch, tmp_path):
     monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
     agent = RLMACPAgent()
     agent.on_connect(_Client())  # type: ignore[arg-type]
-    created = await agent.new_session(str(tmp_path))
+    created = await _new_session(agent, str(tmp_path))
 
     with pytest.raises(RuntimeError, match="transient failure"):
         await agent.prompt(created.session_id, [text_block("fail")])
@@ -874,7 +987,7 @@ async def test_acp_close_rejects_queued_prompt(monkeypatch, tmp_path):
     monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
     agent = RLMACPAgent()
     agent.on_connect(_Client())  # type: ignore[arg-type]
-    created = await agent.new_session(str(tmp_path))
+    created = await _new_session(agent, str(tmp_path))
     engine = _Engine.instances[0]
 
     running = asyncio.create_task(
@@ -903,11 +1016,13 @@ async def test_acp_stdio_lifecycle(tmp_path):
         connection,
         _process,
     ):
-        initialized = await connection.initialize(PROTOCOL_VERSION)
+        initialized = await connection.initialize(
+            PROTOCOL_VERSION, **_contract_metadata()
+        )
         created = await connection.new_session(
             cwd=str(tmp_path),
             mcp_servers=[],
-            **{RUNTIME_METADATA_KEY: {"lineage_session_id": "wire-session"}},
+            **_runtime_metadata(lineage_session_id="wire-session"),
         )
         closed = await connection.close_session(created.session_id)
 

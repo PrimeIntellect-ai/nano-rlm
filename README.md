@@ -42,7 +42,7 @@ RLM can run as an [Agent Client Protocol](https://agentclientprotocol.com/)
 agent over stdio:
 
 ```bash
-RLM_MODEL=openai/gpt-5-mini rlm --acp
+rlm --acp
 ```
 
 Each ACP session owns one persistent RLM engine. Repeated `session/prompt`
@@ -54,15 +54,21 @@ not advertise `session/load`: an arbitrary live Python kernel cannot be
 reconstructed after the ACP process exits, so clients must keep the process
 alive for the lifetime of a session.
 
-ACP clients can pass trusted per-rollout configuration under the
-`ai.prime.rlm/runtime-v1` key in `session/new._meta`. Supported fields are an
-opaque `lineage_session_id`, explicit provider configuration, `kernel_env`, and
-`search_api_key`. This lets a harness deliver credentials over the private ACP
-stdio channel instead of placing them in the agent process environment. RLM
-never echoes those inputs. `session/new`, `session/prompt`, and `session/close`
-responses carry cumulative, credential-free snapshots under
-`ai.prime.rlm/session-v1`; only the close snapshot with `final: true` is
-authoritative for training metrics.
+RLM's ACP surface is a versioned training contract, not a compatibility layer
+over the standalone CLI. Clients must request every version advertised under
+`ai.prime.rlm/capabilities-v1` during `initialize`, then provide one complete
+`ai.prime.rlm/runtime-v1` object in `session/new._meta`. The runtime object
+contains the lineage session ID, model, provider, execution policy, prompt
+configuration, enabled built-in skills, explicit kernel environment, and
+optional search credential. Nullable and disabled values are sent explicitly
+as `null` or empty collections. Missing, partial, unknown, or unsupported
+contracts are rejected; ACP sessions never fall back to process environment
+configuration.
+
+Credentials travel over the private ACP stdio channel and are never echoed.
+`session/new`, `session/prompt`, and `session/close` responses carry cumulative,
+credential-free snapshots under `ai.prime.rlm/session-v1`; only the close
+snapshot with `final: true` is authoritative for training metrics.
 
 Every inference request carries versioned `X-RLM-*` provenance headers for its
 session, invocation, prompt segment, logical call, causal parent, depth, and
@@ -80,9 +86,11 @@ import rlm
 result = asyncio.run(rlm.run("fix the bug"))
 ```
 
-## Configuration
+## Standalone configuration
 
-All configuration is via environment variables:
+The CLI and Python API resolve standalone configuration from environment
+variables. ACP sessions ignore these runtime fields and require the explicit
+versioned contract described above.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

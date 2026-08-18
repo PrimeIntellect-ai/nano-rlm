@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from importlib.metadata import version
 from typing import Any, Literal
 
@@ -42,7 +42,12 @@ from acp.schema import (
 )
 
 from rlm.engine import RLMEngine
-from rlm.config import ProviderConfig, RuntimeConfig
+from rlm.config import (
+    ExecutionPolicy,
+    InvocationContext,
+    ProviderConfig,
+    RuntimeConfig,
+)
 from rlm.mcp import MCPServer
 from rlm.session import Session
 from rlm.tools.ipython import RESERVED_KERNEL_ENV_NAMES
@@ -57,6 +62,28 @@ CAPABILITIES_METADATA = {
 }
 SessionStatus = Literal["created", "idle", "closing", "closed"]
 _LINEAGE_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+_RUNTIME_FIELDS = {
+    "lineage_session_id",
+    "model",
+    "provider",
+    "policy",
+    "system_prompt_path",
+    "append_to_system_prompt",
+    "skills",
+    "kernel_env",
+    "search_api_key",
+}
+_PROVIDER_FIELDS = {"base_url", "api_key", "headers", "max_retries"}
+_POLICY_FIELDS = {
+    "max_depth",
+    "exec_timeout",
+    "max_output",
+    "max_tokens",
+    "summarize_at_tokens",
+    "max_compactions",
+    "max_concurrent_subagents",
+    "max_subagent_calls",
+}
 
 
 @dataclass
@@ -99,32 +126,74 @@ def _session_metadata(
     return {SESSION_METADATA_KEY: snapshot}
 
 
-def _runtime_config(
-    field_meta: Any,
-) -> tuple[RuntimeConfig, str | None]:
-    config = RuntimeConfig.from_env()
-    if field_meta is None:
-        return config, None
+def _require_fields(payload: dict[str, Any], expected: set[str], name: str) -> None:
+    missing = sorted(expected - set(payload))
+    if missing:
+        raise RequestError.invalid_params(
+            {"reason": f"{name} is missing fields: {missing}"}
+        )
+    unknown = sorted(set(payload) - expected)
+    if unknown:
+        raise RequestError.invalid_params(
+            {"reason": f"{name} has unknown fields: {unknown}"}
+        )
+
+
+def _integer(value: Any, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise RequestError.invalid_params({"reason": f"{name} must be an integer"})
+    return value
+
+
+def _nullable_integer(value: Any, name: str) -> int | None:
+    return None if value is None else _integer(value, name)
+
+
+def _nullable_string(value: Any, name: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise RequestError.invalid_params({"reason": f"{name} must be a string or null"})
+    return value
+
+
+def _require_contract(field_meta: Any) -> None:
+    if not isinstance(field_meta, dict):
+        raise RequestError.invalid_params({"reason": "ACP _meta must be an object"})
+    payload = field_meta.get(CAPABILITIES_METADATA_KEY)
+    if not isinstance(payload, dict):
+        raise RequestError.invalid_params(
+            {"reason": f"{CAPABILITIES_METADATA_KEY} must be an object"}
+        )
+    _require_fields(
+        payload,
+        set(CAPABILITIES_METADATA),
+        CAPABILITIES_METADATA_KEY,
+    )
+    for name, supported in CAPABILITIES_METADATA.items():
+        requested = payload[name]
+        if not isinstance(requested, list) or not all(
+            isinstance(item, int) and not isinstance(item, bool) for item in requested
+        ):
+            raise RequestError.invalid_params(
+                {"reason": f"{CAPABILITIES_METADATA_KEY}.{name} must be integer versions"}
+            )
+        if not set(requested).intersection(supported):
+            raise RequestError.invalid_params(
+                {"reason": f"no supported {CAPABILITIES_METADATA_KEY}.{name}"}
+            )
+
+
+def _runtime_config(field_meta: Any) -> tuple[RuntimeConfig, str]:
     if not isinstance(field_meta, dict):
         raise RequestError.invalid_params({"reason": "ACP _meta must be an object"})
     payload = field_meta.get(RUNTIME_METADATA_KEY)
-    if payload is None:
-        return config, None
     if not isinstance(payload, dict):
         raise RequestError.invalid_params(
             {"reason": f"{RUNTIME_METADATA_KEY} must be an object"}
         )
-    unknown = sorted(
-        set(payload)
-        - {"lineage_session_id", "provider", "kernel_env", "search_api_key"}
-    )
-    if unknown:
-        raise RequestError.invalid_params(
-            {"reason": f"{RUNTIME_METADATA_KEY} has unknown fields: {unknown}"}
-        )
+    _require_fields(payload, _RUNTIME_FIELDS, RUNTIME_METADATA_KEY)
 
-    lineage_session_id = payload.get("lineage_session_id")
-    if lineage_session_id is not None and (
+    lineage_session_id = payload["lineage_session_id"]
+    if (
         not isinstance(lineage_session_id, str)
         or _LINEAGE_ID_RE.fullmatch(lineage_session_id) is None
     ):
@@ -132,72 +201,102 @@ def _runtime_config(
             {"reason": "lineage_session_id must be a bounded opaque identifier"}
         )
 
-    provider = config.provider
-    if "provider" in payload:
-        provider_payload = payload["provider"]
-        if not isinstance(provider_payload, dict):
-            raise RequestError.invalid_params({"reason": "provider must be an object"})
-        provider_unknown = sorted(
-            set(provider_payload) - {"base_url", "api_key", "headers", "max_retries"}
-        )
-        if provider_unknown:
-            raise RequestError.invalid_params(
-                {"reason": f"provider has unknown fields: {provider_unknown}"}
-            )
-        base_url = provider_payload.get("base_url")
-        api_key = provider_payload.get("api_key")
-        headers = provider_payload.get("headers", {})
-        max_retries = provider_payload.get("max_retries", provider.max_retries)
-        if base_url is not None and not isinstance(base_url, str):
-            raise RequestError.invalid_params(
-                {"reason": "provider base_url is invalid"}
-            )
-        if not isinstance(api_key, str) or not api_key:
-            raise RequestError.invalid_params({"reason": "provider api_key is invalid"})
-        if not isinstance(headers, dict) or not all(
-            isinstance(key, str) and isinstance(value, str)
-            for key, value in headers.items()
-        ):
-            raise RequestError.invalid_params(
-                {"reason": "provider headers are invalid"}
-            )
-        if (
-            not isinstance(max_retries, int)
-            or isinstance(max_retries, bool)
-            or max_retries < 0
-        ):
-            raise RequestError.invalid_params(
-                {"reason": "provider max_retries is invalid"}
-            )
-        try:
-            provider = ProviderConfig(base_url, api_key, headers, max_retries)
-        except ValueError as error:
-            raise RequestError.invalid_params({"reason": str(error)}) from error
+    model = payload["model"]
+    if not isinstance(model, str) or not model:
+        raise RequestError.invalid_params({"reason": "model must be a non-empty string"})
 
-    kernel_env = payload.get("kernel_env")
-    if kernel_env is None:
-        resolved_kernel_env = config.kernel_env
-    elif not isinstance(kernel_env, dict) or not all(
+    provider_payload = payload["provider"]
+    if not isinstance(provider_payload, dict):
+        raise RequestError.invalid_params({"reason": "provider must be an object"})
+    _require_fields(provider_payload, _PROVIDER_FIELDS, "provider")
+    base_url = _nullable_string(provider_payload["base_url"], "provider.base_url")
+    api_key = provider_payload["api_key"]
+    headers = provider_payload["headers"]
+    max_retries = _integer(provider_payload["max_retries"], "provider.max_retries")
+    if max_retries < 0:
+        raise RequestError.invalid_params(
+            {"reason": "provider.max_retries must be non-negative"}
+        )
+    if not isinstance(api_key, str) or not api_key:
+        raise RequestError.invalid_params({"reason": "provider.api_key is invalid"})
+    if not isinstance(headers, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in headers.items()
+    ):
+        raise RequestError.invalid_params({"reason": "provider.headers must map strings"})
+    try:
+        provider = ProviderConfig(base_url, api_key, headers, max_retries)
+    except ValueError as error:
+        raise RequestError.invalid_params({"reason": str(error)}) from error
+
+    policy_payload = payload["policy"]
+    if not isinstance(policy_payload, dict):
+        raise RequestError.invalid_params({"reason": "policy must be an object"})
+    _require_fields(policy_payload, _POLICY_FIELDS, "policy")
+    try:
+        policy = ExecutionPolicy(
+            max_depth=_integer(policy_payload["max_depth"], "policy.max_depth"),
+            exec_timeout=_integer(
+                policy_payload["exec_timeout"], "policy.exec_timeout"
+            ),
+            max_output=_integer(policy_payload["max_output"], "policy.max_output"),
+            max_tokens=_nullable_integer(
+                policy_payload["max_tokens"], "policy.max_tokens"
+            ),
+            summarize_at_tokens=_nullable_integer(
+                policy_payload["summarize_at_tokens"],
+                "policy.summarize_at_tokens",
+            ),
+            max_compactions=_nullable_integer(
+                policy_payload["max_compactions"], "policy.max_compactions"
+            ),
+            max_concurrent_subagents=_integer(
+                policy_payload["max_concurrent_subagents"],
+                "policy.max_concurrent_subagents",
+            ),
+            max_subagent_calls=_integer(
+                policy_payload["max_subagent_calls"],
+                "policy.max_subagent_calls",
+            ),
+        )
+    except ValueError as error:
+        raise RequestError.invalid_params({"reason": str(error)}) from error
+
+    system_prompt_path = _nullable_string(
+        payload["system_prompt_path"], "system_prompt_path"
+    )
+    append_to_system_prompt = _nullable_string(
+        payload["append_to_system_prompt"], "append_to_system_prompt"
+    )
+    skills = payload["skills"]
+    if not isinstance(skills, list) or not all(
+        isinstance(skill, str) and skill for skill in skills
+    ):
+        raise RequestError.invalid_params({"reason": "skills must be non-empty strings"})
+
+    kernel_env = payload["kernel_env"]
+    if not isinstance(kernel_env, dict) or not all(
         isinstance(key, str) and isinstance(value, str)
         for key, value in kernel_env.items()
     ):
         raise RequestError.invalid_params({"reason": "kernel_env must map strings"})
-    else:
-        resolved_kernel_env = tuple(kernel_env.items())
-        reserved_kernel_env = sorted(RESERVED_KERNEL_ENV_NAMES.intersection(kernel_env))
-        if reserved_kernel_env:
-            raise RequestError.invalid_params(
-                {"reason": f"kernel_env contains reserved names: {reserved_kernel_env}"}
-            )
+    reserved_kernel_env = sorted(RESERVED_KERNEL_ENV_NAMES.intersection(kernel_env))
+    if reserved_kernel_env:
+        raise RequestError.invalid_params(
+            {"reason": f"kernel_env contains reserved names: {reserved_kernel_env}"}
+        )
 
-    search_api_key = payload.get("search_api_key", config.search_api_key)
-    if search_api_key is not None and not isinstance(search_api_key, str):
-        raise RequestError.invalid_params({"reason": "search_api_key is invalid"})
+    search_api_key = _nullable_string(payload["search_api_key"], "search_api_key")
     return (
-        replace(
-            config,
+        RuntimeConfig(
+            model=model,
             provider=provider,
-            kernel_env=resolved_kernel_env,
+            invocation=InvocationContext(),
+            policy=policy,
+            system_prompt_path=system_prompt_path,
+            append_to_system_prompt=append_to_system_prompt,
+            skills=tuple(skills),
+            kernel_env=tuple(kernel_env.items()),
             search_api_key=search_api_key,
         ),
         lineage_session_id,
@@ -252,6 +351,7 @@ class RLMACPAgent(Agent):
     def __init__(self) -> None:
         self._client: Client
         self._sessions: dict[str, _SessionState] = {}
+        self._contract_initialized = False
 
     def on_connect(self, conn: Client) -> None:
         self._client = conn
@@ -263,6 +363,9 @@ class RLMACPAgent(Agent):
         client_info: Implementation | None = None,
         **kwargs: Any,
     ) -> InitializeResponse:
+        self._contract_initialized = False
+        _require_contract(kwargs)
+        self._contract_initialized = True
         return InitializeResponse(
             protocol_version=PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
@@ -284,6 +387,10 @@ class RLMACPAgent(Agent):
         | None = None,
         **kwargs: Any,
     ) -> NewSessionResponse:
+        if not self._contract_initialized:
+            raise RequestError.invalid_request(
+                {"reason": "RLM ACP contract was not negotiated during initialize"}
+            )
         if additional_directories:
             raise RequestError.invalid_params(
                 {"reason": "RLM does not support additional session directories"}
@@ -443,7 +550,7 @@ async def serve_acp() -> None:
     """Serve RLM over ACP on stdin/stdout until the client disconnects."""
     agent = RLMACPAgent()
     try:
-        # agent-client-protocol 0.11 gates session/close routing behind this flag.
+        # session/close is currently part of ACP's unstable extension set.
         await run_agent(agent, use_unstable_protocol=True)
     finally:
         await agent.shutdown()
