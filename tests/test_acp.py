@@ -16,7 +16,6 @@ import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall
 from rlm.acp import (
-    CONTRACT_METADATA,
     RUNTIME_METADATA_KEY,
     SESSION_METADATA_KEY,
     RLMACPAgent,
@@ -28,13 +27,9 @@ from rlm.session import Session
 from rlm.types import RLMResult, TokenUsage
 
 
-def _contract_metadata() -> dict[str, Any]:
-    return CONTRACT_METADATA.copy()
-
-
 def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
     payload = {
-        "lineage_session_id": "test-session",
+        "session_id": "test-session",
         "model": "test-model",
         "provider": {
             "base_url": "http://interceptor",
@@ -65,7 +60,7 @@ def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
 
 
 async def _initialize(agent: RLMACPAgent):
-    return await agent.initialize(PROTOCOL_VERSION, **_contract_metadata())
+    return await agent.initialize(PROTOCOL_VERSION)
 
 
 async def _new_session(agent: RLMACPAgent, cwd: str, **kwargs: Any):
@@ -91,13 +86,11 @@ class _Engine:
         session,
         mcp_servers: dict[str, Any],
         runtime_config=None,
-        lineage_session_id: str | None = None,
     ) -> None:
         self.cwd = cwd
         self.session = session
         self.mcp_servers = mcp_servers
         self.runtime_config = runtime_config
-        self.lineage_session_id = lineage_session_id
         self.prompts: list[str] = []
         self.prompt_started = asyncio.Event()
         self.closed = False
@@ -125,8 +118,6 @@ class _Engine:
 
     def execution_snapshot(self) -> dict[str, Any]:
         return {
-            "session_id": self.lineage_session_id or self.session.dir.name,
-            "root_invocation_id": "root",
             "model": "test-model",
             "turns": len(self.prompts),
             "usage": {
@@ -135,9 +126,23 @@ class _Engine:
                 "total_tokens": len(self.prompts) * 5,
             },
             "metrics": {},
-            "programmatic_tool_call_stats": {},
+            "programmatic_tool_call_stats": {
+                "python_total": 0,
+                "bash_total": 0,
+                "by_tool_python": {},
+                "by_tool_bash": {},
+            },
             "supervisor": {"subagent_calls": 0, "active_subagent_calls": 0},
-            "limits": {},
+            "limits": {
+                "max_depth": 0,
+                "max_concurrent_subagents": 4,
+                "max_subagent_calls": 64,
+                "max_tokens": None,
+                "summarize_at_tokens": None,
+                "max_compactions": None,
+                "max_tool_output_chars": None,
+                "allow_git": False,
+            },
         }
 
 
@@ -168,11 +173,7 @@ async def test_engine_prompt_preserves_conversation(session):
     ]
     first_headers = client.calls[0]["extra_headers"]
     second_headers = client.calls[1]["extra_headers"]
-    assert first_headers["X-RLM-Session-ID"] == session.dir.name
-    assert first_headers["X-RLM-Invocation-ID"] == second_headers["X-RLM-Invocation-ID"]
-    assert first_headers["X-RLM-Segment-ID"] != second_headers["X-RLM-Segment-ID"]
-    assert "X-RLM-Parent-Call-ID" not in first_headers
-    assert second_headers["X-RLM-Parent-Call-ID"] == first_headers["X-RLM-Call-ID"]
+    assert first_headers["Idempotency-Key"] != second_headers["Idempotency-Key"]
     meta = json.loads((Path(session.dir) / "meta.json").read_text())
     assert meta["turns"] == 2
     assert meta["answer_preview"] == "second"
@@ -282,14 +283,11 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
     ]
-    failed_headers = client.calls[0]["extra_headers"]
-    resumed_headers = client.calls[1]["extra_headers"]
-    assert failed_headers["X-RLM-Call-ID"] != resumed_headers["X-RLM-Call-ID"]
-    assert failed_headers["X-RLM-Segment-ID"] != resumed_headers["X-RLM-Segment-ID"]
-    assert "X-RLM-Parent-Call-ID" not in resumed_headers
 
 
-async def test_model_call_lineage_survives_retries_and_compaction(monkeypatch, session):
+async def test_model_call_idempotency_survives_retry_and_compaction(
+    monkeypatch, session
+):
     monkeypatch.setattr("rlm.client._RETRY_DELAYS", (0,))
     client = DummyClient(
         [
@@ -308,10 +306,16 @@ async def test_model_call_lineage_survives_retries_and_compaction(monkeypatch, s
         return await create(**kwargs)
 
     client.create = flaky_first_call
+    config = RuntimeConfig(
+        model="test-model",
+        provider=ProviderConfig(base_url=None, api_key="test-key"),
+        invocation=InvocationContext(),
+        policy=ExecutionPolicy(summarize_at_tokens=1),
+    )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        summarize_at_tokens=1,
+        runtime_config=config,
     )
 
     try:
@@ -320,18 +324,15 @@ async def test_model_call_lineage_survives_retries_and_compaction(monkeypatch, s
         engine.close()
 
     assert result.answer == "done"
-    assert attempts[0]["extra_headers"] == attempts[1]["extra_headers"]
+    assert (
+        attempts[0]["extra_headers"]["Idempotency-Key"]
+        == attempts[1]["extra_headers"]["Idempotency-Key"]
+    )
+    assert attempts[1]["extra_headers"]["x-stainless-retry-count"] == "1"
     turn, compaction, resumed = [call["extra_headers"] for call in client.calls]
-    assert {header["X-RLM-Segment-ID"] for header in (turn, compaction, resumed)} == {
-        turn["X-RLM-Segment-ID"]
-    }
-    assert [
-        turn["X-RLM-Call-Kind"],
-        compaction["X-RLM-Call-Kind"],
-        resumed["X-RLM-Call-Kind"],
-    ] == ["turn", "compaction", "turn"]
-    assert compaction["X-RLM-Parent-Call-ID"] == turn["X-RLM-Call-ID"]
-    assert resumed["X-RLM-Parent-Call-ID"] == compaction["X-RLM-Call-ID"]
+    assert (
+        len({header["Idempotency-Key"] for header in (turn, compaction, resumed)}) == 3
+    )
 
 
 async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
@@ -382,9 +383,7 @@ async def test_compaction_counts_seed_prompt(session):
     ]
 
     try:
-        await engine._compact_branch(
-            messages, turn=0, active_tools=[], segment_id="test-segment"
-        )
+        await engine._compact_branch(messages, turn=0, active_tools=[])
     finally:
         engine.close()
 
@@ -429,11 +428,6 @@ async def test_engine_failed_prompt_can_be_retried(session):
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
     ]
-
-    failed_headers = client.calls[0]["extra_headers"]
-    resumed_headers = client.calls[1]["extra_headers"]
-    assert failed_headers["X-RLM-Call-ID"] != resumed_headers["X-RLM-Call-ID"]
-    assert "X-RLM-Parent-Call-ID" not in resumed_headers
 
 
 async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
@@ -569,10 +563,17 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
     monkeypatch.setattr("rlm.engine.IPythonREPL", FakeREPL)
     system_prompt = tmp_path / "system.txt"
     client = DummyClient([DummyMessage(content="continued")])
+    config = RuntimeConfig(
+        model="test-model",
+        provider=ProviderConfig(base_url=None, api_key="test-key"),
+        invocation=InvocationContext(),
+        policy=ExecutionPolicy(max_depth=1),
+        system_prompt_path=str(system_prompt),
+    )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        system_prompt_path=str(system_prompt),
+        runtime_config=config,
     )
 
     with pytest.raises(FileNotFoundError):
@@ -609,13 +610,8 @@ async def test_acp_failed_session_creation_closes_session(monkeypatch, tmp_path)
     assert agent._sessions == {}
 
 
-async def test_acp_requires_contract_and_runtime_metadata(tmp_path):
+async def test_acp_requires_runtime_metadata(tmp_path):
     agent = RLMACPAgent()
-
-    with pytest.raises(RequestError):
-        await agent.initialize(PROTOCOL_VERSION)
-    with pytest.raises(RequestError):
-        await agent.new_session(str(tmp_path), **_runtime_metadata())
 
     await _initialize(agent)
     with pytest.raises(RequestError):
@@ -635,7 +631,7 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     initialized = await _initialize(agent)
     assert initialized.agent_capabilities.mcp_capabilities.http is True
     assert initialized.agent_capabilities.load_session is False
-    assert initialized.agent_capabilities.field_meta == CONTRACT_METADATA
+    assert initialized.agent_capabilities.field_meta is None
     assert initialized.field_meta is None
 
     created = await agent.new_session(
@@ -678,25 +674,15 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     ]
     assert first.usage.total_tokens == 5
     assert second.stop_reason == "end_turn"
-    created_snapshot = created.field_meta[SESSION_METADATA_KEY]
-    first_snapshot = first.field_meta[SESSION_METADATA_KEY]
-    second_snapshot = second.field_meta[SESSION_METADATA_KEY]
-    assert created_snapshot["status"] == "created"
-    assert created_snapshot["sequence"] == 0
-    assert created_snapshot["final"] is False
-    assert first_snapshot["turns"] == 1
-    assert first_snapshot["status"] == "idle"
-    assert first_snapshot["sequence"] == 1
-    assert first_snapshot["last_stop_reason"] == "done"
-    assert second_snapshot["sequence"] == 2
-    assert created.model_dump(mode="json", by_alias=True)["_meta"] == created.field_meta
-    assert "test-secret" not in created.model_dump_json(by_alias=True)
+    assert created.field_meta is None
+    assert first.field_meta is None
 
     closed = await agent.close_session(created.session_id)
     closed_snapshot = closed.field_meta[SESSION_METADATA_KEY]
-    assert closed_snapshot["status"] == "closed"
-    assert closed_snapshot["sequence"] == 3
-    assert closed_snapshot["final"] is True
+    assert closed_snapshot["session_id"] == "test-session"
+    assert closed_snapshot["turns"] == 2
+    assert closed_snapshot["last_stop_reason"] == "done"
+    assert "test-secret" not in closed.model_dump_json(by_alias=True)
     assert engine.closed is True
 
 
@@ -717,106 +703,13 @@ async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
 
     cancelled = await pending
     assert cancelled.stop_reason == "cancelled"
-    assert cancelled.field_meta[SESSION_METADATA_KEY]["status"] == "idle"
-    assert cancelled.field_meta[SESSION_METADATA_KEY]["last_stop_reason"] == "cancelled"
+    assert cancelled.field_meta is None
     assert engine.closed is False
     resumed = await agent.prompt(created.session_id, [text_block("after")])
     assert resumed.stop_reason == "end_turn"
     assert engine.prompts == ["wait", "after"]
 
     await agent.close_session(created.session_id)
-
-
-async def test_acp_transport_cancellation_propagates(monkeypatch, tmp_path):
-    _Engine.instances.clear()
-    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
-    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
-    agent = RLMACPAgent()
-    agent.on_connect(_Client())  # type: ignore[arg-type]
-    created = await _new_session(agent, str(tmp_path))
-    engine = _Engine.instances[0]
-
-    pending = asyncio.create_task(
-        agent.prompt(created.session_id, [text_block("wait")])
-    )
-    await engine.prompt_started.wait()
-    pending.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await pending
-    resumed = await agent.prompt(created.session_id, [text_block("after")])
-    assert resumed.stop_reason == "end_turn"
-    await agent.close_session(created.session_id)
-
-
-async def test_acp_close_cancels_blocked_answer_delivery(monkeypatch, tmp_path):
-    class BlockingClient(_Client):
-        def __init__(self):
-            super().__init__()
-            self.started = asyncio.Event()
-
-        async def session_update(
-            self, session_id: str, update: Any, **kwargs: Any
-        ) -> None:
-            self.started.set()
-            await asyncio.Future()
-
-    _Engine.instances.clear()
-    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
-    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
-    client = BlockingClient()
-    agent = RLMACPAgent()
-    agent.on_connect(client)  # type: ignore[arg-type]
-    created = await _new_session(agent, str(tmp_path))
-
-    pending = asyncio.create_task(agent.prompt(created.session_id, [text_block("one")]))
-    await client.started.wait()
-    await agent.cancel(created.session_id)
-    await asyncio.sleep(0)
-    assert pending.done() is False
-    closed = await asyncio.wait_for(agent.close_session(created.session_id), timeout=1)
-
-    assert (await pending).stop_reason == "cancelled"
-    assert closed.field_meta[SESSION_METADATA_KEY]["status"] == "closed"
-    assert _Engine.instances[0].closed is True
-
-
-async def test_acp_cancelled_close_remains_owned_by_shutdown(monkeypatch, tmp_path):
-    class SlowCancelEngine(_Engine):
-        release = asyncio.Event()
-
-        async def prompt(self, prompt: str) -> RLMResult:
-            self.prompts.append(prompt)
-            self.prompt_started.set()
-            try:
-                await asyncio.Future()
-            except asyncio.CancelledError:
-                await self.release.wait()
-                raise
-
-    SlowCancelEngine.instances.clear()
-    SlowCancelEngine.release = asyncio.Event()
-    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
-    monkeypatch.setattr("rlm.acp.RLMEngine", SlowCancelEngine)
-    agent = RLMACPAgent()
-    agent.on_connect(_Client())  # type: ignore[arg-type]
-    created = await _new_session(agent, str(tmp_path))
-    engine = SlowCancelEngine.instances[0]
-    pending = asyncio.create_task(
-        agent.prompt(created.session_id, [text_block("wait")])
-    )
-    await engine.prompt_started.wait()
-    closing = asyncio.create_task(agent.close_session(created.session_id))
-    await asyncio.sleep(0)
-    closing.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await closing
-
-    SlowCancelEngine.release.set()
-    assert (await pending).stop_reason == "cancelled"
-    await agent.shutdown()
-    assert engine.closed is True
-    assert agent._sessions == {}
 
 
 async def test_acp_failed_prompt_keeps_session_reusable(monkeypatch, tmp_path):
@@ -875,17 +768,14 @@ async def test_acp_stdio_lifecycle(tmp_path):
         connection,
         _process,
     ):
-        initialized = await connection.initialize(
-            PROTOCOL_VERSION, **_contract_metadata()
-        )
+        initialized = await connection.initialize(PROTOCOL_VERSION)
         created = await connection.new_session(
             cwd=str(tmp_path),
             mcp_servers=[],
-            **_runtime_metadata(lineage_session_id="wire-session"),
+            **_runtime_metadata(session_id="wire-session"),
         )
         closed = await connection.close_session(created.session_id)
 
     assert initialized.agent_info.name == "rlm"
-    assert created.field_meta[SESSION_METADATA_KEY]["status"] == "created"
-    assert created.field_meta[SESSION_METADATA_KEY]["session_id"] == "wire-session"
-    assert closed.field_meta[SESSION_METADATA_KEY]["status"] == "closed"
+    assert created.field_meta is None
+    assert closed.field_meta[SESSION_METADATA_KEY]["session_id"] == "wire-session"

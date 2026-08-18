@@ -45,7 +45,6 @@ class BrokerRunRequest(TypedDict):
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
     prompt: str
-    options: Annotated[dict[str, Any], Field(max_length=0)]
 
 
 class BrokerSkillRequest(TypedDict):
@@ -146,7 +145,7 @@ async def write_frame(
     await writer.drain()
 
 
-async def run(prompt: str, **kwargs: Any) -> RLMResult:
+async def run(prompt: str) -> RLMResult:
     """Run a recursive RLM through the trusted session supervisor."""
     if _endpoint is None or _scope_id is None:
         raise RuntimeError("recursive RLM calls are unavailable outside an active cell")
@@ -158,7 +157,6 @@ async def run(prompt: str, **kwargs: Any) -> RLMResult:
             "capability": _endpoint.capability,
             "scope_id": _scope_id,
             "prompt": prompt,
-            "options": kwargs,
         }
     )
     result = response.get("result")

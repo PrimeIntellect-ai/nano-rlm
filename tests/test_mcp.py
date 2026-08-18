@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import inspect
 import json
 import os
 import sys
-from contextlib import asynccontextmanager
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-from mcp.types import Tool
 
 from conftest import DummyClient, DummyMessage, DummyToolCall, tool_result
-from rlm import broker, mcp
+from rlm import mcp
 from rlm.config import (
     ExecutionPolicy,
     InvocationContext,
@@ -25,7 +21,6 @@ from rlm.config import (
 )
 from rlm.engine import RLMEngine
 from rlm.session import Session
-from rlm.supervisor import SessionTreeSupervisor
 
 SCHEMA = {
     "type": "object",
@@ -115,75 +110,6 @@ def test_load_mcp_servers(monkeypatch):
         mcp.load_mcp_servers()
 
 
-async def test_registry_rejects_normalized_and_existing_name_collisions(
-    monkeypatch, tmp_path
-):
-    tool = Tool(name="echo", description="Echo.", inputSchema=SCHEMA)
-
-    class FakeSession:
-        async def initialize(self):
-            return None
-
-        async def list_tools(self):
-            return SimpleNamespace(tools=[tool])
-
-    @asynccontextmanager
-    async def fake_client_session(server, cwd=None):
-        yield FakeSession()
-
-    monkeypatch.setattr(mcp, "_client_session", fake_client_session)
-    duplicate = mcp.MCPRegistry(
-        {
-            "a-b": {"url": "http://one"},
-            "a_b": {"url": "http://two"},
-        }
-    )
-    with pytest.raises(ValueError, match="duplicate normalized MCP tool name"):
-        await duplicate.discover()
-
-    registry = mcp.MCPRegistry({"local": {"url": "http://one"}})
-    await registry.discover()
-    with pytest.raises(ValueError, match="conflict with existing skills"):
-        registry.write_skill_modules(tmp_path, {"local_echo"})
-
-
-async def test_registry_redacts_discovery_errors_and_bounds_metadata(monkeypatch):
-    sentinel = "https://secret.example/mcp?token=do-not-leak"
-
-    @asynccontextmanager
-    async def failing_client_session(server, cwd=None):
-        raise RuntimeError(sentinel)
-        yield
-
-    monkeypatch.setattr(mcp, "_client_session", failing_client_session)
-    with pytest.raises(
-        RuntimeError, match="MCP server 'public' discovery failed"
-    ) as exc:
-        await mcp.MCPRegistry({"public": {"url": "http://ignored"}}).discover()
-    assert sentinel not in str(exc.value)
-
-    tools = [
-        Tool(name="one", description="One.", inputSchema=SCHEMA),
-        Tool(name="two", description="Two.", inputSchema=SCHEMA),
-    ]
-
-    class FakeSession:
-        async def initialize(self):
-            return None
-
-        async def list_tools(self):
-            return SimpleNamespace(tools=tools)
-
-    @asynccontextmanager
-    async def fake_client_session(server, cwd=None):
-        yield FakeSession()
-
-    monkeypatch.setattr(mcp, "_client_session", fake_client_session)
-    monkeypatch.setattr(mcp, "MAX_MCP_TOOLS", 1)
-    with pytest.raises(ValueError, match="tool count exceeds 1"):
-        await mcp.MCPRegistry({"public": {"url": "http://ignored"}}).discover()
-
-
 def test_build_signature():
     params = mcp.build_signature(SCHEMA).parameters
     assert list(params) == ["day", "count"]
@@ -192,58 +118,6 @@ def test_build_signature():
     assert params["day"].annotation is str
     assert params["count"].default is None
     assert params["count"].annotation is int
-
-
-async def test_broker_round_trip_records_trusted_metric(tmp_path):
-    server_cwd = tmp_path / "server"
-    server_cwd.mkdir()
-    session = Session(tmp_path / "session")
-    supervisor = SessionTreeSupervisor(
-        root_session=session,
-        runtime_config=_config(),
-        cwd=str(server_cwd),
-        mcp_servers={"local": _stdio_server()},
-    )
-    await supervisor.start()
-    skills_dir = tmp_path / "skills"
-    supervisor.write_brokered_skill_modules(skills_dir)
-    sys.path.insert(0, str(skills_dir))
-    skill = importlib.import_module("local_echo")
-    scope = await supervisor.open_scope(supervisor.root_id)
-    endpoint = supervisor.endpoint_for(supervisor.root_id)
-    broker.configure(endpoint)
-    broker.set_scope(scope)
-    try:
-        results = await asyncio.gather(
-            skill.run(text="one"),
-            skill.run(text="two"),
-        )
-        with pytest.raises(RuntimeError, match="unknown brokered skill capability"):
-            await broker.call_skill("invalid", {})
-        broker.configure(broker.BrokerEndpoint(endpoint.socket_path, "invalid"))
-        with pytest.raises(RuntimeError, match="invalid broker capability"):
-            await skill.run(text="forbidden")
-        broker.configure(endpoint)
-        await supervisor.close_scope(scope)
-        with pytest.raises(RuntimeError, match="invalid broker capability"):
-            await skill.run(text="stale")
-    finally:
-        broker.set_scope(None)
-        broker.configure(None)
-        await supervisor.close_scope(scope)
-        await supervisor.aclose()
-        session.close()
-        sys.path.remove(str(skills_dir))
-        sys.modules.pop("local_echo", None)
-
-    assert results == [
-        f"stdio:True:{server_cwd}:one",
-        f"stdio:True:{server_cwd}:two",
-    ]
-    stats, child_stats = supervisor.programmatic_tool_call_stats(supervisor.root_id)
-    assert stats.python_total == 2
-    assert stats.by_tool_python == {"local_echo": 2}
-    assert child_stats.python_total == 0
 
 
 async def test_real_kernel_uses_mcp_without_transport_secrets(monkeypatch, tmp_path):

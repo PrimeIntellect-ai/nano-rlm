@@ -14,18 +14,11 @@ from openai import (
 )
 from pydantic import ValidationError
 
-from rlm.config import InvocationContext, ProviderConfig
+from rlm.config import ProviderConfig
 from rlm.types import TokenUsage
 
-RLM_SESSION_ID_HEADER = "X-RLM-Session-ID"
-RLM_INVOCATION_ID_HEADER = "X-RLM-Invocation-ID"
-RLM_PARENT_INVOCATION_ID_HEADER = "X-RLM-Parent-Invocation-ID"
-RLM_SEGMENT_ID_HEADER = "X-RLM-Segment-ID"
-RLM_CALL_ID_HEADER = "X-RLM-Call-ID"
-RLM_PARENT_CALL_ID_HEADER = "X-RLM-Parent-Call-ID"
-RLM_DEPTH_HEADER = "X-RLM-Depth"
-RLM_CALL_KIND_HEADER = "X-RLM-Call-Kind"
-RLM_LINEAGE_VERSION_HEADER = "X-RLM-Lineage-Version"
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+RETRY_COUNT_HEADER = "x-stainless-retry-count"
 
 _RETRYABLE: tuple[type[BaseException], ...] = (
     APIConnectionError,
@@ -64,60 +57,27 @@ def resolve_provider() -> tuple[str | None, str | None, dict[str, str]]:
     return provider.base_url, provider.api_key, provider.headers.copy()
 
 
-def make_client(
-    provider: ProviderConfig | None = None,
-    invocation: InvocationContext | None = None,
-) -> AsyncOpenAI:
-    """Create an AsyncOpenAI client from explicit or environment configuration.
-
-    See ``resolve_provider`` for provider precedence. Tags every outbound
-    request with ``X-RLM-Depth: <RLM_DEPTH>`` so an interceptor (e.g.
-    verifiers' interception server) can distinguish parent-agent calls
-    (depth 0) from sub-agent calls (depth >= 1) and decide whether to
-    record them in the rollout's trajectory.
-    """
+def make_client(provider: ProviderConfig | None = None) -> AsyncOpenAI:
+    """Create an AsyncOpenAI client from explicit or environment configuration."""
     provider = provider or ProviderConfig.from_env()
-    invocation = invocation or InvocationContext.from_env()
     reserved = sorted(
-        name for name in provider.headers if name.lower().startswith("x-rlm-")
+        name
+        for name in provider.headers
+        if name.lower() in {IDEMPOTENCY_KEY_HEADER.lower(), RETRY_COUNT_HEADER}
     )
     if reserved:
         raise ValueError(f"provider headers contain reserved names: {reserved}")
-    headers = {**provider.headers, RLM_DEPTH_HEADER: str(invocation.depth)}
     return AsyncOpenAI(
         base_url=provider.base_url,
         api_key=provider.api_key,
         max_retries=provider.max_retries,
-        default_headers=headers,
+        default_headers=provider.headers,
     )
 
 
-def model_call_headers(
-    *,
-    session_id: str,
-    invocation_id: str,
-    parent_invocation_id: str | None,
-    segment_id: str,
-    call_id: str,
-    parent_call_id: str | None,
-    depth: int,
-    call_kind: str,
-) -> dict[str, str]:
-    """Build provenance headers for one logical model call."""
-    headers = {
-        RLM_LINEAGE_VERSION_HEADER: "1",
-        RLM_SESSION_ID_HEADER: session_id,
-        RLM_INVOCATION_ID_HEADER: invocation_id,
-        RLM_SEGMENT_ID_HEADER: segment_id,
-        RLM_CALL_ID_HEADER: call_id,
-        RLM_DEPTH_HEADER: str(depth),
-        RLM_CALL_KIND_HEADER: call_kind,
-    }
-    if parent_invocation_id is not None:
-        headers[RLM_PARENT_INVOCATION_ID_HEADER] = parent_invocation_id
-    if parent_call_id is not None:
-        headers[RLM_PARENT_CALL_ID_HEADER] = parent_call_id
-    return headers
+def model_call_headers(call_id: str) -> dict[str, str]:
+    """Build transport headers for one idempotent model call."""
+    return {IDEMPOTENCY_KEY_HEADER: call_id}
 
 
 async def call_with_retries(
@@ -128,12 +88,20 @@ async def call_with_retries(
     Extends the SDK's retry set with ``NotFoundError`` to ride out intermittent
     tunnel/proxy 404s that the SDK itself does not retry.
     """
-    for delay in _RETRY_DELAYS:
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        if attempt:
+            await asyncio.sleep(_RETRY_DELAYS[attempt - 1])
+        attempt_kwargs = kwargs
+        if attempt:
+            attempt_kwargs = dict(kwargs)
+            headers = dict(attempt_kwargs.get("extra_headers") or {})
+            headers[RETRY_COUNT_HEADER] = str(attempt)
+            attempt_kwargs["extra_headers"] = headers
         try:
-            return await func(**kwargs)
+            return await func(**attempt_kwargs)
         except _RETRYABLE:
-            await asyncio.sleep(delay)
-    return await func(**kwargs)
+            if attempt == len(_RETRY_DELAYS):
+                raise
 
 
 def extract_usage(response) -> TokenUsage:

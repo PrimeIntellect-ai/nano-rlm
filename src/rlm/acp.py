@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from importlib.metadata import version
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from acp import (
     PROTOCOL_VERSION,
@@ -50,13 +50,9 @@ from rlm.config import (
 )
 from rlm.mcp import MCPHTTPServer, MCPServer, MCPStdioServer
 from rlm.session import Session
-from rlm.tools.ipython import RESERVED_KERNEL_ENV_NAMES
 
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
-CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
-CONTRACT_METADATA = {CONTRACT_METADATA_KEY: True}
-SessionStatus = Literal["created", "idle", "closing", "closed"]
 
 
 class _ContractModel(BaseModel):
@@ -64,7 +60,7 @@ class _ContractModel(BaseModel):
 
 
 class _RuntimeMetadata(_ContractModel):
-    lineage_session_id: str = Field(
+    session_id: str = Field(
         pattern=r"^[A-Za-z0-9._:-]{1,128}$",
     )
     model: str = Field(min_length=1)
@@ -77,16 +73,57 @@ class _RuntimeMetadata(_ContractModel):
     search_api_key: str | None
 
 
+class _UsageSnapshot(_ContractModel):
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+
+class _ProgrammaticToolCallSnapshot(_ContractModel):
+    python_total: int = Field(ge=0)
+    bash_total: int = Field(ge=0)
+    by_tool_python: dict[str, int]
+    by_tool_bash: dict[str, int]
+
+
+class _SupervisorSnapshot(_ContractModel):
+    subagent_calls: int = Field(ge=0)
+    active_subagent_calls: int = Field(ge=0)
+
+
+class _LimitsSnapshot(_ContractModel):
+    max_depth: int = Field(ge=0)
+    max_concurrent_subagents: int = Field(gt=0)
+    max_subagent_calls: int = Field(gt=0)
+    max_tokens: int | None = Field(default=None, gt=0)
+    summarize_at_tokens: int | None = Field(default=None, gt=0)
+    max_compactions: int | None = Field(default=None, gt=0)
+    max_tool_output_chars: int | None = Field(default=None, gt=0)
+    allow_git: bool
+
+
+class _SessionSnapshot(_ContractModel):
+    session_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    last_stop_reason: str | None
+    model: str = Field(min_length=1)
+    turns: int = Field(ge=0)
+    usage: _UsageSnapshot
+    metrics: dict[str, int | float]
+    programmatic_tool_call_stats: _ProgrammaticToolCallSnapshot
+    supervisor: _SupervisorSnapshot
+    limits: _LimitsSnapshot
+
+
 @dataclass
 class _SessionState:
     engine: RLMEngine
+    session_id: str
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     prompt_task: asyncio.Task | None = None
     delivery_task: asyncio.Task | None = None
     close_task: asyncio.Task[dict[str, Any]] | None = None
     closing: bool = False
     last_stop_reason: str | None = None
-    snapshot_sequence: int = 0
 
 
 def _request_is_cancelling(awaited: asyncio.Task[Any]) -> bool:
@@ -102,29 +139,14 @@ async def _cancel_and_wait(task: asyncio.Task[Any]) -> None:
     await asyncio.gather(task, return_exceptions=True)
 
 
-def _session_metadata(
-    state: _SessionState, status: SessionStatus, *, final: bool = False
-) -> dict[str, Any]:
+def _session_metadata(state: _SessionState) -> dict[str, Any]:
     snapshot = {
-        "schema_version": 1,
-        "sequence": state.snapshot_sequence,
-        "status": status,
-        "final": final,
+        "session_id": state.session_id,
         "last_stop_reason": state.last_stop_reason,
         **state.engine.execution_snapshot(),
     }
-    state.snapshot_sequence += 1
-    return {SESSION_METADATA_KEY: snapshot}
-
-
-def _require_contract(field_meta: Any) -> None:
-    if (
-        not isinstance(field_meta, dict)
-        or field_meta.get(CONTRACT_METADATA_KEY) is not True
-    ):
-        raise RequestError.invalid_params(
-            {"reason": f"{CONTRACT_METADATA_KEY} must be true"}
-        )
+    validated = _SessionSnapshot.model_validate(snapshot)
+    return {SESSION_METADATA_KEY: validated.model_dump(mode="json")}
 
 
 def _validation_fields(error: ValidationError) -> list[str]:
@@ -148,14 +170,6 @@ def _runtime_config(field_meta: Any) -> tuple[RuntimeConfig, str]:
             }
         ) from error
 
-    reserved_kernel_env = sorted(
-        RESERVED_KERNEL_ENV_NAMES.intersection(payload.kernel_env)
-    )
-    if reserved_kernel_env:
-        raise RequestError.invalid_params(
-            {"reason": f"kernel_env contains reserved names: {reserved_kernel_env}"}
-        )
-
     return (
         RuntimeConfig(
             model=payload.model,
@@ -168,7 +182,7 @@ def _runtime_config(field_meta: Any) -> tuple[RuntimeConfig, str]:
             kernel_env=tuple(payload.kernel_env.items()),
             search_api_key=payload.search_api_key,
         ),
-        payload.lineage_session_id,
+        payload.session_id,
     )
 
 
@@ -221,7 +235,6 @@ class RLMACPAgent(Agent):
     def __init__(self) -> None:
         self._client: Client
         self._sessions: dict[str, _SessionState] = {}
-        self._contract_initialized = False
 
     def on_connect(self, conn: Client) -> None:
         self._client = conn
@@ -233,9 +246,6 @@ class RLMACPAgent(Agent):
         client_info: Implementation | None = None,
         **kwargs: Any,
     ) -> InitializeResponse:
-        self._contract_initialized = False
-        _require_contract(kwargs)
-        self._contract_initialized = True
         return InitializeResponse(
             protocol_version=PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
@@ -244,7 +254,6 @@ class RLMACPAgent(Agent):
                 session_capabilities=SessionCapabilities(
                     close=SessionCloseCapabilities()
                 ),
-                field_meta=CONTRACT_METADATA,
             ),
             agent_info=Implementation(name="rlm", title="RLM", version=version("rlm")),
         )
@@ -257,16 +266,12 @@ class RLMACPAgent(Agent):
         | None = None,
         **kwargs: Any,
     ) -> NewSessionResponse:
-        if not self._contract_initialized:
-            raise RequestError.invalid_request(
-                {"reason": "RLM ACP contract was not negotiated during initialize"}
-            )
         if additional_directories:
             raise RequestError.invalid_params(
                 {"reason": "RLM does not support additional session directories"}
             )
         resolved_mcp_servers = _mcp_servers(mcp_servers)
-        runtime_config, lineage_session_id = _runtime_config(kwargs)
+        runtime_config, external_session_id = _runtime_config(kwargs)
         session = Session()
         session_id = session.dir.name
         try:
@@ -275,17 +280,13 @@ class RLMACPAgent(Agent):
                 session=session,
                 mcp_servers=resolved_mcp_servers,
                 runtime_config=runtime_config,
-                lineage_session_id=lineage_session_id,
             )
         except BaseException:
             session.close()
             raise
-        state = _SessionState(engine=engine)
+        state = _SessionState(engine=engine, session_id=external_session_id)
         self._sessions[session_id] = state
-        return NewSessionResponse(
-            session_id=session_id,
-            field_meta=_session_metadata(state, "created"),
-        )
+        return NewSessionResponse(session_id=session_id)
 
     async def prompt(
         self,
@@ -315,12 +316,7 @@ class RLMACPAgent(Agent):
                     await _cancel_and_wait(task)
                     raise
                 state.last_stop_reason = "cancelled"
-                return PromptResponse(
-                    stop_reason="cancelled",
-                    field_meta=_session_metadata(
-                        state, "closing" if state.closing else "idle"
-                    ),
-                )
+                return PromptResponse(stop_reason="cancelled")
             except Exception:
                 state.last_stop_reason = "error"
                 raise
@@ -334,10 +330,7 @@ class RLMACPAgent(Agent):
             )
             state.last_stop_reason = state.engine.stop_reason or stop_reason
             if state.closing:
-                return PromptResponse(
-                    stop_reason="cancelled",
-                    field_meta=_session_metadata(state, "closing"),
-                )
+                return PromptResponse(stop_reason="cancelled")
 
             delivery = asyncio.create_task(
                 self._client.session_update(
@@ -354,10 +347,7 @@ class RLMACPAgent(Agent):
                     raise
                 if not state.closing:
                     raise
-                return PromptResponse(
-                    stop_reason="cancelled",
-                    field_meta=_session_metadata(state, "closing"),
-                )
+                return PromptResponse(stop_reason="cancelled")
             finally:
                 state.delivery_task = None
 
@@ -368,7 +358,6 @@ class RLMACPAgent(Agent):
                     input_tokens=result.usage.prompt_tokens,
                     output_tokens=result.usage.completion_tokens,
                 ),
-                field_meta=_session_metadata(state, "idle"),
             )
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
@@ -400,7 +389,7 @@ class RLMACPAgent(Agent):
                 state.delivery_task.cancel()
             async with state.lock:
                 await state.engine.aclose()
-            return _session_metadata(state, "closed", final=True)
+            return _session_metadata(state)
         finally:
             if self._sessions.get(session_id) is state:
                 self._sessions.pop(session_id)

@@ -72,40 +72,6 @@ _KERNEL_BASE_ENV_NAMES = {
     "USER",
     "VIRTUAL_ENV",
 }
-RESERVED_KERNEL_ENV_NAMES = {
-    "IPYTHONDIR",
-    "JUPYTER_CONFIG_DIR",
-    "JUPYTER_DATA_DIR",
-    "JUPYTER_RUNTIME_DIR",
-    "OPENAI_API_KEY",
-    "OPENAI_BASE_URL",
-    "PRIME_API_KEY",
-    "PRIME_TEAM_ID",
-    "RLM_API_KEY",
-    "RLM_ALLOW_GIT",
-    "RLM_APPEND_TO_SYSTEM_PROMPT",
-    "RLM_BASE_URL",
-    "RLM_DEPTH",
-    "RLM_EXEC_TIMEOUT",
-    "RLM_EXTRA_UV_ARGS",
-    "RLM_HOME",
-    "RLM_KERNEL_ENV",
-    "RLM_MAX_COMPACTIONS",
-    "RLM_MAX_CONCURRENT_SUBAGENTS",
-    "RLM_MAX_DEPTH",
-    "RLM_MAX_OUTPUT",
-    "RLM_MAX_SUBAGENT_CALLS",
-    "RLM_MAX_TOKENS",
-    "RLM_MAX_TOOL_OUTPUT_CHARS",
-    "RLM_MCP_CONFIG",
-    "RLM_MODEL",
-    "RLM_SDK_MAX_RETRIES",
-    "RLM_SESSION_DIR",
-    "RLM_SKILLS",
-    "RLM_SUMMARIZE_AT_TOKENS",
-    "RLM_SYSTEM_PROMPT_PATH",
-    "SERPER_API_KEY",
-}
 
 
 def build_kernel_env(
@@ -124,10 +90,6 @@ def build_kernel_env(
     ]
     if invalid_types:
         raise TypeError("kernel environment keys and values must be strings")
-    reserved = sorted(RESERVED_KERNEL_ENV_NAMES.intersection(explicit))
-    if reserved:
-        raise ValueError(f"kernel environment contains reserved names: {reserved}")
-
     kernel_env = {
         key: value
         for key, value in source.items()
@@ -371,7 +333,6 @@ for _name in {skill_names!r}:
 
 if {allow_recursion!r}:
     import rlm as _rlm_package
-    _rlm_package.run = _rlm_broker.run
     globals()['rlm'] = _wrap_callable(_rlm_package, None)
 """
         self._execute_silent(setup_code)

@@ -12,9 +12,8 @@ from rlm.config import (
 
 def test_runtime_config_resolves_and_redacts_environment():
     config = RuntimeConfig.from_env(
-        model="override",
-        summarize_at_tokens=2048,
         environ={
+            "RLM_MODEL": "override",
             "RLM_API_KEY": "secret",
             "RLM_BASE_URL": "http://interceptor",
             "RLM_DEPTH": "2",
@@ -22,6 +21,7 @@ def test_runtime_config_resolves_and_redacts_environment():
             "RLM_EXEC_TIMEOUT": "30",
             "RLM_MAX_OUTPUT": "1200",
             "RLM_MAX_TOKENS": "500",
+            "RLM_SUMMARIZE_AT_TOKENS": "2048",
             "RLM_MAX_COMPACTIONS": "3",
             "RLM_MAX_TOOL_OUTPUT_CHARS": "700",
             "RLM_ALLOW_GIT": "1",
@@ -65,6 +65,6 @@ def test_runtime_config_rejects_unsafe_recursive_and_environment_values():
         base_url="http://interceptor",
         api_key="secret",
     )
-    provider.headers["X-RLM-Call-ID"] = "forged-after-construction"
+    provider.headers["Idempotency-Key"] = "forged-after-construction"
     with pytest.raises(ValueError, match="reserved names"):
-        make_client(provider, InvocationContext(depth=3))
+        make_client(provider)

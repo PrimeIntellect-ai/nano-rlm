@@ -54,8 +54,6 @@ class _Invocation:
 @dataclass
 class _Scope:
     invocation_id: str
-    parent_call_id: str | None
-    segment_id: str | None
     tasks: set[asyncio.Task[Any]]
 
 
@@ -85,7 +83,6 @@ class SessionTreeSupervisor:
         mcp_servers: dict[str, MCPServer] | None = None,
         engine_factory: Callable[..., RLMEngine] | None = None,
         root_invocation_id: str | None = None,
-        lineage_session_id: str | None = None,
     ) -> None:
         self._engine_factory = engine_factory
         self._server: asyncio.AbstractServer | None = None
@@ -130,7 +127,6 @@ class SessionTreeSupervisor:
             self._brokered_skills[capability] = (descriptor, self._call_search)
 
         root_id = root_invocation_id or uuid.uuid4().hex
-        self.session_id = lineage_session_id or root_session.dir.name
         root = _Invocation(
             id=root_id,
             parent_id=None,
@@ -226,19 +222,12 @@ class SessionTreeSupervisor:
         invocation = self._invocations[invocation_id]
         return BrokerEndpoint(self._socket_path, invocation.capability)
 
-    async def open_scope(
-        self,
-        invocation_id: str,
-        parent_call_id: str | None = None,
-        segment_id: str | None = None,
-    ) -> str:
+    async def open_scope(self, invocation_id: str) -> str:
         async with self._lock:
             if self._closed or invocation_id not in self._invocations:
                 raise RuntimeError("recursive invocation is no longer active")
             scope_id = secrets.token_urlsafe(24)
-            self._scopes[scope_id] = _Scope(
-                invocation_id, parent_call_id, segment_id, set()
-            )
+            self._scopes[scope_id] = _Scope(invocation_id, set())
             return scope_id
 
     async def close_scope(self, scope_id: str) -> None:
@@ -269,11 +258,7 @@ class SessionTreeSupervisor:
                     self._limit_result(parent, "recursive call limit reached")
                 )
             self._total_calls += 1
-            task = asyncio.create_task(
-                self._run_child(
-                    parent_id, prompt, scope.parent_call_id, scope.segment_id
-                )
-            )
+            task = asyncio.create_task(self._run_child(parent_id, prompt))
             self._tasks.add(task)
             self._child_tasks.add(task)
             scope.tasks.add(task)
@@ -323,8 +308,6 @@ class SessionTreeSupervisor:
         self,
         parent_id: str,
         prompt: str,
-        parent_call_id: str | None,
-        segment_id: str | None,
     ) -> RLMResult:
         parent = self._invocations[parent_id]
         child_context = parent.runtime_config.invocation.child()
@@ -365,10 +348,6 @@ class SessionTreeSupervisor:
                     runtime_config=child.runtime_config,
                     supervisor=self,
                     invocation_id=child.id,
-                    parent_invocation_id=parent_id,
-                    parent_call_id=parent_call_id,
-                    lineage_session_id=self.session_id,
-                    segment_id=segment_id,
                 )
                 return await engine.run(prompt)
             finally:

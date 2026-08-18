@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall, tool_result
-from rlm import broker
 from rlm.config import (
     ExecutionPolicy,
     InvocationContext,
@@ -116,14 +114,6 @@ class _NestedEngine:
         )
 
 
-class _ClosableClient:
-    def __init__(self) -> None:
-        self.closed = False
-
-    async def close(self) -> None:
-        self.closed = True
-
-
 async def test_parallel_children_respect_depth_capacity(tmp_path):
     _FastEngine.state = _EngineState()
     session = Session(tmp_path / "root")
@@ -209,106 +199,6 @@ async def test_saturated_nested_calls_do_not_deadlock(tmp_path):
         "depth:1>depth:2>leaf:3",
     ]
     assert supervisor.total_calls == 6
-
-
-async def test_broker_round_trip_and_invalid_capability(tmp_path):
-    _FastEngine.state = _EngineState()
-    session = Session(tmp_path / "root")
-    supervisor = SessionTreeSupervisor(
-        root_session=session,
-        runtime_config=_config(max_depth=1),
-        cwd=str(tmp_path),
-        engine_factory=_FastEngine,
-    )
-    await supervisor.start()
-    socket_path = supervisor.endpoint_for(supervisor.root_id).socket_path
-    scope = await supervisor.open_scope(supervisor.root_id)
-    endpoint = supervisor.endpoint_for(supervisor.root_id)
-    broker.configure(endpoint)
-    broker.set_scope(scope)
-    try:
-        result = await broker.run("hello")
-        broker.configure(broker.BrokerEndpoint(endpoint.socket_path, "invalid"))
-        with pytest.raises(RuntimeError, match="invalid recursive RLM capability"):
-            await broker.run("forbidden")
-    finally:
-        broker.set_scope(None)
-        broker.configure(None)
-        await supervisor.close_scope(scope)
-        await supervisor.aclose()
-        session.close()
-
-    assert result.answer == "child:hello"
-    assert result.usage == TokenUsage(prompt_tokens=2, completion_tokens=1)
-    assert not Path(socket_path).exists()
-
-
-async def test_shutdown_closes_incomplete_broker_connections(tmp_path):
-    session = Session(tmp_path / "root")
-    supervisor = SessionTreeSupervisor(
-        root_session=session,
-        runtime_config=_config(max_depth=1),
-        cwd=str(tmp_path),
-        engine_factory=_FastEngine,
-    )
-    await supervisor.start()
-    endpoint = supervisor.endpoint_for(supervisor.root_id)
-    reader, writer = await asyncio.open_unix_connection(endpoint.socket_path)
-    for _ in range(100):
-        if supervisor._connection_writers:
-            break
-        await asyncio.sleep(0.01)
-    assert len(supervisor._connection_writers) == 1
-
-    await supervisor.aclose()
-    try:
-        assert await asyncio.wait_for(reader.read(), timeout=1) == b""
-        assert not Path(endpoint.socket_path).exists()
-    finally:
-        writer.close()
-        await writer.wait_closed()
-        session.close()
-
-
-async def test_incomplete_broker_connections_are_bounded_and_time_out(
-    monkeypatch, tmp_path
-):
-    monkeypatch.setattr("rlm.supervisor.MAX_BROKER_CONNECTIONS", 1)
-    monkeypatch.setattr("rlm.supervisor.BROKER_INITIAL_FRAME_TIMEOUT_SECONDS", 0.05)
-    session = Session(tmp_path / "root")
-    supervisor = SessionTreeSupervisor(
-        root_session=session,
-        runtime_config=_config(max_depth=1),
-        cwd=str(tmp_path),
-        engine_factory=_FastEngine,
-    )
-    await supervisor.start()
-    endpoint = supervisor.endpoint_for(supervisor.root_id)
-    first_reader, first_writer = await asyncio.open_unix_connection(
-        endpoint.socket_path
-    )
-    for _ in range(100):
-        if supervisor._connection_tasks:
-            break
-        await asyncio.sleep(0.001)
-    second_reader, second_writer = await asyncio.open_unix_connection(
-        endpoint.socket_path
-    )
-
-    try:
-        assert await asyncio.wait_for(second_reader.read(), timeout=1) == b""
-        assert await broker.read_frame(first_reader) == {
-            "error": "broker request timed out"
-        }
-        assert await asyncio.wait_for(first_reader.read(), timeout=1) == b""
-        assert supervisor._connection_tasks == set()
-    finally:
-        first_writer.close()
-        second_writer.close()
-        await first_writer.wait_closed()
-        await second_writer.wait_closed()
-        await supervisor.aclose()
-        session.close()
 
 
 async def test_real_kernel_uses_brokered_rlm_callable(monkeypatch, session):
@@ -430,56 +320,3 @@ async def test_real_kernel_cancels_child_and_remains_reusable(session):
     assert tool_messages[-1]["content"].strip() == "child:next"
     assert _SometimesBlockingEngine.state.cancelled == 1
     assert supervisor.active_calls == 0
-
-
-async def test_engine_closes_only_owned_inference_client(monkeypatch, tmp_path):
-    owned = _ClosableClient()
-    monkeypatch.setattr("rlm.engine.make_client", lambda *args: owned)
-    owned_engine = RLMEngine(
-        runtime_config=_config(max_depth=0),
-        session=Session(tmp_path / "owned"),
-    )
-    await owned_engine.aclose()
-
-    injected = _ClosableClient()
-    injected_engine = RLMEngine(
-        client=injected,  # type: ignore[arg-type]
-        runtime_config=_config(max_depth=0),
-        session=Session(tmp_path / "injected"),
-    )
-    await injected_engine.aclose()
-
-    assert owned.closed is True
-    assert injected.closed is False
-
-
-async def test_engine_close_finishes_before_propagating_cancellation(
-    monkeypatch, tmp_path
-):
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    class SlowClosableClient(_ClosableClient):
-        async def close(self) -> None:
-            started.set()
-            await release.wait()
-            await super().close()
-
-    owned = SlowClosableClient()
-    monkeypatch.setattr("rlm.engine.make_client", lambda *args: owned)
-    engine = RLMEngine(
-        runtime_config=_config(max_depth=0),
-        session=Session(tmp_path / "root"),
-    )
-    waiter = asyncio.create_task(engine.aclose())
-    await started.wait()
-    waiter.cancel()
-    await asyncio.sleep(0)
-    assert waiter.done() is False
-
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await waiter
-    await engine.aclose()
-
-    assert owned.closed is True

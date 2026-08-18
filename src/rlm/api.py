@@ -5,9 +5,9 @@ from rlm.engine import RLMEngine
 from rlm.types import RLMResult
 
 
-async def run(prompt: str, **kwargs) -> RLMResult:
+async def run(prompt: str) -> RLMResult:
     """Run a single rlm agent."""
     if broker.is_configured():
-        return await broker.run(prompt, **kwargs)
-    engine = RLMEngine(**kwargs)
+        return await broker.run(prompt)
+    engine = RLMEngine()
     return await engine.run(prompt)

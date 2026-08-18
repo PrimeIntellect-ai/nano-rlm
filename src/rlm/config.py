@@ -64,8 +64,9 @@ class ProviderConfig(_ConfigModel):
 
     @field_validator("headers")
     @classmethod
-    def _reserve_lineage_headers(cls, headers: dict[str, str]) -> dict[str, str]:
-        reserved = sorted(name for name in headers if name.lower().startswith("x-rlm-"))
+    def _reserve_transport_headers(cls, headers: dict[str, str]) -> dict[str, str]:
+        reserved_names = {"idempotency-key", "x-stainless-retry-count"}
+        reserved = sorted(name for name in headers if name.lower() in reserved_names)
         if reserved:
             raise ValueError(f"provider headers contain reserved names: {reserved}")
         return headers
@@ -162,10 +163,6 @@ class RuntimeConfig(_ConfigModel):
     def from_env(
         cls,
         *,
-        model: str | None = None,
-        summarize_at_tokens: int | None = None,
-        system_prompt_path: str | None = None,
-        append_to_system_prompt: str | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> RuntimeConfig:
         env = os.environ if environ is None else environ
@@ -174,11 +171,6 @@ class RuntimeConfig(_ConfigModel):
             raise ValueError(
                 "RLM_MAX_OUTPUT must be positive, or -1 to disable truncation"
             )
-        raw_summarize = (
-            env.get("RLM_SUMMARIZE_AT_TOKENS")
-            if summarize_at_tokens is None
-            else summarize_at_tokens
-        )
         raw_skills = env.get("RLM_SKILLS", "")
         max_depth = int(env.get("RLM_MAX_DEPTH", "0"))
         default_concurrency = max(4, max_depth)
@@ -191,7 +183,7 @@ class RuntimeConfig(_ConfigModel):
                 "RLM_MAX_CONCURRENT_SUBAGENTS must be at least RLM_MAX_DEPTH"
             )
         return cls(
-            model=model or env.get("RLM_MODEL", "openai/gpt-5-mini"),
+            model=env.get("RLM_MODEL", "openai/gpt-5-mini"),
             provider=ProviderConfig.from_env(env),
             invocation=InvocationContext.from_env(env),
             policy=ExecutionPolicy(
@@ -201,7 +193,9 @@ class RuntimeConfig(_ConfigModel):
                 max_tokens=_optional_positive_int(
                     env.get("RLM_MAX_TOKENS"), "RLM_MAX_TOKENS"
                 ),
-                summarize_at_tokens=_summarize_at_tokens(raw_summarize),
+                summarize_at_tokens=_summarize_at_tokens(
+                    env.get("RLM_SUMMARIZE_AT_TOKENS")
+                ),
                 max_compactions=_optional_positive_int(
                     env.get("RLM_MAX_COMPACTIONS"), "RLM_MAX_COMPACTIONS"
                 ),
@@ -216,9 +210,8 @@ class RuntimeConfig(_ConfigModel):
                 ),
                 allow_git=env.get("RLM_ALLOW_GIT") == "1",
             ),
-            system_prompt_path=system_prompt_path or env.get("RLM_SYSTEM_PROMPT_PATH"),
-            append_to_system_prompt=append_to_system_prompt
-            or env.get("RLM_APPEND_TO_SYSTEM_PROMPT"),
+            system_prompt_path=env.get("RLM_SYSTEM_PROMPT_PATH"),
+            append_to_system_prompt=env.get("RLM_APPEND_TO_SYSTEM_PROMPT"),
             skills=tuple(s.strip() for s in raw_skills.split(",") if s.strip()),
             kernel_env=_kernel_env(env.get(KERNEL_ENV_CONFIG_ENV)),
             search_api_key=env.get("SERPER_API_KEY"),
