@@ -121,6 +121,8 @@ class ExecutionPolicy:
     max_compactions: int | None = None
     max_concurrent_subagents: int = 4
     max_subagent_calls: int = 64
+    max_tool_output_chars: int | None = None
+    allow_git: bool = False
 
     def __post_init__(self) -> None:
         if self.max_depth < 0:
@@ -129,7 +131,12 @@ class ExecutionPolicy:
             raise ValueError("exec_timeout must be positive")
         if self.max_output == 0 or self.max_output < -1:
             raise ValueError("max_output must be positive, or -1 to disable truncation")
-        for name in ("max_tokens", "summarize_at_tokens", "max_compactions"):
+        for name in (
+            "max_tokens",
+            "summarize_at_tokens",
+            "max_compactions",
+            "max_tool_output_chars",
+        ):
             value = getattr(self, name)
             if value is not None and value <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -139,6 +146,8 @@ class ExecutionPolicy:
             raise ValueError("max_concurrent_subagents must be at least max_depth")
         if self.max_subagent_calls <= 0:
             raise ValueError("max_subagent_calls must be positive")
+        if not isinstance(self.allow_git, bool):
+            raise ValueError("allow_git must be a bool")
 
 
 @dataclass(frozen=True)
@@ -207,6 +216,11 @@ class RuntimeConfig:
                     env.get("RLM_MAX_SUBAGENT_CALLS", "64"),
                     "RLM_MAX_SUBAGENT_CALLS",
                 ),
+                max_tool_output_chars=_optional_positive_int(
+                    env.get("RLM_MAX_TOOL_OUTPUT_CHARS"),
+                    "RLM_MAX_TOOL_OUTPUT_CHARS",
+                ),
+                allow_git=env.get("RLM_ALLOW_GIT") == "1",
             ),
             system_prompt_path=system_prompt_path or env.get("RLM_SYSTEM_PROMPT_PATH"),
             append_to_system_prompt=append_to_system_prompt

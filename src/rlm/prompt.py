@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from rlm.tools.git_block import allow_git
-
 if TYPE_CHECKING:
     from rlm.tools.base import BuiltinTool
 
@@ -87,6 +85,7 @@ def build_system_prompt(
     messages_path: str,
     *,
     allow_recursion: bool,
+    allow_git: bool,
     active_tools: list[BuiltinTool],
     shell_skills: list[str] | None = None,
 ) -> str:
@@ -148,7 +147,7 @@ def build_system_prompt(
     if _has_tool(active_tools, "ipython"):
         parts.extend(["", IPYTHON_CONTROL_PROMPT])
 
-    if _should_include_git_history_guard(active_tools):
+    if _should_include_git_history_guard(active_tools, allow_git):
         parts.extend(["", GIT_HISTORY_GUARD_PROMPT])
 
     if active_tools:
@@ -157,8 +156,10 @@ def build_system_prompt(
     return "\n".join(parts)
 
 
-def _should_include_git_history_guard(active_tools: list["BuiltinTool"]) -> bool:
-    if allow_git():
+def _should_include_git_history_guard(
+    active_tools: list["BuiltinTool"], allow_git: bool
+) -> bool:
+    if allow_git:
         return False
     return any(tool.name in SHELL_TOOL_NAMES for tool in active_tools)
 

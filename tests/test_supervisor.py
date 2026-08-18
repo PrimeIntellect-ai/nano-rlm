@@ -352,6 +352,8 @@ async def test_client_disconnect_cancels_child(tmp_path):
         "max_tokens": None,
         "summarize_at_tokens": None,
         "max_compactions": None,
+        "max_tool_output_chars": None,
+        "allow_git": False,
     }
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):

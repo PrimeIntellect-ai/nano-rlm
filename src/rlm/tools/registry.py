@@ -14,9 +14,12 @@ _BUILTIN_TOOLS: tuple[BuiltinTool, ...] = (IpythonTool(),)
 _TOOLS_BY_NAME: dict[str, BuiltinTool] = {tool.name: tool for tool in _BUILTIN_TOOLS}
 
 
-def get_active_builtin_tools() -> list[BuiltinTool]:
-    """Return the active builtin-tool instances (always just ipython)."""
-    return list(_BUILTIN_TOOLS)
+def get_active_builtin_tools(exec_timeout: int = 300) -> list[BuiltinTool]:
+    """Return registered tools with an engine-specific IPython schema."""
+    return [
+        IpythonTool(exec_timeout) if name == "ipython" else tool
+        for name, tool in _TOOLS_BY_NAME.items()
+    ]
 
 
 def get_active_tools() -> list[dict]:

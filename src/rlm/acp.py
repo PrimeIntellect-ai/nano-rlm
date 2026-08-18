@@ -83,6 +83,8 @@ _POLICY_FIELDS = {
     "max_compactions",
     "max_concurrent_subagents",
     "max_subagent_calls",
+    "max_tool_output_chars",
+    "allow_git",
 }
 
 
@@ -152,6 +154,12 @@ def _nullable_integer(value: Any, name: str) -> int | None:
 def _nullable_string(value: Any, name: str) -> str | None:
     if value is not None and not isinstance(value, str):
         raise RequestError.invalid_params({"reason": f"{name} must be a string or null"})
+    return value
+
+
+def _boolean(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise RequestError.invalid_params({"reason": f"{name} must be a boolean"})
     return value
 
 
@@ -258,6 +266,11 @@ def _runtime_config(field_meta: Any) -> tuple[RuntimeConfig, str]:
                 policy_payload["max_subagent_calls"],
                 "policy.max_subagent_calls",
             ),
+            max_tool_output_chars=_nullable_integer(
+                policy_payload["max_tool_output_chars"],
+                "policy.max_tool_output_chars",
+            ),
+            allow_git=_boolean(policy_payload["allow_git"], "policy.allow_git"),
         )
     except ValueError as error:
         raise RequestError.invalid_params({"reason": str(error)}) from error

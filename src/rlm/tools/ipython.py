@@ -154,11 +154,11 @@ class IpythonTool:
 
     name = "ipython"
 
+    def __init__(self, exec_timeout: int = 300) -> None:
+        self.exec_timeout = exec_timeout
+
     def schema(self) -> dict[str, Any]:
-        timeout = min(
-            int(os.environ.get("RLM_EXEC_TIMEOUT", "300")),
-            IPYTHON_TIMEOUT_MAX_SECONDS,
-        )
+        timeout = min(self.exec_timeout, IPYTHON_TIMEOUT_MAX_SECONDS)
         schema = copy.deepcopy(IPYTHON_SCHEMA)
         schema["function"]["parameters"]["properties"]["timeout"]["description"] = (
             "Optional timeout in seconds. "
@@ -190,7 +190,7 @@ class IpythonTool:
                 metric_events=metric_events,
             )
 
-        blocked = find_blocked_in_ipython(code)
+        blocked = find_blocked_in_ipython(code, allow_git=context.allow_git)
         if blocked is not None:
             return ToolOutcome(
                 content=refusal(blocked),
@@ -199,7 +199,8 @@ class IpythonTool:
 
         return ToolOutcome(
             content=self._maybe_truncate_output(
-                context.repl.execute(code, timeout=timeout)
+                context.repl.execute(code, timeout=timeout),
+                context.max_tool_output_chars,
             ),
             metric_events=metric_events,
         )
@@ -209,10 +210,8 @@ class IpythonTool:
         return sum(1 for line in code.splitlines() if line.strip())
 
     @staticmethod
-    def _maybe_truncate_output(content: str) -> str:
-        """Truncate ``content`` to ``RLM_MAX_TOOL_OUTPUT_CHARS`` if set (off by default)."""
-        cap = int(os.environ.get("RLM_MAX_TOOL_OUTPUT_CHARS", "-1"))
-        if cap <= 0 or len(content) <= cap:
+    def _maybe_truncate_output(content: str, cap: int | None) -> str:
+        if cap is None or len(content) <= cap:
             return content
         head, tail = cap // 2, cap - cap // 2
         return f"{content[:head]}\n...[{len(content) - cap} chars truncated]...\n{content[-tail:]}"

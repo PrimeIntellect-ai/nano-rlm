@@ -172,6 +172,8 @@ class RLMEngine:
         self.append_to_system_prompt = config.append_to_system_prompt
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
+        self.max_tool_output_chars = config.policy.max_tool_output_chars
+        self.allow_git = config.policy.allow_git
 
         # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
         # parse RLM_MCP_CONFIG (a standard mcpServers config).
@@ -387,7 +389,7 @@ class RLMEngine:
         try:
             self._repl.start()
 
-            self._active_tools = get_active_builtin_tools()
+            self._active_tools = get_active_builtin_tools(self.exec_timeout)
             self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
             messages_path = str(self.session.dir / "messages.jsonl")
             system_prompt = self._load_system_prompt(messages_path, self._active_tools)
@@ -882,6 +884,8 @@ class RLMEngine:
                 "max_tokens": self.runtime_config.policy.max_tokens,
                 "summarize_at_tokens": self.runtime_config.policy.summarize_at_tokens,
                 "max_compactions": self.runtime_config.policy.max_compactions,
+                "max_tool_output_chars": self.runtime_config.policy.max_tool_output_chars,
+                "allow_git": self.runtime_config.policy.allow_git,
             },
         }
         return snapshot
@@ -897,6 +901,7 @@ class RLMEngine:
             discover_skills(self.session.dir),
             messages_path,
             allow_recursion=self.depth < self.max_depth,
+            allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
         )
@@ -911,6 +916,8 @@ class RLMEngine:
             total_usage=self._total_usage,
             last_prompt_tokens=self._last_prompt_tokens,
             exec_timeout=self.exec_timeout,
+            max_tool_output_chars=self.max_tool_output_chars,
+            allow_git=self.allow_git,
             repl=self._repl,
             state=self._tool_state,
             cwd=self.cwd,

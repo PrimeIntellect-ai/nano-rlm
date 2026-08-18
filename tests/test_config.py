@@ -79,6 +79,8 @@ def test_runtime_config_resolves_environment_once():
             "RLM_MAX_OUTPUT": "1200",
             "RLM_MAX_TOKENS": "500",
             "RLM_MAX_COMPACTIONS": "3",
+            "RLM_MAX_TOOL_OUTPUT_CHARS": "700",
+            "RLM_ALLOW_GIT": "1",
             "RLM_SKILLS": "search, edit",
             KERNEL_ENV_CONFIG_ENV: '{"TASK_TOKEN": "task-secret"}',
             "SERPER_API_KEY": "search-secret",
@@ -96,6 +98,8 @@ def test_runtime_config_resolves_environment_once():
         max_compactions=3,
         max_concurrent_subagents=4,
         max_subagent_calls=64,
+        max_tool_output_chars=700,
+        allow_git=True,
     )
     assert config.skills == ("search", "edit")
     assert config.kernel_env == (("TASK_TOKEN", "task-secret"),)

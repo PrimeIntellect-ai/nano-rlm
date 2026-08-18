@@ -56,6 +56,8 @@ def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
             "max_compactions": None,
             "max_concurrent_subagents": 4,
             "max_subagent_calls": 64,
+            "max_tool_output_chars": None,
+            "allow_git": False,
         },
         "system_prompt_path": None,
         "append_to_system_prompt": None,
@@ -762,6 +764,8 @@ async def test_acp_runtime_metadata_keeps_credentials_out_of_responses(
             "max_compactions": 2,
             "max_concurrent_subagents": 4,
             "max_subagent_calls": 8,
+            "max_tool_output_chars": 2000,
+            "allow_git": True,
         },
         append_to_system_prompt="session instructions",
         skills=["edit"],
@@ -781,6 +785,8 @@ async def test_acp_runtime_metadata_keeps_credentials_out_of_responses(
     assert engine.runtime_config.policy.max_depth == 2
     assert engine.runtime_config.policy.exec_timeout == 30
     assert engine.runtime_config.policy.max_tokens == 500
+    assert engine.runtime_config.policy.max_tool_output_chars == 2000
+    assert engine.runtime_config.policy.allow_git is True
     assert engine.runtime_config.append_to_system_prompt == "session instructions"
     assert engine.runtime_config.skills == ("edit",)
     assert engine.runtime_config.kernel_env == (("TASK_VISIBLE", "task-secret"),)

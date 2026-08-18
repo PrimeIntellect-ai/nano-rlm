@@ -22,6 +22,7 @@ def _prompt(
     active_tools: list[_Tool],
     *,
     installed_skills: list[str] | None = None,
+    allow_git: bool = False,
 ) -> str:
     return build_system_prompt(
         "/repo",
@@ -29,12 +30,12 @@ def _prompt(
         installed_skills or [],
         "/repo/.rlm/messages.jsonl",
         allow_recursion=False,
+        allow_git=allow_git,
         active_tools=active_tools,
     )
 
 
-def test_git_history_guard_prompt_included_for_shell_tools(monkeypatch):
-    monkeypatch.delenv("RLM_ALLOW_GIT", raising=False)
+def test_git_history_guard_prompt_included_for_shell_tools():
     prompt = _prompt([_Tool("ipython")])
 
     assert GIT_HISTORY_GUARD_PROMPT in prompt
@@ -44,15 +45,13 @@ def test_git_history_guard_prompt_included_for_shell_tools(monkeypatch):
     assert "`--all`" in prompt
 
 
-def test_git_history_guard_prompt_omitted_when_unrestricted(monkeypatch):
-    monkeypatch.setenv("RLM_ALLOW_GIT", "1")
+def test_git_history_guard_prompt_omitted_when_unrestricted():
+    assert GIT_HISTORY_GUARD_PROMPT not in _prompt(
+        [_Tool("ipython")], allow_git=True
+    )
 
-    assert GIT_HISTORY_GUARD_PROMPT not in _prompt([_Tool("ipython")])
 
-
-def test_git_history_guard_prompt_omitted_without_shell_tools(monkeypatch):
-    monkeypatch.delenv("RLM_ALLOW_GIT", raising=False)
-
+def test_git_history_guard_prompt_omitted_without_shell_tools():
     assert GIT_HISTORY_GUARD_PROMPT not in _prompt([_Tool("summarize")])
 
 
@@ -99,6 +98,7 @@ def test_prompt_only_advertises_actual_shell_skills():
         ["edit", "uploaded"],
         "/repo/messages.jsonl",
         allow_recursion=False,
+        allow_git=False,
         active_tools=[_Tool("ipython")],
         shell_skills=["uploaded"],
     )
