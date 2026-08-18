@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from typing import TYPE_CHECKING
 
 from rlm.tools.git_block import allow_git
@@ -80,6 +82,51 @@ SEARCH_SKILL_PROMPT = (
 )
 
 
+MINIMAL_IPYTHON_PROMPT = (
+    "Run shell commands with `%%bash` as the very first line of an IPython cell; "
+    "this is a uv-managed venv (use `uv run ...` / `uv pip install ...`, no pip module)."
+)
+
+
+def _minimal_prompt(
+    cwd: str,
+    skills_dir: str | None,
+    installed_skills: list[str],
+    messages_path: str,
+    *,
+    allow_recursion: bool,
+    active_tools: list["BuiltinTool"],
+    cli_skills: list[str] | None = None,
+) -> str:
+    """A stripped system prompt: factual affordances only, no behavioral steering.
+
+    Used to measure how much the default prose steers the model. Keeps the role line,
+    environment facts, enabled skills/recursion, the git guard, and one terse bash/venv
+    line; drops IPYTHON_CONTROL_PROMPT and the "break down / iterate" framing.
+    """
+    parts: list[str] = [
+        "You are a general purpose agent that uses code to solve tasks.",
+        "",
+        f"Working directory: {cwd}",
+        f"Conversation log: {messages_path}",
+        f"Pre-installed Python packages: {', '.join(BASE_TOOLKIT)}.",
+    ]
+    if installed_skills:
+        installed = ", ".join(f"`{skill}`" for skill in installed_skills)
+        parts.append(f"Installed skills (pre-imported): {installed}.")
+    if allow_recursion:
+        parts.append(
+            "A callable `rlm` is in your namespace: `await rlm('sub-task')` spawns a recursive sub-agent."
+        )
+    if _has_tool(active_tools, "ipython"):
+        parts.extend(["", MINIMAL_IPYTHON_PROMPT])
+    if _should_include_git_history_guard(active_tools):
+        parts.extend(["", GIT_HISTORY_GUARD_PROMPT])
+    if active_tools:
+        parts.extend(["", "Call at most one built-in tool per turn."])
+    return "\n".join(parts)
+
+
 def build_system_prompt(
     cwd: str,
     skills_dir: str | None,
@@ -97,6 +144,11 @@ def build_system_prompt(
     per-tool schemas, so redundant tool guidance here just inflates
     every request.
     """
+    if os.environ.get("RLM_MINIMAL_PROMPT"):
+        return _minimal_prompt(
+            cwd, skills_dir, installed_skills, messages_path,
+            allow_recursion=allow_recursion, active_tools=active_tools, cli_skills=cli_skills,
+        )
     parts: list[str] = [
         "You are a general purpose agent that uses code to solve tasks.",
         "You solve tasks by breaking down problems into sub-tasks, writing and executing code, observing results, and iterating one step at a time.",
