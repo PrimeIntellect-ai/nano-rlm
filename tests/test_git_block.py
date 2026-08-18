@@ -323,6 +323,9 @@ def test_ipython_tool_uses_explicit_execution_policy(monkeypatch):
 
     assert refused.content == REFUSAL
     assert truncated.content == "ab\n...[4 chars truncated]...\ngh"
-    assert "Default: 17s" in IpythonTool(17).schema()["function"]["parameters"][
-        "properties"
-    ]["timeout"]["description"]
+    assert (
+        "Default: 17s"
+        in IpythonTool(17).schema()["function"]["parameters"]["properties"]["timeout"][
+            "description"
+        ]
+    )

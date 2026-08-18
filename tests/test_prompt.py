@@ -46,9 +46,7 @@ def test_git_history_guard_prompt_included_for_shell_tools():
 
 
 def test_git_history_guard_prompt_omitted_when_unrestricted():
-    assert GIT_HISTORY_GUARD_PROMPT not in _prompt(
-        [_Tool("ipython")], allow_git=True
-    )
+    assert GIT_HISTORY_GUARD_PROMPT not in _prompt([_Tool("ipython")], allow_git=True)
 
 
 def test_git_history_guard_prompt_omitted_without_shell_tools():

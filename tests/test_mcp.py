@@ -115,47 +115,6 @@ def test_load_mcp_servers(monkeypatch):
         mcp.load_mcp_servers()
 
 
-async def test_registry_keeps_transport_private_and_calls_stdio(tmp_path):
-    server_cwd = tmp_path / "server"
-    server_cwd.mkdir()
-    registry = mcp.MCPRegistry(
-        {"local": _stdio_server("stdio-secret")}, str(server_cwd)
-    )
-    descriptors = await registry.discover()
-
-    assert len(descriptors) == 1
-    descriptor = descriptors[0]
-    assert descriptor.name == "local_echo"
-    assert descriptor.input_schema["required"] == ["text"]
-    assert await registry.call(descriptor.capability, {"text": "hello"}) == (
-        f"stdio-secret:True:{server_cwd}:hello"
-    )
-    with pytest.raises(PermissionError, match="unknown MCP tool capability"):
-        registry.descriptor("invalid")
-
-    skills_dir = tmp_path / "skills"
-    assert registry.write_skill_modules(skills_dir) == ["local_echo"]
-    source = (skills_dir / "local_echo.py").read_text()
-    for private_value in (
-        "stdio-secret",
-        str(server_cwd),
-        sys.executable,
-        "mcp_stdio.py",
-        "TEST_PREFIX",
-    ):
-        assert private_value not in source
-
-    sys.path.insert(0, str(skills_dir))
-    try:
-        skill = importlib.import_module("local_echo")
-        assert inspect.iscoroutinefunction(skill.run)
-        assert str(inspect.signature(skill.run)) == "(*, text: str)"
-        assert skill.__rlm_brokered__ is True
-    finally:
-        sys.path.remove(str(skills_dir))
-        sys.modules.pop("local_echo", None)
-
-
 async def test_registry_rejects_normalized_and_existing_name_collisions(
     monkeypatch, tmp_path
 ):

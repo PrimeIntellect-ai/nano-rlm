@@ -60,9 +60,7 @@ def _git_allowed(explicit: bool | None) -> bool:
     return allow_git() if explicit is None else explicit
 
 
-def find_blocked_command(
-    command: str, *, allow_git: bool | None = None
-) -> str | None:
+def find_blocked_command(command: str, *, allow_git: bool | None = None) -> str | None:
     """Return the offending token if ``command`` asks for broad git history.
 
     Splits on ``&&``, ``||``, ``;``, ``|`` so chained calls like
@@ -148,9 +146,7 @@ _ANY_LINE_MAGIC_RE = re.compile(r"^\s*%[A-Za-z]")
 _ANY_CELL_MAGIC_RE = re.compile(r"^\s*%%[A-Za-z]")
 
 
-def find_blocked_in_ipython(
-    code: str, *, allow_git: bool | None = None
-) -> str | None:
+def find_blocked_in_ipython(code: str, *, allow_git: bool | None = None) -> str | None:
     """Scan IPython ``code`` for blocked commands.
 
     Two passes, both honoring the resolved git policy:
@@ -274,9 +270,7 @@ class _GitCallFinder(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         fqn = self._resolve_callee(node.func)
         if fqn in _BLOCKED_PY_CALLS:
-            blocked = _blocked_option_from_python_call(
-                node, allow_git=self.allow_git
-            )
+            blocked = _blocked_option_from_python_call(node, allow_git=self.allow_git)
             if blocked is not None:
                 self.found = blocked
         self.generic_visit(node)
@@ -321,9 +315,7 @@ def _strip_ipython_only(code: str) -> str:
     return "\n".join(out)
 
 
-def find_blocked_python(
-    code: str, *, allow_git: bool | None = None
-) -> str | None:
+def find_blocked_python(code: str, *, allow_git: bool | None = None) -> str | None:
     """Detect restricted pure-Python git invocations via AST walk.
 
     Returns the offending token (``\"--all\"`` etc.) if a blocked call is found,

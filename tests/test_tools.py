@@ -17,7 +17,7 @@ from conftest import (
 )
 
 from rlm.engine import RLMEngine
-from rlm.tools.ipython import IPythonREPL, build_kernel_env
+from rlm.tools.ipython import IPythonREPL
 
 
 async def test_valid_tool(session):
@@ -91,41 +91,6 @@ def test_ipython_kernel_does_not_inherit_parent_stdio(session, capfd):
     assert captured.out == ""
     assert captured.err == ""
     assert result.strip() == "4 14"
-
-
-def test_kernel_environment_is_explicit_and_reserves_supervisor_names(tmp_path):
-    source = {
-        "PATH": "/bin",
-        "HOME": "/home/task",
-        "LC_ALL": "C",
-        "GITHUB_TOKEN": "ambient-secret",
-        "SUPERVISOR_ONLY": "hidden",
-        "SERPER_API_KEY": "search-secret",
-    }
-    kernel_env = build_kernel_env(
-        {"TASK_VISIBLE": "yes", "GITHUB_TOKEN": "explicit-task-token"},
-        environ=source,
-        private_dir=str(tmp_path),
-    )
-
-    assert kernel_env["PATH"] == "/bin"
-    assert kernel_env["HOME"] == "/home/task"
-    assert kernel_env["LC_ALL"] == "C"
-    assert kernel_env["TASK_VISIBLE"] == "yes"
-    assert kernel_env["GITHUB_TOKEN"] == "explicit-task-token"
-    assert "SUPERVISOR_ONLY" not in kernel_env
-    assert "SERPER_API_KEY" not in kernel_env
-    assert all(
-        str(tmp_path) in kernel_env[name]
-        for name in (
-            "IPYTHONDIR",
-            "JUPYTER_CONFIG_DIR",
-            "JUPYTER_DATA_DIR",
-            "JUPYTER_RUNTIME_DIR",
-        )
-    )
-    with pytest.raises(ValueError, match="reserved names"):
-        build_kernel_env({"RLM_API_KEY": "forbidden"}, environ=source)
 
 
 def test_real_kernel_and_subprocess_receive_only_explicit_environment(

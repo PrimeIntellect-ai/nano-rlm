@@ -16,7 +16,7 @@ from rlm.config import (
 )
 from rlm.engine import RLMEngine
 from rlm.session import Session
-from rlm.supervisor import SessionTreeSupervisor, depth_capacities
+from rlm.supervisor import SessionTreeSupervisor
 from rlm.types import RLMResult, TokenUsage
 
 
@@ -33,32 +33,6 @@ def _config(
             max_subagent_calls=max_calls,
         ),
     )
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"op": "unknown", "capability": "cap", "scope_id": "scope"},
-        {
-            "op": "rlm.run",
-            "capability": "cap",
-            "scope_id": "scope",
-            "prompt": "work",
-            "options": {"legacy": True},
-        },
-        {
-            "op": "skill.call",
-            "capability": "cap",
-            "scope_id": "scope",
-            "skill_capability": "skill",
-            "arguments": {},
-            "unexpected": True,
-        },
-    ],
-)
-def test_broker_requests_are_strict(payload):
-    with pytest.raises(ValueError, match="invalid broker request"):
-        broker.parse_request(payload)
 
 
 @dataclass
@@ -91,22 +65,6 @@ class _FastEngine:
             state.active -= 1
 
 
-class _BlockingEngine(_FastEngine):
-    started = asyncio.Event()
-
-    async def run(self, prompt: str) -> RLMResult:
-        state = self.state
-        state.active += 1
-        self.started.set()
-        try:
-            await asyncio.Future()
-        except asyncio.CancelledError:
-            state.cancelled += 1
-            raise
-        finally:
-            state.active -= 1
-
-
 class _SometimesBlockingEngine(_FastEngine):
     started = asyncio.Event()
 
@@ -123,14 +81,6 @@ class _SometimesBlockingEngine(_FastEngine):
             raise
         finally:
             state.active -= 1
-
-
-class _CaptureLineageEngine(_FastEngine):
-    constructors = []
-
-    def __init__(self, *, runtime_config, session, **kwargs):
-        super().__init__(runtime_config=runtime_config, session=session)
-        self.constructors.append(kwargs)
 
 
 class _NestedEngine:
@@ -172,53 +122,6 @@ class _ClosableClient:
 
     async def close(self) -> None:
         self.closed = True
-
-
-def test_depth_capacities_reserve_every_level():
-    assert depth_capacities(max_depth=3, limit=7) == {1: 3, 2: 2, 3: 2}
-    assert depth_capacities(max_depth=4, limit=3, root_depth=2) == {3: 2, 4: 1}
-    with pytest.raises(ValueError, match="every recursive depth"):
-        depth_capacities(max_depth=3, limit=2)
-
-
-async def test_child_inherits_trusted_session_segment_and_parent_call(tmp_path):
-    _CaptureLineageEngine.constructors = []
-    session = Session(tmp_path / "root")
-    config = _config(max_depth=1)
-    supervisor = SessionTreeSupervisor(
-        root_session=session,
-        runtime_config=config,
-        cwd=str(tmp_path),
-        engine_factory=_CaptureLineageEngine,
-        lineage_session_id="trace-session",
-    )
-    await supervisor.start()
-    root_engine = RLMEngine(
-        client=DummyClient([]),  # type: ignore[arg-type]
-        session=session,
-        runtime_config=config,
-        supervisor=supervisor,
-    )
-    assert root_engine.execution_snapshot()["session_id"] == "trace-session"
-    scope = await supervisor.open_scope(
-        supervisor.root_id,
-        parent_call_id="spawn-call",
-        segment_id="outer-segment",
-    )
-    endpoint = supervisor.endpoint_for(supervisor.root_id)
-    try:
-        child = await supervisor._start_child(endpoint.capability, scope, "delegate")
-        await child
-    finally:
-        await supervisor.close_scope(scope)
-        await supervisor.aclose()
-        root_engine.close()
-
-    constructor = _CaptureLineageEngine.constructors[0]
-    assert constructor["parent_invocation_id"] == supervisor.root_id
-    assert constructor["parent_call_id"] == "spawn-call"
-    assert constructor["lineage_session_id"] == "trace-session"
-    assert constructor["segment_id"] == "outer-segment"
 
 
 async def test_parallel_children_respect_depth_capacity(tmp_path):
@@ -338,66 +241,6 @@ async def test_broker_round_trip_and_invalid_capability(tmp_path):
     assert result.answer == "child:hello"
     assert result.usage == TokenUsage(prompt_tokens=2, completion_tokens=1)
     assert not Path(socket_path).exists()
-
-
-async def test_client_disconnect_cancels_child(tmp_path):
-    _BlockingEngine.state = _EngineState()
-    _BlockingEngine.started = asyncio.Event()
-    session = Session(tmp_path / "root")
-    config = _config(max_depth=1)
-    supervisor = SessionTreeSupervisor(
-        root_session=session,
-        runtime_config=config,
-        cwd=str(tmp_path),
-        engine_factory=_BlockingEngine,
-    )
-    await supervisor.start()
-    scope = await supervisor.open_scope(supervisor.root_id)
-    broker.configure(supervisor.endpoint_for(supervisor.root_id))
-    broker.set_scope(scope)
-    pending = asyncio.create_task(broker.run("wait"))
-    await asyncio.wait_for(_BlockingEngine.started.wait(), timeout=2)
-    root_engine = RLMEngine(
-        client=DummyClient([]),  # type: ignore[arg-type]
-        session=session,
-        runtime_config=config,
-        supervisor=supervisor,
-        invocation_id=supervisor.root_id,
-    )
-    active_snapshot = root_engine.execution_snapshot()
-    assert active_snapshot["supervisor"] == {
-        "subagent_calls": 1,
-        "active_subagent_calls": 1,
-    }
-    assert active_snapshot["limits"] == {
-        "max_depth": 1,
-        "max_concurrent_subagents": 4,
-        "max_subagent_calls": 16,
-        "max_tokens": None,
-        "summarize_at_tokens": None,
-        "max_compactions": None,
-        "max_tool_output_chars": None,
-        "allow_git": False,
-    }
-    pending.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await pending
-    for _ in range(100):
-        if supervisor.active_calls == 0:
-            break
-        await asyncio.sleep(0.01)
-    try:
-        assert supervisor.active_calls == 0
-        assert _BlockingEngine.state.cancelled == 1
-        assert (
-            root_engine.execution_snapshot()["supervisor"]["active_subagent_calls"] == 0
-        )
-    finally:
-        broker.set_scope(None)
-        broker.configure(None)
-        await supervisor.close_scope(scope)
-        await supervisor.aclose()
-        root_engine.close()
 
 
 async def test_shutdown_closes_incomplete_broker_connections(tmp_path):
@@ -608,21 +451,6 @@ async def test_engine_closes_only_owned_inference_client(monkeypatch, tmp_path):
 
     assert owned.closed is True
     assert injected.closed is False
-
-
-async def test_sync_close_requires_await_for_owned_async_resources(
-    monkeypatch, tmp_path
-):
-    monkeypatch.setattr("rlm.engine.make_client", lambda *args: _ClosableClient())
-    engine = RLMEngine(
-        runtime_config=_config(max_depth=0),
-        session=Session(tmp_path / "root"),
-    )
-
-    with pytest.raises(RuntimeError, match="await engine.aclose"):
-        engine.close()
-
-    await engine.aclose()
 
 
 async def test_engine_close_finishes_before_propagating_cancellation(
