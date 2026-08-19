@@ -127,6 +127,23 @@ def _minimal_prompt(
     return "\n".join(parts)
 
 
+
+def _ultraterse_prompt(cwd, installed_skills, *, allow_recursion, active_tools):
+    """The absolute-minimum prompt: role + cwd + one line naming the REPL and edit skill."""
+    parts = [
+        "You are an agent that solves tasks by running code.",
+        f"Working directory: {cwd}",
+        "Your tool is a persistent Python REPL (use `%%bash` at the top of a cell for shell).",
+    ]
+    if "edit" in (installed_skills or []):
+        parts.append("Edit files with `await edit(path=..., old_str=..., new_str=...)`.")
+    if allow_recursion:
+        parts.append("Spawn a sub-agent with `await rlm('sub-task')`.")
+    if _should_include_git_history_guard(active_tools):
+        parts.append(GIT_HISTORY_GUARD_PROMPT)
+    return "\n".join(parts)
+
+
 def build_system_prompt(
     cwd: str,
     skills_dir: str | None,
@@ -144,6 +161,8 @@ def build_system_prompt(
     per-tool schemas, so redundant tool guidance here just inflates
     every request.
     """
+    if os.environ.get("RLM_PROMPT_TACTIC") == "ultraterse":
+        return _ultraterse_prompt(cwd, installed_skills, allow_recursion=allow_recursion, active_tools=active_tools)
     if os.environ.get("RLM_MINIMAL_PROMPT"):
         return _minimal_prompt(
             cwd, skills_dir, installed_skills, messages_path,
