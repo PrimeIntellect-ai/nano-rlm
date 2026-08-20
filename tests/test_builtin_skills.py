@@ -68,3 +68,43 @@ def test_search_format_results():
 
 def test_search_format_results_empty():
     assert format_results([], "q") == "No results returned for query: q"
+
+
+from rlm.skills.search_mixedbread import format_results as format_mb_results
+from rlm.skills.search_mixedbread import run as run_search_mixedbread
+
+
+def test_search_mixedbread_enable_writes_stub(tmp_path):
+    assert "search_mixedbread" in available_builtin_skills()
+    assert enable_builtin_skills(["search_mixedbread"], tmp_path) == ["search_mixedbread"]
+    assert (tmp_path / "search_mixedbread.py").read_text() == (
+        "from rlm.skills.search_mixedbread import run\n"
+    )
+
+
+async def test_search_mixedbread_missing_api_key_returns_error(monkeypatch):
+    monkeypatch.delenv("MIXEDBREAD_API_KEY", raising=False)
+    result = await run_search_mixedbread(query="anything")
+    assert "MIXEDBREAD_API_KEY" in result
+
+
+def test_search_mixedbread_format_results():
+    chunks = [
+        {
+            "text": "Page title\n\nRelevant excerpts from the page content...",
+            "score": 0.95,
+            "filename": "https://example.com/article",
+            "metadata": {"title": "Page Title", "url": "https://example.com/article"},
+        },
+        {"text": "Another result body", "score": 0.7, "filename": "https://example.org/x", "metadata": {}},
+    ]
+    out = format_mb_results(chunks, "q")
+    assert "Result 1: Page Title" in out
+    assert "URL: https://example.com/article" in out
+    assert "Score: 0.95" in out
+    assert "Content: Page title\n\nRelevant excerpts from the page content..." in out
+    assert "Result 2: Untitled" in out
+
+
+def test_search_mixedbread_format_results_empty():
+    assert format_mb_results([], "q") == "No results returned for query: q"
