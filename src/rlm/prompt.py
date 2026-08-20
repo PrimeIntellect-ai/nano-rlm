@@ -78,6 +78,12 @@ SEARCH_SKILL_PROMPT = (
     "assign the result to a variable so you can revisit it. To cover "
     "several angles at once, fan out with `asyncio.gather(search(...), search(...))`."
 )
+SEARCH_MIXEDBREAD_SKILL_PROMPT = (
+    "For web search with page-content excerpts, use the pre-imported async "
+    "`search_mixedbread` skill from IPython: `await search_mixedbread(query=\"...\")` "
+    "(needs MIXEDBREAD_API_KEY). Results come back as title, URL, relevance score, and "
+    "a content excerpt per result; assign the result to a variable so you can revisit it."
+)
 
 
 def build_system_prompt(
@@ -130,6 +136,8 @@ def build_system_prompt(
             skill_lines.append(EDIT_SKILL_PROMPT)
         if "search" in installed_skills:
             skill_lines.append(SEARCH_SKILL_PROMPT)
+        if "search_mixedbread" in installed_skills:
+            skill_lines.append(SEARCH_MIXEDBREAD_SKILL_PROMPT)
     if skill_lines:
         parts.extend(["", *skill_lines])
 
