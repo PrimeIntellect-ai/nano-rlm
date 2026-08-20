@@ -28,7 +28,6 @@ def _prompt(
         "/repo",
         None,
         installed_skills or [],
-        "/repo/.rlm/messages.jsonl",
         allow_recursion=False,
         active_tools=active_tools,
         cli_skills=cli_skills,

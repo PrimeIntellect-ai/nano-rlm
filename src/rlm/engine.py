@@ -367,8 +367,7 @@ class RLMEngine:
 
             self._active_tools = get_active_builtin_tools()
             self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
-            messages_path = str(self.session.dir / "messages.jsonl")
-            system_prompt = self._load_system_prompt(messages_path, self._active_tools)
+            system_prompt = self._load_system_prompt(self._active_tools)
 
             self._messages = [
                 {"role": "system", "content": system_prompt},
@@ -681,16 +680,13 @@ class RLMEngine:
         self._branch_start_turn = turn + 1
         self._metrics.turns_since_last_compaction = 0
 
-    def _load_system_prompt(
-        self, messages_path: str, active_tools: list[BuiltinTool]
-    ) -> str:
+    def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         if self.system_prompt_path:
             return Path(self.system_prompt_path).read_text()
         system_prompt = build_system_prompt(
             self.cwd,
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
-            messages_path,
             allow_recursion=self.depth < self.max_depth,
             active_tools=active_tools,
             cli_skills=get_installed_skills(),
