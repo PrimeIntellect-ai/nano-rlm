@@ -175,6 +175,16 @@ def _bashedit_prompt(installed_skills, *, active_tools):
             )
         if "edit" in (installed_skills or []):
             parts.append(BASH_EDIT_EDIT_SKILL_LINE)
+    notice = os.environ.get("RLM_COMPACT_NOTICE", "")
+    if notice in ("know", "stash"):
+        parts.append(
+            "The conversation may be compacted when it grows long; the IPython kernel survives "
+            "compaction — variables persist, the transcript does not."
+        )
+    if notice == "stash":
+        parts.append(
+            "Keep key findings (paths, root causes, plans) in named Python variables so they survive."
+        )
     return " ".join(parts)
 
 
