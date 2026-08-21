@@ -164,6 +164,10 @@ def _bashedit_prompt(installed_skills, *, active_tools):
         parts.append(BASH_EDIT_IPYTHON_LINE)
         if "bash" not in names and "bash" in (installed_skills or []):
             parts.append(BASH_EDIT_BASH_SKILL_LINE)
+        elif "bash" not in names and os.environ.get("RLM_BASHEDIT_BASH_MAGIC"):
+            parts.append(
+                "In the ipython tool, run shell commands with `%%bash` as the very first line of a cell."
+            )
         if "edit" in (installed_skills or []):
             parts.append(BASH_EDIT_EDIT_SKILL_LINE)
     return " ".join(parts)
