@@ -61,11 +61,8 @@ def test_ipython_control_prompt_included_for_ipython_tool():
     prompt = _prompt([_Tool("ipython")])
 
     assert IPYTHON_CONTROL_PROMPT in prompt
-    assert "long-lived notebook" in prompt
-    assert "native runtime" in prompt
-    assert "use `%%bash` cells" in prompt
-    assert "must be the first line of the code cell" in prompt
-    assert "do not install dependencies into the IPython kernel" in prompt
+    assert "`%%bash` as the very first line" in prompt
+    assert "project's own environment" in prompt
 
 
 def test_ipython_control_prompt_omitted_without_ipython_tool():
