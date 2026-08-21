@@ -172,6 +172,51 @@ async def test_total_call_limit_is_atomic(tmp_path):
     )
 
 
+async def test_cancel_while_awaiting_registry_lock_closes_child_session(
+    tmp_path, monkeypatch
+):
+    """A child cancelled between session creation and engine start leaks nothing."""
+    from rlm import supervisor as supervisor_module
+
+    created: list[Session] = []
+
+    class _RecordingSession(Session):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    monkeypatch.setattr(supervisor_module, "Session", _RecordingSession)
+    session = Session(tmp_path / "root")
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=_config(max_depth=1, max_concurrent=2),
+        cwd=str(tmp_path),
+        engine_factory=_FastEngine,
+    )
+    await supervisor.start()
+    scope = await supervisor.open_scope(supervisor.root_id)
+    endpoint = supervisor.endpoint_for(supervisor.root_id)
+    try:
+        # Admission takes and releases the registry lock itself; take it only
+        # afterwards so the spawned child task blocks right after creating its
+        # session dir, then cancel it in that window.
+        task = await supervisor._start_child(endpoint.capability, scope, "x")
+        async with supervisor._lock:
+            await asyncio.sleep(0.05)
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        await supervisor.close_scope(scope)
+        await supervisor.aclose()
+        session.close()
+
+    assert len(created) == 1
+    assert created[0]._msg_file.closed
+    assert supervisor._invocations == {}
+    assert supervisor._capabilities == {}
+
+
 async def test_saturated_nested_calls_do_not_deadlock(tmp_path):
     session = Session(tmp_path / "root")
     supervisor = SessionTreeSupervisor(

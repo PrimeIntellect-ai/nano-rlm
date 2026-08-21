@@ -328,14 +328,16 @@ class SessionTreeSupervisor:
                 mcp_servers=parent.mcp_servers,
             )
             parent.session.log_sub_spawn(child_session.dir.name, "(brokered rlm())")
-            async with self._lock:
-                if self._closed:
-                    child_session.close()
-                    raise asyncio.CancelledError
-                self._invocations[child_id] = child
-                self._parents[child_id] = parent_id
-                self._capabilities[child.capability] = child_id
+            # Everything from session creation to here is synchronous; the try
+            # must start before the first await so a cancellation while waiting
+            # for the lock still closes the session and clears the registry.
             try:
+                async with self._lock:
+                    if self._closed:
+                        raise asyncio.CancelledError
+                    self._invocations[child_id] = child
+                    self._parents[child_id] = parent_id
+                    self._capabilities[child.capability] = child_id
                 factory = self._engine_factory
                 if factory is None:
                     from rlm.engine import RLMEngine
@@ -351,10 +353,13 @@ class SessionTreeSupervisor:
                 )
                 return await engine.run(prompt)
             finally:
+                # Close synchronously first: the lock acquisition below can be
+                # interrupted by a second cancellation, but the session handle
+                # must be released regardless.
+                child_session.close()
                 async with self._lock:
                     self._capabilities.pop(child.capability, None)
                     self._invocations.pop(child.id, None)
-                child_session.close()
 
     async def _handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
