@@ -36,11 +36,13 @@ GIT_HISTORY_GUARD_PROMPT = (
     "`--glob`, `--alternate-refs`, `--reflog`, `--walk-reflogs`, or `-g` will "
     "be refused."
 )
+PROJECT_ENV_PROMPT = (
+    "Run project code through the project's own environment "
+    "(e.g. `uv run ...`, `.venv/bin/python ...`), not the kernel's."
+)
 IPYTHON_CONTROL_PROMPT = (
     "Run shell commands with `%%bash` as the very first line of a code cell "
-    "(no comments, imports, or statements before it). Run project code through "
-    "the project's own environment (e.g. `uv run ...`, `.venv/bin/python ...`), "
-    "not the kernel's."
+    "(no comments, imports, or statements before it). " + PROJECT_ENV_PROMPT
 )
 EDIT_SKILL_PROMPT = (
     "For targeted existing-file edits, prefer the pre-imported async `edit` "
@@ -73,8 +75,18 @@ def build_system_prompt(
     per-tool schemas, so redundant tool guidance here just inflates
     every request.
     """
+    has_bash = _has_tool(active_tools, "bash")
+    has_ipython = _has_tool(active_tools, "ipython")
+    role = "You are a coding agent."
+    if has_bash:
+        role += " You have access to a bash tool for running shell commands."
+    if has_ipython:
+        role += (
+            " You also have an ipython tool: a persistent Python REPL "
+            "(variables, imports, and function definitions persist across calls)."
+        )
     parts: list[str] = [
-        "You are a coding agent. Your tool is a persistent IPython REPL: variables, imports, and function definitions persist across calls.",
+        role,
         "When you are done, stop calling tools and state your final answer.",
         "",
         f"Working directory: {cwd}",
@@ -117,8 +129,10 @@ def build_system_prompt(
             ]
         )
 
-    if _has_tool(active_tools, "ipython"):
+    if has_ipython and not has_bash:
         parts.extend(["", IPYTHON_CONTROL_PROMPT])
+    elif has_ipython:
+        parts.extend(["", PROJECT_ENV_PROMPT])
 
     if _should_include_git_history_guard(active_tools):
         parts.extend(["", GIT_HISTORY_GUARD_PROMPT])

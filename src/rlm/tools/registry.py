@@ -1,29 +1,57 @@
 """Builtin tool registry.
 
-rlm exposes a single builtin tool: the persistent IPython REPL. Shell work and file edits
-go through it (``!cmd`` / ``%%bash``, Python, or the built-in ``edit`` skill). The tool set
-is not configurable.
+rlm's default tool set is a native ``bash`` tool plus the persistent IPython REPL:
+plain shell work goes through ``bash``; Python logic, skills (e.g. ``edit``), and
+state live in ``ipython``. ``RLM_BUILTIN_TOOLS`` (comma-separated: ``bash``,
+``ipython``) overrides the set, e.g. ``ipython`` for a REPL-only agent.
 """
 
 from __future__ import annotations
 
+import os
+
 from rlm.tools.base import BuiltinTool
+from rlm.tools.bash import BashTool
 from rlm.tools.ipython import IpythonTool
 
-_BUILTIN_TOOLS: tuple[BuiltinTool, ...] = (IpythonTool(),)
-_TOOLS_BY_NAME: dict[str, BuiltinTool] = {tool.name: tool for tool in _BUILTIN_TOOLS}
+# All registered tools by name. Tests (and extensions) may add entries; names
+# listed in RLM_BUILTIN_TOOLS or the default set become active.
+_TOOLS_BY_NAME: dict[str, BuiltinTool] = {
+    "bash": BashTool(),
+    "ipython": IpythonTool(),
+}
+_DEFAULT = ("bash", "ipython")
+
+
+def _selected() -> tuple[BuiltinTool, ...]:
+    spec = os.environ.get("RLM_BUILTIN_TOOLS", "").strip()
+    if spec:
+        names = [n.strip() for n in spec.split(",") if n.strip()]
+        unknown = [n for n in names if n not in _TOOLS_BY_NAME]
+        if unknown:
+            raise ValueError(
+                f"RLM_BUILTIN_TOOLS: unknown tool(s) {unknown}; "
+                f"available: {sorted(_TOOLS_BY_NAME)}"
+            )
+        return tuple(_TOOLS_BY_NAME[n] for n in names)
+    # default: the standard set plus any extra registered tools (fixtures/extensions)
+    extras = [n for n in _TOOLS_BY_NAME if n not in _DEFAULT]
+    return tuple(_TOOLS_BY_NAME[n] for n in [*_DEFAULT, *extras])
 
 
 def get_active_builtin_tools() -> list[BuiltinTool]:
-    """Return the active builtin-tool instances (always just ipython)."""
-    return list(_BUILTIN_TOOLS)
+    """Return the active builtin-tool instances (default: bash + ipython)."""
+    return list(_selected())
 
 
 def get_active_tools() -> list[dict]:
     """Return OpenAI tool schemas for the active builtins."""
-    return [tool.schema() for tool in _BUILTIN_TOOLS]
+    return [tool.schema() for tool in _selected()]
 
 
 def get_builtin_tool(name: str) -> BuiltinTool | None:
     """Look up a builtin tool handler by name (None if unknown)."""
-    return _TOOLS_BY_NAME.get(name)
+    for tool in _selected():
+        if tool.name == name:
+            return tool
+    return None

@@ -45,16 +45,19 @@ logger = logging.getLogger(__name__)
 # the message is compacted in place of them.
 CHECKPOINT_COMPACTION_PROMPT = (
     "You are performing a CONTEXT CHECKPOINT COMPACTION. "
-    "Create a handoff summary for another LLM that will resume the task.\n"
+    "Create a handoff summary another LLM can ACT on immediately to resume the task.\n"
     "\n"
-    "Include:\n"
-    "- Current progress and key decisions made\n"
-    "- Important context, constraints, or user preferences\n"
-    "- What remains to be done (clear next steps)\n"
-    "- Any critical data, examples, or references needed to continue\n"
+    "It MUST contain, as fenced code blocks (not prose):\n"
+    "- The exact shell/test command(s) to reproduce and verify — copy-pasteable, "
+    "with the real path and test filter\n"
+    "- Any edit still to apply, as the concrete "
+    "`await edit(path=..., old_str=..., new_str=...)` call\n"
     "\n"
-    "Be concise, structured, and focused on helping the next LLM "
-    "seamlessly continue the work."
+    "Then:\n"
+    "- A NUMBERED list of remaining next steps\n"
+    "- Current progress, key decisions, and constraints\n"
+    "\n"
+    "Be concise and concrete: prefer runnable commands over descriptions."
 )
 
 # Appended to the checkpoint prompt when the IPython REPL is active.
@@ -200,8 +203,8 @@ class RLMEngine:
         raw_skills = os.environ.get("RLM_SKILLS")
         self.skills = (
             [s.strip() for s in raw_skills.split(",") if s.strip()]
-            if raw_skills
-            else []
+            if raw_skills is not None
+            else ["edit"]
         )
 
         # Token budget
