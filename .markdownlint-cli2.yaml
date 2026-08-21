@@ -1,0 +1,10 @@
+config:
+  MD013: false
+  MD060:
+    style: compact
+overrides:
+  - filter:
+      - CLAUDE.md
+    config:
+      MD041: false
+    combine: merge
