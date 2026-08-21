@@ -37,33 +37,10 @@ GIT_HISTORY_GUARD_PROMPT = (
     "be refused."
 )
 IPYTHON_CONTROL_PROMPT = (
-    "IPython is the agent's long-lived notebook: a persistent control "
-    "environment for reasoning, context management, state, tool orchestration, "
-    "and recursive subcalls. Use it to keep intermediate variables, inspect "
-    "and transform outputs, write small helper functions, and preserve useful "
-    "state across turns or compaction.\n\n"
-    "Do not assume IPython is the native runtime of the external thing being "
-    "investigated. A repository, package, service, dataset, paper, website, "
-    "benchmark, or API may have its own environment and normal interface. "
-    "Evaluate external systems through their own interface, then use IPython "
-    "to coordinate the process and analyze what comes back.\n\n"
-    "When running shell commands from IPython, use `%%bash` cells. If you use "
-    "`%%bash`, it must be the first line of the code cell: no comments, "
-    "spaces, blank lines, imports, or Python statements before it. Avoid "
-    "`!cmd` shell escapes for project commands so shell behavior is explicit "
-    "and multi-line commands share one shell context.\n\n"
-    "Important: do not install dependencies into the IPython kernel just to "
-    "make an external project import or run there. If a project import, test, "
-    "script, CLI, or dependency check is needed, run it through that project's "
-    "own environment and normal command interface. For example, in a Python "
-    "repo use its documented commands, `uv run ...`, `.venv/bin/python ...`, "
-    "or the active project interpreter from the repo root. Treat failures from "
-    "that native environment as the relevant result."
-    "\n\n"
-    "Use Python for reading, searching, and editing files — it gives you "
-    "reusable variables you can slice, filter, and act on without re-reading. "
-    "Always assign read/search results to named variables so you can revisit "
-    "them later."
+    "Run shell commands with `%%bash` as the very first line of a code cell "
+    "(no comments, imports, or statements before it). Run project code through "
+    "the project's own environment (e.g. `uv run ...`, `.venv/bin/python ...`), "
+    "not the kernel's."
 )
 EDIT_SKILL_PROMPT = (
     "For targeted existing-file edits, prefer the pre-imported async `edit` "
@@ -97,8 +74,7 @@ def build_system_prompt(
     every request.
     """
     parts: list[str] = [
-        "You are a general purpose agent that uses code to solve tasks.",
-        "You solve tasks by breaking down problems into sub-tasks, writing and executing code, observing results, and iterating one step at a time.",
+        "You are a coding agent. Your tool is a persistent IPython REPL: variables, imports, and function definitions persist across calls.",
         "When you are done, stop calling tools and state your final answer.",
         "",
         f"Working directory: {cwd}",
