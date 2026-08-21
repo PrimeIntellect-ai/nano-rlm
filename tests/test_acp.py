@@ -16,6 +16,7 @@ import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall
 from rlm.acp import (
+    CONTRACT_METADATA_KEY,
     RUNTIME_METADATA_KEY,
     SESSION_METADATA_KEY,
     RLMACPAgent,
@@ -632,7 +633,7 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert initialized.agent_capabilities.mcp_capabilities.http is True
     assert initialized.agent_capabilities.load_session is False
     assert initialized.agent_capabilities.field_meta is None
-    assert initialized.field_meta is None
+    assert initialized.field_meta == {CONTRACT_METADATA_KEY: True}
 
     created = await agent.new_session(
         str(tmp_path),
@@ -777,5 +778,6 @@ async def test_acp_stdio_lifecycle(tmp_path):
         closed = await connection.close_session(created.session_id)
 
     assert initialized.agent_info.name == "rlm"
+    assert initialized.field_meta == {CONTRACT_METADATA_KEY: True}
     assert created.field_meta is None
     assert closed.field_meta[SESSION_METADATA_KEY]["session_id"] == "wire-session"

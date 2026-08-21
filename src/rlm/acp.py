@@ -51,6 +51,7 @@ from rlm.config import (
 from rlm.mcp import MCPHTTPServer, MCPServer, MCPStdioServer
 from rlm.session import Session
 
+CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
 
@@ -153,12 +154,17 @@ def _validation_fields(error: ValidationError) -> list[str]:
     return [".".join(str(part) for part in item["loc"]) for item in error.errors()]
 
 
-def _runtime_config(field_meta: Any) -> tuple[RuntimeConfig, str]:
-    if not isinstance(field_meta, dict):
+def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
+    """Extract the runtime contract from ``session/new`` metadata.
+
+    The ACP router spreads the request's ``_meta`` object into the handler's
+    keyword arguments, so ``new_session``'s ``**kwargs`` is the wire ``_meta``.
+    """
+    if not isinstance(meta_kwargs, dict):
         raise RequestError.invalid_params({"reason": "ACP _meta must be an object"})
     try:
         payload = _RuntimeMetadata.model_validate(
-            field_meta.get(RUNTIME_METADATA_KEY),
+            meta_kwargs.get(RUNTIME_METADATA_KEY),
         )
     except ValidationError as error:
         raise RequestError.invalid_params(
@@ -256,6 +262,7 @@ class RLMACPAgent(Agent):
                 ),
             ),
             agent_info=Implementation(name="rlm", title="RLM", version=version("rlm")),
+            field_meta={CONTRACT_METADATA_KEY: True},
         )
 
     async def new_session(

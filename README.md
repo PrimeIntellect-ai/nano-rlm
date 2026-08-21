@@ -55,27 +55,26 @@ reconstructed after the ACP process exits, so clients must keep the process
 alive for the lifetime of a session.
 
 RLM's ACP surface is a versioned training contract, not a compatibility layer
-over the standalone CLI. Clients must require the exact
-`ai.prime.rlm/contract-v1` marker during `initialize`, then provide one complete
-`ai.prime.rlm/runtime-v1` object in `session/new._meta`. The runtime object
-contains the lineage session ID, model, provider, execution policy, prompt
-configuration, enabled built-in skills, explicit kernel environment, and
-optional search credential. Nullable and disabled values are sent explicitly
-as `null` or empty collections. Missing, partial, unknown, or unsupported
-contracts are rejected; ACP sessions never fall back to process environment
-configuration.
+over the standalone CLI. `initialize` advertises the exact
+`ai.prime.rlm/contract-v1` marker in its response `_meta`; clients must require
+it, then provide one complete `ai.prime.rlm/runtime-v1` object in
+`session/new._meta`. The runtime object contains the lineage session ID, model,
+provider, execution policy, prompt configuration, enabled built-in skills,
+explicit kernel environment, and optional search credential. Nullable and
+disabled values are sent explicitly as `null` or empty collections. Missing,
+partial, unknown, or unsupported contracts are rejected; ACP sessions never
+fall back to process environment configuration.
 
 Credentials travel over the private ACP stdio channel and are never echoed.
-`session/new`, `session/prompt`, and `session/close` responses carry cumulative,
-credential-free snapshots under `ai.prime.rlm/session-v1`; only the close
-snapshot with `final: true` is authoritative for training metrics.
+The `session/close` response carries one authoritative, credential-free
+snapshot of cumulative usage, metrics, tool-call stats, supervisor counters,
+and limits under `ai.prime.rlm/session-v1`.
 
-Every inference request carries versioned `X-RLM-*` provenance headers for its
-session, invocation, prompt segment, logical call, causal parent, depth, and
-call kind (`turn` or `compaction`). IDs remain stable across transport retries
-and recursion inherits the spawning call and segment. These headers are
-observability metadata, not authorization, and are visible to the configured
-inference endpoint.
+Every actual model call carries a standard HTTP `Idempotency-Key` header that
+stays stable across SDK and outer retries (retry attempts are distinguished by
+`x-stainless-retry-count`), so an inference proxy can deduplicate replayed
+requests. Both header names are reserved and rejected in provider
+configuration.
 
 ## Python SDK
 
