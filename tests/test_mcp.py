@@ -1,24 +1,26 @@
-"""Tests for MCP-tools-as-skills (``rlm.mcp``).
-
-Covers config parsing, JSON-schema → signature rendering, generation of importable skill
-modules, and a live stdio transport round-trip. The streamable-HTTP path is exercised
-end-to-end by the general-agent-v1 eval.
-"""
+"""Tests for supervisor-owned MCP tools exposed as IPython skills."""
 
 from __future__ import annotations
 
-import importlib
+import asyncio
 import inspect
 import json
+import os
 import sys
-from contextlib import asynccontextmanager
 from pathlib import Path
-from types import SimpleNamespace
 
-from mcp.types import Tool
 import pytest
 
+from conftest import DummyClient, DummyMessage, DummyToolCall, tool_result
 from rlm import mcp
+from rlm.config import (
+    ExecutionPolicy,
+    InvocationContext,
+    ProviderConfig,
+    RuntimeConfig,
+)
+from rlm.engine import RLMEngine
+from rlm.session import Session
 
 SCHEMA = {
     "type": "object",
@@ -31,6 +33,39 @@ SCHEMA = {
 }
 
 
+def _config() -> RuntimeConfig:
+    return RuntimeConfig(
+        model="test-model",
+        provider=ProviderConfig(base_url="http://interceptor", api_key="secret"),
+        invocation=InvocationContext(),
+        policy=ExecutionPolicy(),
+    )
+
+
+def _stdio_server(prefix: str = "stdio") -> dict:
+    return {
+        "command": sys.executable,
+        "args": [str(Path(__file__).parent / "fixtures" / "mcp_stdio.py")],
+        "env": {"TEST_PREFIX": prefix},
+    }
+
+
+def _blocking_stdio_server() -> dict:
+    return {
+        "command": sys.executable,
+        "args": [str(Path(__file__).parent / "fixtures" / "mcp_blocking_stdio.py")],
+        "env": {},
+    }
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def test_load_mcp_servers(monkeypatch):
     monkeypatch.delenv(mcp.MCP_CONFIG_ENV, raising=False)
     assert mcp.load_mcp_servers() == {}
@@ -41,16 +76,16 @@ def test_load_mcp_servers(monkeypatch):
     )
     servers = mcp.load_mcp_servers()
     assert servers == {
-        "tools": "http://h/mcp",
-        "web": {
-            "url": "http://h/web",
-            "headers": {"Authorization": "secret"},
-        },
-        "local": {
-            "command": "/bin/server",
-            "args": ["--stdio"],
-            "env": {"TOKEN": "secret"},
-        },
+        "tools": mcp.MCPHTTPServer(url="http://h/mcp"),
+        "web": mcp.MCPHTTPServer(
+            url="http://h/web",
+            headers={"Authorization": "secret"},
+        ),
+        "local": mcp.MCPStdioServer(
+            command="/bin/server",
+            args=["--stdio"],
+            env={"TOKEN": "secret"},
+        ),
     }
     assert json.loads(mcp.dump_mcp_servers(servers)) == {
         "mcpServers": {
@@ -67,62 +102,16 @@ def test_load_mcp_servers(monkeypatch):
         }
     }
 
-
-async def test_stdio_transport(monkeypatch, tmp_path):
-    server_cwd = tmp_path / "server"
-    server_cwd.mkdir()
-    caller_cwd = tmp_path / "caller"
-    caller_cwd.mkdir()
-    server = {
-        "command": sys.executable,
-        "args": [str(Path(__file__).parent / "fixtures" / "mcp_stdio.py")],
-        "env": {"TEST_PREFIX": "stdio"},
-    }
-    found = await mcp.discover_tools({"local": server}, str(server_cwd))
-    skills_dir = tmp_path / "skills"
-    mcp.write_skill_modules(found, skills_dir, str(server_cwd))
-    monkeypatch.setenv(mcp.MCP_CONFIG_ENV, mcp.dump_mcp_servers({"local": server}))
-    monkeypatch.chdir(caller_cwd)
-
-    assert list(found) == ["local_echo"]
-    sys.path.insert(0, str(skills_dir))
-    try:
-        skill = importlib.import_module("local_echo")
-        assert await skill.run(text="hello") == f"stdio:True:{server_cwd}:hello"
-    finally:
-        sys.path.remove(str(skills_dir))
-        sys.modules.pop("local_echo", None)
-
-
-def test_skill_name():
-    assert mcp._skill_name("tools", "add_event") == "tools_add_event"
-    assert mcp._skill_name("web", "search.run") == "web_search_run"
-    assert mcp._skill_name("", "2fa") == "_2fa"
-
-
-async def test_discover_tools_rejects_normalized_name_collision(monkeypatch):
-    class FakeSession:
-        async def initialize(self):
-            pass
-
-        async def list_tools(self):
-            return SimpleNamespace(
-                tools=[Tool(name="search", description="", inputSchema={})]
-            )
-
-    @asynccontextmanager
-    async def fake_client_session(server, cwd=None):
-        yield FakeSession()
-
-    monkeypatch.setattr(mcp, "_client_session", fake_client_session)
-
-    with pytest.raises(ValueError, match="MCP tool name collision.*a_b_search"):
-        await mcp.discover_tools({"a-b": "one", "a_b": "two"})
+    monkeypatch.setenv(
+        mcp.MCP_CONFIG_ENV,
+        '{"mcpServers":{"bad":{"url":123,"command":"also-bad"}}}',
+    )
+    with pytest.raises(ValueError):
+        mcp.load_mcp_servers()
 
 
 def test_build_signature():
     params = mcp.build_signature(SCHEMA).parameters
-    # non-identifier property is skipped; required comes before optional.
     assert list(params) == ["day", "count"]
     assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params.values())
     assert params["day"].default is inspect.Parameter.empty
@@ -131,21 +120,112 @@ def test_build_signature():
     assert params["count"].annotation is int
 
 
-def test_write_skill_modules(tmp_path):
-    tool = Tool(
-        name="add_event", description="Add an event.\ndetails", inputSchema=SCHEMA
+async def test_real_kernel_uses_mcp_without_transport_secrets(monkeypatch, tmp_path):
+    server_cwd = tmp_path / "server"
+    server_cwd.mkdir()
+    session = Session(tmp_path / "session")
+    servers = {"local": _stdio_server("stdio-secret")}
+    monkeypatch.setenv(mcp.MCP_CONFIG_ENV, mcp.dump_mcp_servers(servers))
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": """
+import inspect, os, subprocess
+print(await local_echo(text='hello'))
+print(inspect.signature(local_echo))
+print('RLM_MCP_CONFIG' not in os.environ)
+print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
+"""
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
     )
-    names = mcp.write_skill_modules({"tools_add_event": ("tools", tool)}, tmp_path)
-    assert names == ["tools_add_event"]
-    # the directory is the source of truth — the modules are readable back from it.
-    assert mcp.list_skill_modules(tmp_path) == ["tools_add_event"]
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(),
+        cwd=str(server_cwd),
+    )
 
-    sys.path.insert(0, str(tmp_path))
-    try:
-        module = importlib.import_module("tools_add_event")
-        assert inspect.iscoroutinefunction(module.run)
-        assert str(inspect.signature(module.run)) == "(*, day: str, count: int = None)"
-        assert module.run.__doc__ == "Add an event.\ndetails"
-    finally:
-        sys.path.remove(str(tmp_path))
-        sys.modules.pop("tools_add_event", None)
+    result = await engine.run("use the tool")
+
+    assert result.answer == "done"
+    assert tool_result(client).strip().splitlines() == [
+        f"stdio-secret:True:{server_cwd}:hello",
+        "(*, text: str)",
+        "True",
+        "True",
+    ]
+    source = (session.dir / "local_echo.py").read_text()
+    assert "stdio-secret" not in source
+    assert str(Path(__file__).parent / "fixtures" / "mcp_stdio.py") not in source
+    meta = json.loads((session.dir / "meta.json").read_text())
+    assert meta["programmatic_tool_call_stats"]["python_total"] == 1
+    assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"local_echo": 1}
+
+
+async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_path):
+    marker = tmp_path / "started"
+    session = Session(tmp_path / "session")
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {"code": f"await local_wait(marker={str(marker)!r})"},
+                    )
+                ]
+            ),
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {"code": "print(await local_echo(text='reused'))"},
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(),
+        mcp_servers={"local": _blocking_stdio_server()},
+        cwd=str(tmp_path),
+    )
+
+    pending = asyncio.create_task(engine.prompt("wait"))
+    for _ in range(100):
+        if marker.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert marker.exists()
+    server_pid = int(marker.read_text())
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(pending, timeout=10)
+    for _ in range(100):
+        if not _process_exists(server_pid):
+            break
+        await asyncio.sleep(0.02)
+
+    result = await engine.prompt("retry")
+    await engine.aclose()
+
+    assert _process_exists(server_pid) is False
+    assert result.answer == "done"
+    tool_messages = [
+        message for message in client.calls[-1]["messages"] if message["role"] == "tool"
+    ]
+    assert tool_messages[-1]["content"].strip() == "reused"
+    meta = json.loads((session.dir / "meta.json").read_text())
+    assert meta["programmatic_tool_call_stats"]["python_total"] == 2

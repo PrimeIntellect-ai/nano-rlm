@@ -302,3 +302,30 @@ def test_ipython_tool_passes_through_non_git():
     ctx.repl = StubRepl()
     outcome = IpythonTool().execute({"code": "print(1+1)"}, ctx)
     assert outcome.content == "ran: print(1+1)"
+
+
+def test_ipython_tool_uses_explicit_execution_policy(monkeypatch):
+    from rlm.tools.ipython import IpythonTool
+
+    class StubRepl:
+        def execute(self, code, timeout):
+            return "abcdefgh"
+
+    monkeypatch.setenv("RLM_ALLOW_GIT", "1")
+    monkeypatch.setenv("RLM_MAX_TOOL_OUTPUT_CHARS", "100")
+    ctx = _ctx()
+    ctx.repl = StubRepl()
+    ctx.allow_git = False
+    ctx.max_tool_output_chars = 4
+
+    refused = IpythonTool().execute({"code": "!git log --all"}, ctx)
+    truncated = IpythonTool().execute({"code": "print('ignored')"}, ctx)
+
+    assert refused.content == REFUSAL
+    assert truncated.content == "ab\n...[4 chars truncated]...\ngh"
+    assert (
+        "Default: 17s"
+        in IpythonTool(17).schema()["function"]["parameters"]["properties"]["timeout"][
+            "description"
+        ]
+    )
