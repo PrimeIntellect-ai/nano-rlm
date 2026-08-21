@@ -128,6 +128,36 @@ def _minimal_prompt(
 
 
 
+
+BASH_EDIT_REPLICA = (
+    "You are a coding agent. You have access to a bash tool for running shell commands."
+)
+BASH_EDIT_EDIT_LINE = (
+    "You also have an edit tool for single-occurrence string replacement in a file."
+)
+BASH_EDIT_IPYTHON_LINE = (
+    "You also have an ipython tool: a persistent Python REPL (variables persist across calls)."
+)
+BASH_EDIT_EDIT_SKILL_LINE = (
+    "In the ipython tool, edit files with `await edit(path=..., old_str=..., new_str=...)` "
+    "(single-occurrence string replacement)."
+)
+
+
+def _bashedit_prompt(installed_skills, *, active_tools):
+    """Replicate the verifiers bash-harness system prompt, extended only by one line per
+    extra capability (ipython tool / edit skill). For interface ablations."""
+    names = {tool.name for tool in active_tools}
+    parts = [BASH_EDIT_REPLICA]
+    if "edit" in names:
+        parts.append(BASH_EDIT_EDIT_LINE)
+    if "ipython" in names:
+        parts.append(BASH_EDIT_IPYTHON_LINE)
+        if "edit" in (installed_skills or []):
+            parts.append(BASH_EDIT_EDIT_SKILL_LINE)
+    return " ".join(parts)
+
+
 def _ultraterse_prompt(cwd, installed_skills, *, allow_recursion, active_tools):
     """The absolute-minimum prompt: role + cwd + one line naming the REPL and edit skill."""
     parts = [
@@ -161,6 +191,8 @@ def build_system_prompt(
     per-tool schemas, so redundant tool guidance here just inflates
     every request.
     """
+    if os.environ.get("RLM_PROMPT_TACTIC") == "bashedit":
+        return _bashedit_prompt(installed_skills, active_tools=active_tools)
     if os.environ.get("RLM_PROMPT_TACTIC") == "ultraterse":
         return _ultraterse_prompt(cwd, installed_skills, allow_recursion=allow_recursion, active_tools=active_tools)
     if os.environ.get("RLM_MINIMAL_PROMPT"):
