@@ -144,15 +144,26 @@ BASH_EDIT_EDIT_SKILL_LINE = (
 )
 
 
+BASH_EDIT_BASH_SKILL_LINE = (
+    "In the ipython tool, run shell commands with `await bash(command=...)` — do not use "
+    "`%%bash` or `!` escapes."
+)
+
+
 def _bashedit_prompt(installed_skills, *, active_tools):
     """Replicate the verifiers bash-harness system prompt, extended only by one line per
     extra capability (ipython tool / edit skill). For interface ablations."""
     names = {tool.name for tool in active_tools}
-    parts = [BASH_EDIT_REPLICA]
+    if "bash" in names:
+        parts = [BASH_EDIT_REPLICA]
+    else:
+        parts = ["You are a coding agent."]
     if "edit" in names:
         parts.append(BASH_EDIT_EDIT_LINE)
     if "ipython" in names:
         parts.append(BASH_EDIT_IPYTHON_LINE)
+        if "bash" not in names and "bash" in (installed_skills or []):
+            parts.append(BASH_EDIT_BASH_SKILL_LINE)
         if "edit" in (installed_skills or []):
             parts.append(BASH_EDIT_EDIT_SKILL_LINE)
     return " ".join(parts)

@@ -12,6 +12,7 @@ from pathlib import Path
 
 # Built-in skill name -> module its ``run`` is re-exported from.
 _BUILTIN_SKILLS: dict[str, str] = {
+    "bash": "rlm.skills.bash",
     "edit": "rlm.skills.edit",
     "search": "rlm.skills.search",
 }
