@@ -65,7 +65,7 @@ def resolve_provider() -> tuple[str | None, str | None, dict[str, str]]:
     return PI_INFERENCE_BASE_URL, "EMPTY", {}
 
 
-def make_client() -> AsyncOpenAI:
+def make_client(depth: int | None = None) -> AsyncOpenAI:
     """Create an AsyncOpenAI client from environment variables.
 
     See ``resolve_provider`` for provider precedence. Tags every outbound
@@ -75,7 +75,8 @@ def make_client() -> AsyncOpenAI:
     record them in the rollout's trajectory.
     """
     base_url, api_key, extra_headers = resolve_provider()
-    headers = {"X-RLM-Depth": os.environ.get("RLM_DEPTH", "0"), **extra_headers}
+    rlm_depth = os.environ.get("RLM_DEPTH", "0") if depth is None else str(depth)
+    headers = {"X-RLM-Depth": rlm_depth, **extra_headers}
     return AsyncOpenAI(
         base_url=base_url,
         api_key=api_key,

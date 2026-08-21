@@ -16,6 +16,7 @@ from conftest import (
     tool_result,
 )
 
+import rlm.client as client_module
 from rlm.engine import RLMEngine
 
 
@@ -92,3 +93,48 @@ def test_ipython_kernel_does_not_inherit_parent_stdio(session, capfd):
     assert captured.out == ""
     assert captured.err == ""
     assert result.strip() == "4 14"
+
+
+def test_ipython_recursion_context_ignores_env_mutation(session):
+    from rlm.tools.ipython import IPythonREPL
+
+    repl = IPythonREPL(
+        cwd=str(session.dir),
+        session=session,
+        depth=1,
+        max_depth=1,
+    )
+    repl.start()
+    try:
+        output = repl.execute(
+            "import os\n"
+            "os.environ['RLM_DEPTH'] = '0'\n"
+            "os.environ['RLM_MAX_DEPTH'] = '5'\n"
+            "print('preloaded', 'rlm' in globals())\n"
+            "import rlm\n"
+            "result = await rlm('too deep', client=object())\n"
+            "print(result.answer)"
+        )
+    finally:
+        repl.shutdown()
+
+    assert output.splitlines() == [
+        "preloaded False",
+        "[depth limit 1 reached, cannot start]",
+    ]
+
+
+def test_client_uses_explicit_depth_for_request_header(monkeypatch):
+    kwargs = {}
+
+    def fake_client(**client_kwargs):
+        kwargs.update(client_kwargs)
+        return object()
+
+    monkeypatch.setenv("RLM_API_KEY", "test-key")
+    monkeypatch.setenv("RLM_DEPTH", "0")
+    monkeypatch.setattr(client_module, "AsyncOpenAI", fake_client)
+
+    client_module.make_client(depth=2)
+
+    assert kwargs["default_headers"]["X-RLM-Depth"] == "2"
