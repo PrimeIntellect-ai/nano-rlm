@@ -82,7 +82,6 @@ def build_system_prompt(
     cwd: str,
     skills_dir: str | None,
     installed_skills: list[str],
-    messages_path: str,
     *,
     allow_recursion: bool,
     allow_git: bool,
@@ -102,7 +101,7 @@ def build_system_prompt(
         "When you are done, stop calling tools and state your final answer.",
         "",
         f"Working directory: {cwd}",
-        f"Conversation log: {messages_path}",
+        "Conversation log: $RLM_SESSION_DIR/messages.jsonl",
         f"Pre-installed Python packages: {', '.join(BASE_TOOLKIT)}.",
         "Install additional packages with `uv pip install <pkg>` (this is a uv-managed venv with no pip module).",
     ]
