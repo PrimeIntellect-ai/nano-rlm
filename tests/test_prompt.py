@@ -62,7 +62,7 @@ def test_ipython_control_prompt_included_for_ipython_tool():
 
     assert IPYTHON_CONTROL_PROMPT in prompt
     assert "`%%bash` as the very first line" in prompt
-    assert "project's own environment" in prompt
+    assert "project's interpreter" in prompt
 
 
 def test_ipython_control_prompt_omitted_without_ipython_tool():

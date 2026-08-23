@@ -37,8 +37,9 @@ GIT_HISTORY_GUARD_PROMPT = (
     "be refused."
 )
 PROJECT_ENV_PROMPT = (
-    "Run project code through the project's own environment "
-    "(e.g. `uv run ...`, `.venv/bin/python ...`), not the kernel's."
+    "The ipython kernel is an isolated venv without the project's packages — "
+    "never import project modules there. Everything that executes project code "
+    "(tests, repros, imports) goes through bash with the project's interpreter."
 )
 IPYTHON_CONTROL_PROMPT = (
     "Run shell commands with `%%bash` as the very first line of a code cell "
