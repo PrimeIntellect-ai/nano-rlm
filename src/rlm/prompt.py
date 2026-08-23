@@ -45,11 +45,9 @@ IPYTHON_CONTROL_PROMPT = (
     "(no comments, imports, or statements before it). " + PROJECT_ENV_PROMPT
 )
 EDIT_SKILL_PROMPT = (
-    "For targeted existing-file edits, prefer the pre-imported async `edit` "
-    "skill from IPython: `old = '''...'''; new = '''...'''; await "
-    'edit(path="pkg/file.py", old_str=old, new_str=new)`. Use exact '
-    "old/new strings; if the text contains triple double quotes, use triple "
-    "single-quoted variables or build `old`/`new` from inspected file slices."
+    "Inside ipython you can also edit files with the pre-imported async `edit` "
+    'skill: `await edit(path="pkg/file.py", old_str=..., new_str=...)` — handy '
+    "for multiline or quote-heavy replacements built from Python strings."
 )
 SEARCH_SKILL_PROMPT = (
     "For web search, use the pre-imported async `search` skill from IPython: "
@@ -76,10 +74,16 @@ def build_system_prompt(
     every request.
     """
     has_bash = _has_tool(active_tools, "bash")
+    has_edit = _has_tool(active_tools, "edit")
     has_ipython = _has_tool(active_tools, "ipython")
     role = "You are a coding agent."
     if has_bash:
         role += " You have access to a bash tool for running shell commands."
+    if has_edit:
+        role += (
+            " You also have an edit tool for single-occurrence string "
+            "replacement in a file."
+        )
     if has_ipython:
         role += (
             " You also have an ipython tool: a persistent Python REPL "
@@ -112,6 +116,12 @@ def build_system_prompt(
             skill_lines.append(
                 f"Skills with shell commands: {commands}. "
                 "Discover CLI usage with `<skill> --help`."
+            )
+        if "bash" in installed_skills and _has_tool(active_tools, "bash"):
+            skill_lines.append(
+                "Inside ipython you can also run shell with `await bash(command=...)` — "
+                "it returns the output as a string, useful when mixing shell and Python "
+                "in one cell or avoiding shell quoting."
             )
         if "edit" in installed_skills:
             skill_lines.append(EDIT_SKILL_PROMPT)

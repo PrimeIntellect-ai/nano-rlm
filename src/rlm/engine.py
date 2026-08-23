@@ -204,7 +204,7 @@ class RLMEngine:
         self.skills = (
             [s.strip() for s in raw_skills.split(",") if s.strip()]
             if raw_skills is not None
-            else ["edit"]
+            else ["bash", "edit"]
         )
 
         # Token budget

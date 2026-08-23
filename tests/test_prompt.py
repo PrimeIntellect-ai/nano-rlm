@@ -73,8 +73,7 @@ def test_edit_skill_prompt_included_only_when_edit_is_installed():
     prompt = _prompt([_Tool("ipython")], installed_skills=["edit"])
 
     assert EDIT_SKILL_PROMPT in prompt
-    assert 'await edit(path="pkg/file.py", old_str=old, new_str=new)' in prompt
-    assert "triple double quotes" in prompt
+    assert 'await edit(path="pkg/file.py", old_str=..., new_str=...)' in prompt
     assert EDIT_SKILL_PROMPT not in _prompt(
         [_Tool("ipython")], installed_skills=["search_docs"]
     )

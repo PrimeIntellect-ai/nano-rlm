@@ -1,9 +1,9 @@
 """Builtin tool registry.
 
-rlm's default tool set is a native ``bash`` tool plus the persistent IPython REPL:
-plain shell work goes through ``bash``; Python logic, skills (e.g. ``edit``), and
-state live in ``ipython``. ``RLM_BUILTIN_TOOLS`` (comma-separated: ``bash``,
-``ipython``) overrides the set, e.g. ``ipython`` for a REPL-only agent.
+rlm's default tool set is native ``bash`` and ``edit`` tools plus the persistent
+IPython REPL. Shell and edits are ALSO available as REPL skills (``await bash(...)``,
+``await edit(...)``) for mixing with Python in one cell. ``RLM_BUILTIN_TOOLS``
+(comma-separated) overrides the set, e.g. ``ipython`` for a REPL-only agent.
 """
 
 from __future__ import annotations
@@ -11,16 +11,17 @@ from __future__ import annotations
 import os
 
 from rlm.tools.base import BuiltinTool
-from rlm.tools.bash import BashTool
+from rlm.tools.bash import BashTool, EditTool
 from rlm.tools.ipython import IpythonTool
 
 # All registered tools by name. Tests (and extensions) may add entries; names
 # listed in RLM_BUILTIN_TOOLS or the default set become active.
 _TOOLS_BY_NAME: dict[str, BuiltinTool] = {
     "bash": BashTool(),
+    "edit": EditTool(),
     "ipython": IpythonTool(),
 }
-_DEFAULT = ("bash", "ipython")
+_DEFAULT = ("bash", "edit", "ipython")
 
 
 def _selected() -> tuple[BuiltinTool, ...]:
