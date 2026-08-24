@@ -25,6 +25,8 @@ class ToolContext:
     total_usage: TokenUsage
     last_prompt_tokens: int
     exec_timeout: int
+    max_tool_output_chars: int | None = None
+    allow_git: bool = False
     repl: Any | None = None
     state: dict[str, Any] = field(default_factory=dict)
     cwd: str = ""

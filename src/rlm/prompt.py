@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from rlm.tools.git_block import allow_git
-
 if TYPE_CHECKING:
     from rlm.tools.base import BuiltinTool
 
@@ -86,8 +84,9 @@ def build_system_prompt(
     installed_skills: list[str],
     *,
     allow_recursion: bool,
+    allow_git: bool,
     active_tools: list[BuiltinTool],
-    cli_skills: list[str] | None = None,
+    shell_skills: list[str] | None = None,
 ) -> str:
     """Build the system prompt.
 
@@ -119,12 +118,15 @@ def build_system_prompt(
             "Each skill is an async function by the same name. "
             "Inspect with `help(<skill>)` or `inspect.signature(<skill>.run)`."
         )
-        if cli_skills:
-            commands = ", ".join(f"`{skill}`" for skill in cli_skills)
+        shell_skill_set = set(shell_skills or [])
+        if shell_skill_set:
+            names = ", ".join(f"`{name}`" for name in sorted(shell_skill_set))
             skill_lines.append(
-                f"Skills with shell commands: {commands}. "
-                "Discover CLI usage with `<skill> --help`."
+                f"Shell-enabled installed skills: {names}. Discover CLI usage with "
+                "`<skill> --help`. Other listed skills are IPython-only."
             )
+        else:
+            skill_lines.append("The listed skills are IPython-only.")
         if "edit" in installed_skills:
             skill_lines.append(EDIT_SKILL_PROMPT)
         if "search" in installed_skills:
@@ -144,7 +146,7 @@ def build_system_prompt(
     if _has_tool(active_tools, "ipython"):
         parts.extend(["", IPYTHON_CONTROL_PROMPT])
 
-    if _should_include_git_history_guard(active_tools):
+    if _should_include_git_history_guard(active_tools, allow_git):
         parts.extend(["", GIT_HISTORY_GUARD_PROMPT])
 
     if active_tools:
@@ -153,8 +155,10 @@ def build_system_prompt(
     return "\n".join(parts)
 
 
-def _should_include_git_history_guard(active_tools: list["BuiltinTool"]) -> bool:
-    if allow_git():
+def _should_include_git_history_guard(
+    active_tools: list["BuiltinTool"], allow_git: bool
+) -> bool:
+    if allow_git:
         return False
     return any(tool.name in SHELL_TOOL_NAMES for tool in active_tools)
 
