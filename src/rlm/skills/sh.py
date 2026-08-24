@@ -33,6 +33,23 @@ async def run(command: str, timeout: int = 120) -> str:
     return await asyncio.to_thread(_run_shell, command, timeout)
 
 
+
+
+def _log_ptc() -> None:
+    """Log a %%sh magic invocation to programmatic_tool_calls.jsonl (PTC accounting)."""
+    import json as _json
+    import os as _os
+    import time as _time
+
+    session_dir = _os.environ.get("RLM_SESSION_DIR", "")
+    if not session_dir:
+        return
+    try:
+        with open(_os.path.join(session_dir, "programmatic_tool_calls.jsonl"), "a") as f:
+            f.write(_json.dumps({"tool": "sh", "source": "magic", "timestamp": _time.time()}) + "\n")
+    except OSError:
+        pass
+
 def _register_magic() -> None:
     try:
         from IPython import get_ipython
@@ -45,6 +62,7 @@ def _register_magic() -> None:
     def sh_cell(line: str, cell: str):
         """%%sh [varname] — run the raw cell body in bash; output returned (and
         assigned to varname when given)."""
+        _log_ptc()
         output = _run_shell(cell)
         name = line.strip()
         if name:
