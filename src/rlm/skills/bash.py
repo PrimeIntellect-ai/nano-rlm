@@ -20,7 +20,9 @@ async def run(command: str, timeout: int = 120) -> str:
     Returns:
         stdout and stderr of the command (with the exit code when nonzero).
     """
-    proc = await asyncio.create_subprocess_shell(
+    proc = await asyncio.create_subprocess_exec(
+        "bash",
+        "-c",
         command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
