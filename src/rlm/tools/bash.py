@@ -62,6 +62,29 @@ def _clip(text: str) -> str:
     return text[:_OUTPUT_LIMIT] + f"\n... [truncated {len(text) - _OUTPUT_LIMIT} chars]"
 
 
+def run_bash(command: str, timeout: int, cwd: str | None = None) -> str:
+    """Guarded ``bash -c`` execution shared by the bash tool and the bash skill."""
+    if not isinstance(command, str) or not command.strip():
+        return "Error: empty command"
+    blocked = find_blocked_command(command)
+    if blocked:
+        return refusal(blocked)
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd or None,
+        )
+    except subprocess.TimeoutExpired:
+        return f"Error: command timed out after {timeout}s"
+    out = proc.stdout + (("\n" + proc.stderr) if proc.stderr else "")
+    if proc.returncode != 0:
+        out += f"\n[exit code {proc.returncode}]"
+    return _clip(out.strip() or "(no output)")
+
+
 class BashTool:
     """One shell command per call, fresh subshell, cwd-anchored."""
 
@@ -71,28 +94,11 @@ class BashTool:
         return BASH_SCHEMA
 
     def execute(self, args: dict[str, Any], context: ToolContext) -> ToolOutcome:
-        command = args.get("command", "")
-        if not isinstance(command, str) or not command.strip():
-            return ToolOutcome(content="Error: empty command")
-        blocked = find_blocked_command(command)
-        if blocked:
-            return ToolOutcome(content=refusal(blocked))
-        try:
-            proc = subprocess.run(
-                ["bash", "-c", command],
-                capture_output=True,
-                text=True,
-                timeout=context.exec_timeout,
-                cwd=context.cwd or None,
+        return ToolOutcome(
+            content=run_bash(
+                args.get("command", ""), context.exec_timeout, cwd=context.cwd
             )
-            out = proc.stdout + (("\n" + proc.stderr) if proc.stderr else "")
-            if proc.returncode != 0:
-                out += f"\n[exit code {proc.returncode}]"
-            return ToolOutcome(content=_clip(out.strip() or "(no output)"))
-        except subprocess.TimeoutExpired:
-            return ToolOutcome(
-                content=f"Error: command timed out after {context.exec_timeout}s"
-            )
+        )
 
 
 class EditTool:

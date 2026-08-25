@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from rlm.skills import available_builtin_skills, enable_builtin_skills
+from rlm.skills.bash import run as bash
 from rlm.skills.edit import run as edit
 from rlm.skills.search import format_results
 from rlm.skills.search import run as run_search
@@ -68,3 +69,14 @@ def test_search_format_results():
 
 def test_search_format_results_empty():
     assert format_results([], "q") == "No results returned for query: q"
+
+
+async def test_bash_skill_enforces_git_history_guard():
+    out = await bash("git log --all --oneline")
+    assert "refused" in out.lower() or "--all" in out
+    assert "commit" not in out.splitlines()[0].lower()
+
+
+async def test_bash_skill_timeout_reports_error():
+    out = await bash("sleep 5", timeout=1)
+    assert "timed out" in out
