@@ -676,7 +676,16 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert first.usage.total_tokens == 5
     assert second.stop_reason == "end_turn"
     assert created.field_meta is None
-    assert first.field_meta is None
+    first_snapshot = first.field_meta[SESSION_METADATA_KEY]
+    assert first_snapshot["session_id"] == "test-session"
+    assert first_snapshot["turns"] == 1
+    assert first_snapshot["usage"]["total_tokens"] == 5
+    assert first_snapshot["last_stop_reason"] == "done"
+    second_snapshot = second.field_meta[SESSION_METADATA_KEY]
+    assert second_snapshot["session_id"] == "test-session"
+    assert second_snapshot["turns"] == 2
+    assert second_snapshot["usage"]["total_tokens"] == 10
+    assert second_snapshot["last_stop_reason"] == "done"
 
     closed = await agent.close_session(created.session_id)
     closed_snapshot = closed.field_meta[SESSION_METADATA_KEY]
