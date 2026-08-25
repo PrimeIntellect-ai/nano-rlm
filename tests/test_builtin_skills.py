@@ -187,3 +187,10 @@ async def test_bash_skill_enforces_git_history_guard():
 async def test_bash_skill_timeout_reports_error():
     out = await bash("sleep 5", timeout=1)
     assert "timed out" in out
+
+
+def test_enable_bash_skill_writes_stub(tmp_path):
+    enabled = enable_builtin_skills(["bash"], tmp_path)
+    assert enabled == ["bash"]
+    stub = (tmp_path / "bash.py").read_text()
+    assert "from rlm.skills.bash import run" in stub
