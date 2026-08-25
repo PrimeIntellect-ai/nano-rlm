@@ -99,7 +99,6 @@ class _LimitsSnapshot(_ContractModel):
     max_tokens: int | None = Field(default=None, gt=0)
     summarize_at_tokens: int | None = Field(default=None, gt=0)
     max_compactions: int | None = Field(default=None, gt=0)
-    max_tool_output_chars: int | None = Field(default=None, gt=0)
     allow_git: bool
 
 

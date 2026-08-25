@@ -141,14 +141,12 @@ class RLMEngine:
         self.model = config.model
         self.cwd = cwd or os.getcwd()
         self.exec_timeout = config.policy.exec_timeout
-        self.max_output = config.policy.max_output
         self.summarize_at_tokens = config.policy.summarize_at_tokens
         self.max_compactions = config.policy.max_compactions
         self.system_prompt_path = config.system_prompt_path
         self.append_to_system_prompt = config.append_to_system_prompt
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
-        self.max_tool_output_chars = config.policy.max_tool_output_chars
         self.allow_git = config.policy.allow_git
 
         # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
@@ -531,9 +529,6 @@ class RLMEngine:
 
             result = tool_result.content
 
-            if self.max_output > 0 and len(result) > self.max_output:
-                result = result[: self.max_output] + "\n... [output truncated]"
-
             self.session.log_tool_result(turn, tool_name, result, duration)
             messages.append(
                 {
@@ -811,7 +806,6 @@ class RLMEngine:
                 "max_tokens": self.runtime_config.policy.max_tokens,
                 "summarize_at_tokens": self.runtime_config.policy.summarize_at_tokens,
                 "max_compactions": self.runtime_config.policy.max_compactions,
-                "max_tool_output_chars": self.runtime_config.policy.max_tool_output_chars,
                 "allow_git": self.runtime_config.policy.allow_git,
             },
         }
@@ -840,7 +834,6 @@ class RLMEngine:
             total_usage=self._total_usage,
             last_prompt_tokens=self._last_prompt_tokens,
             exec_timeout=self.exec_timeout,
-            max_tool_output_chars=self.max_tool_output_chars,
             allow_git=self.allow_git,
             repl=self._repl,
             state=self._tool_state,
