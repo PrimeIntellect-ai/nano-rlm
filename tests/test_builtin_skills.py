@@ -16,6 +16,7 @@ from rlm.config import (
 )
 from rlm.engine import RLMEngine
 from rlm.skills import available_builtin_skills, enable_builtin_skills
+from rlm.skills.bash import run as bash
 from rlm.skills.edit import run as edit
 from rlm.skills.search import format_results
 from rlm.skills.search import run as run_search
@@ -155,3 +156,23 @@ print('SERPER_API_KEY=' not in child_env)
     assert secret not in source
     meta = json.loads((session.dir / "meta.json").read_text())
     assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"search": 1}
+
+
+async def test_bash_returns_output():
+    assert await bash("echo hello") == "hello"
+
+
+async def test_bash_runs_real_bash_not_sh():
+    # process substitution is a bashism that /bin/sh (dash) rejects
+    out = await bash("cat <(echo bashism-works)")
+    assert "bashism-works" in out
+
+
+async def test_bash_nonzero_exit_reported():
+    out = await bash("exit 3")
+    assert "[exit code 3]" in out
+
+
+async def test_bash_combines_stderr():
+    out = await bash("echo out && echo err >&2")
+    assert "out" in out and "err" in out
