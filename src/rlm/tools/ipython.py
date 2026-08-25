@@ -160,23 +160,13 @@ class IpythonTool:
             )
 
         return ToolOutcome(
-            content=self._maybe_truncate_output(
-                context.repl.execute(code, timeout=timeout),
-                context.max_tool_output_chars,
-            ),
+            content=context.repl.execute(code, timeout=timeout),
             metric_events=metric_events,
         )
 
     @staticmethod
     def _count_nonempty_lines(code: str) -> int:
         return sum(1 for line in code.splitlines() if line.strip())
-
-    @staticmethod
-    def _maybe_truncate_output(content: str, cap: int | None) -> str:
-        if cap is None or len(content) <= cap:
-            return content
-        head, tail = cap // 2, cap - cap // 2
-        return f"{content[:head]}\n...[{len(content) - cap} chars truncated]...\n{content[-tail:]}"
 
 
 class IPythonREPL:

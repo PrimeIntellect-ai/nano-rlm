@@ -41,13 +41,11 @@ def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
         "policy": {
             "max_depth": 0,
             "exec_timeout": 300,
-            "max_output": -1,
             "max_tokens": None,
             "summarize_at_tokens": None,
             "max_compactions": None,
             "max_concurrent_subagents": 4,
             "max_subagent_calls": 64,
-            "max_tool_output_chars": None,
             "allow_git": False,
         },
         "system_prompt_path": None,
@@ -141,7 +139,6 @@ class _Engine:
                 "max_tokens": None,
                 "summarize_at_tokens": None,
                 "max_compactions": None,
-                "max_tool_output_chars": None,
                 "allow_git": False,
             },
         }
