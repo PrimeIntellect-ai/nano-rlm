@@ -13,8 +13,6 @@ import subprocess
 
 from rlm.tools.git_block import find_blocked_command, refusal
 
-_OUTPUT_LIMIT = 30_000
-
 
 def _default_timeout() -> int:
     raw = os.environ.get("RLM_EXEC_TIMEOUT", "")
