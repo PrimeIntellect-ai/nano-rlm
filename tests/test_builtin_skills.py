@@ -176,3 +176,14 @@ async def test_bash_nonzero_exit_reported():
 async def test_bash_combines_stderr():
     out = await bash("echo out && echo err >&2")
     assert "out" in out and "err" in out
+
+
+async def test_bash_skill_enforces_git_history_guard():
+    out = await bash("git log --all --oneline")
+    assert "refused" in out.lower() or "--all" in out
+    assert "commit" not in out.splitlines()[0].lower()
+
+
+async def test_bash_skill_timeout_reports_error():
+    out = await bash("sleep 5", timeout=1)
+    assert "timed out" in out
