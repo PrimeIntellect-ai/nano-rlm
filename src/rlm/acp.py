@@ -365,6 +365,7 @@ class RLMACPAgent(Agent):
                     input_tokens=result.usage.prompt_tokens,
                     output_tokens=result.usage.completion_tokens,
                 ),
+                field_meta=_session_metadata(state),
             )
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
