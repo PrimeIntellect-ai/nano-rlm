@@ -36,12 +36,7 @@ def _run_bash(command: str, timeout: int) -> str:
     out = proc.stdout + (("\n" + proc.stderr) if proc.stderr else "")
     if proc.returncode != 0:
         out += f"\n[exit code {proc.returncode}]"
-    out = out.strip() or "(no output)"
-    if len(out) > _OUTPUT_LIMIT:
-        out = (
-            out[:_OUTPUT_LIMIT] + f"\n... [truncated {len(out) - _OUTPUT_LIMIT} chars]"
-        )
-    return out
+    return out.strip() or "(no output)"
 
 
 async def run(command: str, timeout: int | None = None) -> str:
