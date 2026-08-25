@@ -53,14 +53,6 @@ EDIT_SCHEMA = {
     },
 }
 
-_OUTPUT_LIMIT = 30_000
-
-
-def _clip(text: str) -> str:
-    if len(text) <= _OUTPUT_LIMIT:
-        return text
-    return text[:_OUTPUT_LIMIT] + f"\n... [truncated {len(text) - _OUTPUT_LIMIT} chars]"
-
 
 def run_bash(command: str, timeout: int, cwd: str | None = None) -> str:
     """Guarded ``bash -c`` execution shared by the bash tool and the bash skill."""
@@ -82,7 +74,7 @@ def run_bash(command: str, timeout: int, cwd: str | None = None) -> str:
     out = proc.stdout + (("\n" + proc.stderr) if proc.stderr else "")
     if proc.returncode != 0:
         out += f"\n[exit code {proc.returncode}]"
-    return _clip(out.strip() or "(no output)")
+    return out.strip() or "(no output)"
 
 
 class BashTool:
