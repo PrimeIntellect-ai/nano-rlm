@@ -25,11 +25,10 @@ from rlm.compaction import (
     CHECKPOINT_PROMPT,
     REPL_NOTE,
     SUMMARY_FRAMING,
+    context_error,
     discover_threshold,
     drop_latest_tool_result,
     estimated_tokens,
-    is_context_overflow,
-    threshold_from_error,
 )
 from rlm.config import RuntimeConfig
 from rlm.mcp import MCPServer, load_mcp_servers, validate_mcp_servers
@@ -490,7 +489,7 @@ class RLMEngine:
                 try:
                     await self._compact_branch(messages, turn)
                 except BadRequestError as e:
-                    if not is_context_overflow(e):
+                    if not context_error(e)[0]:
                         raise
                     self._metrics.stop_reason = "request_too_large"
                     final_text = "[request body too large]"
@@ -641,24 +640,21 @@ class RLMEngine:
         self, messages: list[dict], turn: int
     ) -> tuple[Any, TokenUsage]:
         """Complete one turn, with at most one compact-and-retry cycle."""
-        for attempt in range(2):
-            try:
-                response, usage = await self._call_model(messages)
-            except BadRequestError as error:
-                if attempt or not self._can_compact() or not is_context_overflow(error):
-                    raise
-                if threshold := threshold_from_error(error):
-                    self.summarize_at_tokens = threshold
-            else:
-                choice = response.choices[0]
-                if (
-                    attempt
-                    or choice.finish_reason != "length"
-                    or not self._should_compact(usage)
-                ):
-                    return response, usage
-            await self._compact_branch(messages, turn)
-        raise AssertionError("unreachable")
+        try:
+            response, usage = await self._call_model(messages)
+        except BadRequestError as error:
+            overflow, threshold = context_error(error)
+            if not self._can_compact() or not overflow:
+                raise
+            if threshold is not None:
+                self.summarize_at_tokens = threshold
+        else:
+            choice = response.choices[0]
+            if choice.finish_reason != "length" or not self._should_compact(usage):
+                return response, usage
+
+        await self._compact_branch(messages, turn)
+        return await self._call_model(messages)
 
     async def _compact_branch(
         self,
@@ -696,7 +692,7 @@ class RLMEngine:
                 response, usage = await self._call_model(checkpoint, checkpoint=True)
                 break
             except BadRequestError as e:
-                if not is_context_overflow(e) or not drop_latest_tool_result(messages):
+                if not context_error(e)[0] or not drop_latest_tool_result(messages):
                     raise
 
         summary_text = response.choices[0].message.content or ""

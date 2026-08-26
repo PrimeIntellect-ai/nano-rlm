@@ -15,7 +15,7 @@ from conftest import (
     DummyToolCall,
     DummyUsage,
 )
-from rlm.compaction import DROPPED_TOOL_RESULT, threshold_from_error
+from rlm.compaction import DROPPED_TOOL_RESULT, context_error
 from rlm.config import (
     CompactionConfig,
     ExecutionPolicy,
@@ -67,7 +67,7 @@ def test_threshold_is_learned_from_provider_error():
         body={"error": {"message": "maximum context length is 32,768 tokens"}},
     )
 
-    assert threshold_from_error(error) == 29_491
+    assert context_error(error) == (True, 29_491)
 
 
 class _ScriptedClient(DummyClient):

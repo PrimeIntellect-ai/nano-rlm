@@ -61,17 +61,14 @@ _WINDOW_PATTERNS = (
 _window_cache: dict[tuple[str, str], int | None] = {}
 
 
-def is_context_overflow(error: BadRequestError) -> bool:
-    details = f"{error} {error.body or ''}".casefold()
-    return any(marker in details for marker in _OVERFLOW_MARKERS)
-
-
-def threshold_from_error(error: BadRequestError) -> int | None:
+def context_error(error: BadRequestError) -> tuple[bool, int | None]:
     details = f"{error} {error.body or ''}"
+    overflow = any(marker in details.casefold() for marker in _OVERFLOW_MARKERS)
     for pattern in _WINDOW_PATTERNS:
         if match := pattern.search(details):
-            return default_threshold(int(match.group(1).replace(",", "")))
-    return None
+            window = int(match.group(1).replace(",", ""))
+            return overflow, default_threshold(window)
+    return overflow, None
 
 
 def default_threshold(context_window: int) -> int:
