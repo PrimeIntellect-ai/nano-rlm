@@ -8,8 +8,8 @@ commands like ``git status`` and ``git diff``.
 - split a bash command on ``&&``, ``||``, ``;`` and ``|``
 - if a segment invokes ``git log`` with a restricted history flag, refuse
 
-The ``RLM_ALLOW_GIT=1`` env var disables the check entirely for backwards
-compatibility with environments that already opted out of git restrictions.
+Standalone execution can disable the guard with ``RLM_ALLOW_GIT=1``. Managed
+execution passes the resolved policy explicitly.
 """
 
 from __future__ import annotations
@@ -56,14 +56,18 @@ def allow_git() -> bool:
     return os.environ.get("RLM_ALLOW_GIT") == "1"
 
 
-def find_blocked_command(command: str) -> str | None:
+def _git_allowed(explicit: bool | None) -> bool:
+    return allow_git() if explicit is None else explicit
+
+
+def find_blocked_command(command: str, *, allow_git: bool | None = None) -> str | None:
     """Return the offending token if ``command`` asks for broad git history.
 
     Splits on ``&&``, ``||``, ``;``, ``|`` so chained calls like
     ``cd /repo && git log --all`` are caught. Returns ``None`` if nothing is
-    blocked or if ``RLM_ALLOW_GIT=1``.
+    blocked or if the resolved policy allows unrestricted history.
     """
-    if allow_git():
+    if _git_allowed(allow_git):
         return None
     for segment in _SEPARATORS.split(command):
         blocked = find_blocked_git_log_option(_split_segment(segment))
@@ -142,10 +146,10 @@ _ANY_LINE_MAGIC_RE = re.compile(r"^\s*%[A-Za-z]")
 _ANY_CELL_MAGIC_RE = re.compile(r"^\s*%%[A-Za-z]")
 
 
-def find_blocked_in_ipython(code: str) -> str | None:
+def find_blocked_in_ipython(code: str, *, allow_git: bool | None = None) -> str | None:
     """Scan IPython ``code`` for blocked commands.
 
-    Two passes, both honoring ``RLM_ALLOW_GIT=1``:
+    Two passes, both honoring the resolved git policy:
 
     1. Shell-escape scan — ``!cmd`` / ``!!cmd``, ``%sx`` / ``%system``
        line magics, ``%%bash`` / ``%%sh`` cell magic. Each extracted
@@ -155,14 +159,14 @@ def find_blocked_in_ipython(code: str) -> str | None:
        and the obvious aliases. See that function for documented bypasses
        (dynamic ``getattr``, multi-hop reassignment, etc.).
     """
-    if allow_git():
+    if _git_allowed(allow_git):
         return None
 
     lines = code.splitlines()
     in_bash_cell = False
     for line in lines:
         if in_bash_cell:
-            blocked = find_blocked_command(line)
+            blocked = find_blocked_command(line, allow_git=allow_git)
             if blocked is not None:
                 return blocked
             continue
@@ -171,11 +175,11 @@ def find_blocked_in_ipython(code: str) -> str | None:
             continue
         m = _SHELL_ESCAPE_RE.match(line) or _SHELL_LINE_MAGIC_RE.match(line)
         if m:
-            blocked = find_blocked_command(m.group("rest"))
+            blocked = find_blocked_command(m.group("rest"), allow_git=allow_git)
             if blocked is not None:
                 return blocked
 
-    return find_blocked_python(code)
+    return find_blocked_python(code, allow_git=allow_git)
 
 
 # Statically-resolved fully-qualified callees that shell out when invoked
@@ -193,12 +197,14 @@ _BLOCKED_PY_CALLS = frozenset(
 )
 
 
-def _blocked_option_from_python_call(node: ast.Call) -> str | None:
+def _blocked_option_from_python_call(
+    node: ast.Call, *, allow_git: bool | None
+) -> str | None:
     if not node.args:
         return None
     arg = node.args[0]
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-        return find_blocked_command(arg.value)
+        return find_blocked_command(arg.value, allow_git=allow_git)
     if isinstance(arg, (ast.List, ast.Tuple)) and arg.elts:
         argv: list[str] = []
         for elt in arg.elts:
@@ -223,12 +229,13 @@ class _GitCallFinder(ast.NodeVisitor):
     ``__import__(\"subprocess\").run(...)``) are explicitly out of scope.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, allow_git: bool | None) -> None:
         # Maps local name -> canonical "module.attr" string.
         self.module_aliases: dict[str, str] = {"subprocess": "subprocess", "os": "os"}
         # Maps local name -> blocked callee fqn (e.g. "run" -> "subprocess.run").
         self.callable_aliases: dict[str, str] = {}
         self.found: str | None = None
+        self.allow_git = allow_git
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -263,7 +270,7 @@ class _GitCallFinder(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         fqn = self._resolve_callee(node.func)
         if fqn in _BLOCKED_PY_CALLS:
-            blocked = _blocked_option_from_python_call(node)
+            blocked = _blocked_option_from_python_call(node, allow_git=self.allow_git)
             if blocked is not None:
                 self.found = blocked
         self.generic_visit(node)
@@ -308,21 +315,21 @@ def _strip_ipython_only(code: str) -> str:
     return "\n".join(out)
 
 
-def find_blocked_python(code: str) -> str | None:
+def find_blocked_python(code: str, *, allow_git: bool | None = None) -> str | None:
     """Detect restricted pure-Python git invocations via AST walk.
 
     Returns the offending token (``\"--all\"`` etc.) if a blocked call is found,
-    else ``None``. Honors ``RLM_ALLOW_GIT=1``. Ipython-only syntax
+    else ``None``. Honors the resolved git policy. Ipython-only syntax
     (``!cmd``, ``%magic``, ``obj?``) is stripped before parsing so
     cells mixing ipython and Python still get scanned. Returns ``None``
     on ``SyntaxError`` so the normal exec path surfaces the parse error.
     """
-    if allow_git():
+    if _git_allowed(allow_git):
         return None
     try:
         tree = ast.parse(_strip_ipython_only(code))
     except SyntaxError:
         return None
-    finder = _GitCallFinder()
+    finder = _GitCallFinder(allow_git)
     finder.visit(tree)
     return finder.found

@@ -5,13 +5,18 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
+
+
+NonNegativeInt = Annotated[int, Field(ge=0, strict=True)]
 
 
 @dataclass
 class TokenUsage:
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    prompt_tokens: NonNegativeInt = 0
+    completion_tokens: NonNegativeInt = 0
 
     @property
     def total(self) -> int:
@@ -80,9 +85,11 @@ class ProgrammaticToolCallStats:
         return stats
 
     @classmethod
-    def from_meta(cls, meta: dict) -> ProgrammaticToolCallStats:
+    def from_meta(
+        cls, meta: dict, field: str = "programmatic_tool_call_stats"
+    ) -> ProgrammaticToolCallStats:
         """Load tool-call stats previously persisted via ``to_dict``."""
-        raw = meta.get("programmatic_tool_call_stats", {})
+        raw = meta.get(field, {})
         return cls(
             python_total=int(raw.get("python_total", 0)),
             bash_total=int(raw.get("bash_total", 0)),
@@ -252,4 +259,4 @@ class RLMResult:
     answer: str
     session_dir: Path | None = None
     usage: TokenUsage = field(default_factory=TokenUsage)
-    turns: int = 0
+    turns: NonNegativeInt = 0

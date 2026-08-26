@@ -17,6 +17,7 @@ from conftest import (
 )
 
 from rlm.engine import RLMEngine
+from rlm.tools.ipython import IPythonREPL
 
 
 async def test_valid_tool(session):
@@ -74,17 +75,15 @@ async def test_tool_raises(session):
 
 def test_ipython_kernel_does_not_inherit_parent_stdio(session, capfd):
     """Kernel writes outside IOPub must not corrupt an enclosing ACP transport."""
-    from rlm.tools.ipython import IPythonREPL
-
     repl = IPythonREPL(cwd=str(session.dir), session=session)
     repl.start()
     try:
-        result = repl.execute(
+        repl.execute(
             "import os; "
             "stdout_written = os.write(1, b'123\\n'); "
-            "stderr_written = os.write(2, b'kernel stderr\\n'); "
-            "print(stdout_written, stderr_written)"
+            "stderr_written = os.write(2, b'kernel stderr\\n')"
         )
+        result = repl.execute("print(stdout_written, stderr_written)")
     finally:
         repl.shutdown()
 
@@ -112,3 +111,46 @@ def test_tooling_presets(monkeypatch):
 
     with pytest.raises(ValueError):
         preset_tools()
+
+
+def test_real_kernel_and_subprocess_receive_only_explicit_environment(
+    monkeypatch, session
+):
+    from jupyter_client import KernelManager
+
+    original_init = KernelManager.__init__
+
+    def init_with_host_kernel_environment(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self.kernel_spec.env = {
+            "KERNELSPEC_SENTINEL": "hidden",
+            "RLM_API_KEY": "kernelspec-secret",
+        }
+
+    monkeypatch.setattr(KernelManager, "__init__", init_with_host_kernel_environment)
+    monkeypatch.setenv("SUPERVISOR_ONLY", "hidden")
+    monkeypatch.setenv("SERPER_API_KEY", "search-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ambient-cloud-secret")
+    repl = IPythonREPL(
+        cwd=str(session.dir),
+        session=session,
+        kernel_env={"TASK_VISIBLE": "yes"},
+    )
+    repl.start()
+    code = f"""
+import os, subprocess
+child_env = subprocess.check_output(['env'], text=True)
+print(os.environ.get('TASK_VISIBLE'))
+print(all(name not in os.environ for name in ('SUPERVISOR_ONLY', 'SERPER_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'KERNELSPEC_SENTINEL', 'RLM_API_KEY')))
+print(all(f'{{name}}=' not in child_env for name in ('SUPERVISOR_ONLY', 'SERPER_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'KERNELSPEC_SENTINEL', 'RLM_API_KEY')))
+print(all(os.environ.get(name, '').startswith({repl._ipc_dir!r}) for name in ('IPYTHONDIR', 'JUPYTER_CONFIG_DIR', 'JUPYTER_DATA_DIR', 'JUPYTER_RUNTIME_DIR')))
+"""
+    try:
+        first = repl.execute(code)
+        repl.restart_kernel()
+        second = repl.execute(code)
+    finally:
+        repl.shutdown()
+
+    assert first.strip().splitlines() == ["yes", "True", "True", "True"]
+    assert second.strip().splitlines() == ["yes", "True", "True", "True"]

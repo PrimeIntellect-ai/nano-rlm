@@ -12,6 +12,8 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
@@ -20,6 +22,7 @@ from rlm.tools.skills import discover_skills
 from rlm.types import IpythonExecuted
 
 if TYPE_CHECKING:
+    from rlm.broker import BrokerEndpoint
     from rlm.session import Session
 
 
@@ -54,6 +57,58 @@ IPYTHON_SCHEMA = {
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 IPYTHON_TIMEOUT_MAX_SECONDS = 600
+_KERNEL_BASE_ENV_NAMES = {
+    "CURL_CA_BUNDLE",
+    "HOME",
+    "LANG",
+    "LOGNAME",
+    "PATH",
+    "REQUESTS_CA_BUNDLE",
+    "SHELL",
+    "SSL_CERT_FILE",
+    "TERM",
+    "TMPDIR",
+    "TZ",
+    "USER",
+    "VIRTUAL_ENV",
+}
+
+
+def build_kernel_env(
+    task_env: Mapping[str, str] | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    private_dir: str | None = None,
+) -> dict[str, str]:
+    """Build a minimal kernel environment plus explicitly supplied task variables."""
+    source = os.environ if environ is None else environ
+    explicit = dict(task_env or {})
+    invalid_types = [
+        key
+        for key, value in explicit.items()
+        if not isinstance(key, str) or not isinstance(value, str)
+    ]
+    if invalid_types:
+        raise TypeError("kernel environment keys and values must be strings")
+    kernel_env = {
+        key: value
+        for key, value in source.items()
+        if key in _KERNEL_BASE_ENV_NAMES or key.startswith("LC_")
+    }
+    kernel_env.update(explicit)
+    kernel_env["NO_COLOR"] = "1"
+    if private_dir is not None:
+        root = Path(private_dir)
+        private_paths = {
+            "IPYTHONDIR": root / "ipython",
+            "JUPYTER_CONFIG_DIR": root / "jupyter-config",
+            "JUPYTER_DATA_DIR": root / "jupyter-data",
+            "JUPYTER_RUNTIME_DIR": root / "jupyter-runtime",
+        }
+        for path in private_paths.values():
+            path.mkdir(mode=0o700, exist_ok=True)
+        kernel_env.update({name: str(path) for name, path in private_paths.items()})
+    return kernel_env
 
 
 class IpythonTool:
@@ -61,11 +116,11 @@ class IpythonTool:
 
     name = "ipython"
 
+    def __init__(self, exec_timeout: int = 300) -> None:
+        self.exec_timeout = exec_timeout
+
     def schema(self) -> dict[str, Any]:
-        timeout = min(
-            int(os.environ.get("RLM_EXEC_TIMEOUT", "300")),
-            IPYTHON_TIMEOUT_MAX_SECONDS,
-        )
+        timeout = min(self.exec_timeout, IPYTHON_TIMEOUT_MAX_SECONDS)
         schema = copy.deepcopy(IPYTHON_SCHEMA)
         schema["function"]["parameters"]["properties"]["timeout"]["description"] = (
             "Optional timeout in seconds. "
@@ -97,7 +152,7 @@ class IpythonTool:
                 metric_events=metric_events,
             )
 
-        blocked = find_blocked_in_ipython(code)
+        blocked = find_blocked_in_ipython(code, allow_git=context.allow_git)
         if blocked is not None:
             return ToolOutcome(
                 content=refusal(blocked),
@@ -105,24 +160,13 @@ class IpythonTool:
             )
 
         return ToolOutcome(
-            content=self._maybe_truncate_output(
-                context.repl.execute(code, timeout=timeout)
-            ),
+            content=context.repl.execute(code, timeout=timeout),
             metric_events=metric_events,
         )
 
     @staticmethod
     def _count_nonempty_lines(code: str) -> int:
         return sum(1 for line in code.splitlines() if line.strip())
-
-    @staticmethod
-    def _maybe_truncate_output(content: str) -> str:
-        """Truncate ``content`` to ``RLM_MAX_TOOL_OUTPUT_CHARS`` if set (off by default)."""
-        cap = int(os.environ.get("RLM_MAX_TOOL_OUTPUT_CHARS", "-1"))
-        if cap <= 0 or len(content) <= cap:
-            return content
-        head, tail = cap // 2, cap - cap // 2
-        return f"{content[:head]}\n...[{len(content) - cap} chars truncated]...\n{content[-tail:]}"
 
 
 class IPythonREPL:
@@ -132,11 +176,17 @@ class IPythonREPL:
         self,
         cwd: str,
         session: "Session | None" = None,
-        env: dict[str, str] | None = None,
+        kernel_env: Mapping[str, str] | None = None,
+        depth: int | None = None,
+        max_depth: int | None = None,
+        broker_endpoint: BrokerEndpoint | None = None,
     ):
         self.cwd = cwd
         self.session = session
-        self.env = env or {}
+        self.kernel_env = dict(kernel_env or {})
+        self.depth = depth
+        self.max_depth = max_depth
+        self.broker_endpoint = broker_endpoint
         self._km = None
         self._kc = None
         self._ipc_dir = None
@@ -161,7 +211,11 @@ class IPythonREPL:
             "-f",
             "{connection_file}",
         ]
-        kernel_env = {**os.environ, **self.env}
+        self._km.kernel_spec.env = {}
+        kernel_env = build_kernel_env(
+            self.kernel_env,
+            private_dir=self._ipc_dir,
+        )
         launcher = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
         launcher_dir = os.path.dirname(os.path.abspath(launcher))
         path_entries = kernel_env.get("PATH", "").split(os.pathsep)
@@ -181,9 +235,15 @@ class IPythonREPL:
     def _inject_startup(self):
         """Set up kernel: cwd, env vars, nest_asyncio, skill pre-imports."""
         session_dir = str(self.session.dir) if self.session else None
-        depth = int(os.environ.get("RLM_DEPTH", "0"))
-        max_depth = int(os.environ.get("RLM_MAX_DEPTH", "0"))
-        allow_recursion = depth < max_depth
+        depth = (
+            int(os.environ.get("RLM_DEPTH", "0")) if self.depth is None else self.depth
+        )
+        max_depth = (
+            int(os.environ.get("RLM_MAX_DEPTH", "0"))
+            if self.max_depth is None
+            else self.max_depth
+        )
+        allow_recursion = depth < max_depth and self.broker_endpoint is not None
         # Pip-installed skills + the MCP-tool modules generated into the session dir (rlm.mcp);
         # the session dir goes on the kernel's sys.path so those import by name.
         skill_names = discover_skills(self.session.dir if self.session else None)
@@ -226,7 +286,7 @@ class _CallableModule(types.ModuleType):
         return await self.run(*args, **kwargs)
 
 
-def _wrap_callable(mod, log_source):
+def _wrap_callable(mod, log_source, register=True):
     # log_source: 'python' for skills (logged to programmatic_tool_calls.jsonl),
     # None for rlm (already aggregated via Session.aggregate_child_metrics).
     wrapped = _CallableModule(mod.__name__)
@@ -244,17 +304,33 @@ def _wrap_callable(mod, log_source):
     # and the file-level module docstring.
     wrapped.__signature__ = inspect.signature(wrapped.run)
     wrapped.__doc__ = wrapped.run.__doc__
-    sys.modules[mod.__name__] = wrapped
+    if register:
+        sys.modules[mod.__name__] = wrapped
     return wrapped
 
 
+if {bool(self.broker_endpoint)!r}:
+    import rlm.broker as _rlm_broker
+    _rlm_broker.configure(_rlm_broker.BrokerEndpoint(
+        {self.broker_endpoint.socket_path if self.broker_endpoint else None!r},
+        {self.broker_endpoint.capability if self.broker_endpoint else None!r},
+    ))
+
 for _name in {skill_names!r}:
-    globals()[_name] = _wrap_callable(__import__(_name), 'python')
+    _module = __import__(_name)
+    _source = None if getattr(_module, '__rlm_brokered__', False) else 'python'
+    globals()[_name] = _wrap_callable(_module, _source)
 
 if {allow_recursion!r}:
-    globals()['rlm'] = _wrap_callable(__import__('rlm'), None)
+    import rlm as _rlm_package
+    globals()['rlm'] = _wrap_callable(_rlm_package, None)
 """
         self._execute_silent(setup_code)
+
+    def set_broker_scope(self, scope_id: str | None) -> None:
+        """Set the active recursive-call scope inside the kernel."""
+        if self.broker_endpoint is not None:
+            self._execute_silent(f"_rlm_broker.set_scope({scope_id!r})")
 
     def _execute_silent(self, code: str):
         """Execute code without capturing output (for setup)."""
@@ -372,8 +448,9 @@ if {allow_recursion!r}:
         if self._kc:
             self._kc.stop_channels()
             self._kc = None
-        if self._km:
+        if self._km and self._km.has_kernel:
             self._km.shutdown_kernel(now=True)
+        if self._km:
             self._km = None
         if self._ipc_dir:
             shutil.rmtree(self._ipc_dir, ignore_errors=True)

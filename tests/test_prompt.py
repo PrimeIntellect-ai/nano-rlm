@@ -22,20 +22,19 @@ def _prompt(
     active_tools: list[_Tool],
     *,
     installed_skills: list[str] | None = None,
-    cli_skills: list[str] | None = None,
+    allow_git: bool = False,
 ) -> str:
     return build_system_prompt(
         "/repo",
         None,
         installed_skills or [],
         allow_recursion=False,
+        allow_git=allow_git,
         active_tools=active_tools,
-        cli_skills=cli_skills,
     )
 
 
-def test_git_history_guard_prompt_included_for_shell_tools(monkeypatch):
-    monkeypatch.delenv("RLM_ALLOW_GIT", raising=False)
+def test_git_history_guard_prompt_included_for_shell_tools():
     prompt = _prompt([_Tool("ipython")])
 
     assert GIT_HISTORY_GUARD_PROMPT in prompt
@@ -45,15 +44,11 @@ def test_git_history_guard_prompt_included_for_shell_tools(monkeypatch):
     assert "`--all`" in prompt
 
 
-def test_git_history_guard_prompt_omitted_when_unrestricted(monkeypatch):
-    monkeypatch.setenv("RLM_ALLOW_GIT", "1")
-
-    assert GIT_HISTORY_GUARD_PROMPT not in _prompt([_Tool("ipython")])
+def test_git_history_guard_prompt_omitted_when_unrestricted():
+    assert GIT_HISTORY_GUARD_PROMPT not in _prompt([_Tool("ipython")], allow_git=True)
 
 
-def test_git_history_guard_prompt_omitted_without_shell_tools(monkeypatch):
-    monkeypatch.delenv("RLM_ALLOW_GIT", raising=False)
-
+def test_git_history_guard_prompt_omitted_without_shell_tools():
     assert GIT_HISTORY_GUARD_PROMPT not in _prompt([_Tool("summarize")])
 
 
@@ -89,12 +84,16 @@ def test_search_skill_prompt_included_only_when_search_is_installed():
     )
 
 
-def test_only_cli_skills_are_advertised_as_shell_commands():
-    prompt = _prompt(
-        [_Tool("ipython")],
-        installed_skills=["installed", "generated"],
-        cli_skills=["installed"],
+def test_prompt_only_advertises_actual_shell_skills():
+    prompt = build_system_prompt(
+        "/repo",
+        None,
+        ["edit", "uploaded"],
+        allow_recursion=False,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+        shell_skills=["uploaded"],
     )
 
-    assert "Skills with shell commands: `installed`" in prompt
-    assert "`generated` --help" not in prompt
+    assert "Shell-enabled installed skills: `uploaded`" in prompt
+    assert "Other listed skills are IPython-only" in prompt

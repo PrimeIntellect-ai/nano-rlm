@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from conftest import DummyClient, DummyMessage, DummyToolCall, tool_result
+
+from rlm.config import (
+    ExecutionPolicy,
+    InvocationContext,
+    ProviderConfig,
+    RuntimeConfig,
+)
+from rlm.engine import RLMEngine
 from rlm.skills import available_builtin_skills, enable_builtin_skills
 from rlm.skills.bash import run as bash
 from rlm.skills.edit import run as edit
@@ -43,12 +54,6 @@ def test_enable_unknown_skill_raises(tmp_path):
         enable_builtin_skills(["nope"], tmp_path)
 
 
-def test_search_enable_writes_stub(tmp_path):
-    assert "search" in available_builtin_skills()
-    assert enable_builtin_skills(["search"], tmp_path) == ["search"]
-    assert (tmp_path / "search.py").read_text() == "from rlm.skills.search import run\n"
-
-
 async def test_search_missing_api_key_returns_error(monkeypatch):
     monkeypatch.delenv("SERPER_API_KEY", raising=False)
     result = await run_search(query="anything")
@@ -71,6 +76,108 @@ def test_search_format_results_empty():
     assert format_results([], "q") == "No results returned for query: q"
 
 
+async def test_real_kernel_search_is_brokered_without_key(monkeypatch, session):
+    secret = "search-secret-do-not-leak"
+    requests = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "organic": [
+                    {
+                        "title": "Result",
+                        "link": "https://example.com",
+                        "snippet": "Found it",
+                    }
+                ]
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            requests.append((url, kwargs))
+            return Response()
+
+    monkeypatch.setattr("rlm.skills.search.httpx.AsyncClient", FakeClient)
+    monkeypatch.setenv("SERPER_API_KEY", secret)
+    config = RuntimeConfig(
+        model="test-model",
+        provider=ProviderConfig(
+            base_url="http://interceptor", api_key="inference-secret"
+        ),
+        invocation=InvocationContext(),
+        policy=ExecutionPolicy(),
+        skills=("search",),
+        search_api_key=secret,
+    )
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": """
+import os, subprocess
+print(await search(query='needle'))
+child_env = subprocess.check_output(['env'], text=True)
+print('SERPER_API_KEY' not in os.environ)
+print('SERPER_API_KEY=' not in child_env)
+"""
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+    )
+
+    result = await engine.run("search")
+
+    output = tool_result(client)
+    assert result.answer == "done"
+    assert "Result 1: Result" in output
+    assert output.strip().splitlines()[-2:] == ["True", "True"]
+    assert requests[0][1]["headers"]["X-API-KEY"] == secret
+    source = (session.dir / "search.py").read_text()
+    assert secret not in source
+    meta = json.loads((session.dir / "meta.json").read_text())
+    assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"search": 1}
+
+
+async def test_bash_returns_output():
+    assert await bash("echo hello") == "hello"
+
+
+async def test_bash_runs_real_bash_not_sh():
+    # process substitution is a bashism that /bin/sh (dash) rejects
+    out = await bash("cat <(echo bashism-works)")
+    assert "bashism-works" in out
+
+
+async def test_bash_nonzero_exit_reported():
+    out = await bash("exit 3")
+    assert "[exit code 3]" in out
+
+
+async def test_bash_combines_stderr():
+    out = await bash("echo out && echo err >&2")
+    assert "out" in out and "err" in out
+
+
 async def test_bash_skill_enforces_git_history_guard():
     out = await bash("git log --all --oneline")
     assert "refused" in out.lower() or "--all" in out
@@ -80,3 +187,10 @@ async def test_bash_skill_enforces_git_history_guard():
 async def test_bash_skill_timeout_reports_error():
     out = await bash("sleep 5", timeout=1)
     assert "timed out" in out
+
+
+def test_enable_bash_skill_writes_stub(tmp_path):
+    enabled = enable_builtin_skills(["bash"], tmp_path)
+    assert enabled == ["bash"]
+    stub = (tmp_path / "bash.py").read_text()
+    assert "from rlm.skills.bash import run" in stub

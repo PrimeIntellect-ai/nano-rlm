@@ -68,9 +68,13 @@ def _selected() -> tuple[BuiltinTool, ...]:
     return tuple(_TOOLS_BY_NAME[n] for n in [*preset, *extras])
 
 
-def get_active_builtin_tools() -> list[BuiltinTool]:
-    """Return the active builtin-tool instances (default: bash + ipython)."""
-    return list(_selected())
+def get_active_builtin_tools(exec_timeout: int = 300) -> list[BuiltinTool]:
+    """Return the active tools (per RLM_TOOLING/RLM_BUILTIN_TOOLS), with an
+    engine-specific IPython schema."""
+    return [
+        IpythonTool(exec_timeout) if tool.name == "ipython" else tool
+        for tool in _selected()
+    ]
 
 
 def get_active_tools() -> list[dict]:

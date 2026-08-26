@@ -10,11 +10,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Built-in skill name -> module its ``run`` is re-exported from.
-_BUILTIN_SKILLS: dict[str, str] = {
+# Built-in skill name -> local module, or ``None`` for a supervisor-owned skill.
+_BUILTIN_SKILLS: dict[str, str | None] = {
     "bash": "rlm.skills.bash",
     "edit": "rlm.skills.edit",
-    "search": "rlm.skills.search",
+    "search": None,
 }
 
 
@@ -24,7 +24,7 @@ def available_builtin_skills() -> list[str]:
 
 
 def enable_builtin_skills(names: list[str], dest_dir: Path) -> list[str]:
-    """Write a re-export module into ``dest_dir`` for each enabled built-in skill.
+    """Write local built-ins into ``dest_dir``; brokered built-ins are skipped.
 
     Returns the enabled names; unknown names raise.
     """
@@ -36,7 +36,6 @@ def enable_builtin_skills(names: list[str], dest_dir: Path) -> list[str]:
         )
     dest_dir.mkdir(parents=True, exist_ok=True)
     for name in names:
-        (dest_dir / f"{name}.py").write_text(
-            f"from {_BUILTIN_SKILLS[name]} import run\n"
-        )
+        if module := _BUILTIN_SKILLS[name]:
+            (dest_dir / f"{name}.py").write_text(f"from {module} import run\n")
     return names

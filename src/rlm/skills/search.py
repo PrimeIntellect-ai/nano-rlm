@@ -7,7 +7,6 @@ skill in research-environments/rlm_browsecomp.
 
 from __future__ import annotations
 
-import asyncio
 import os
 
 import httpx
@@ -32,23 +31,29 @@ def format_results(results, query: str) -> str:
     return "\n\n---\n\n".join(sections)
 
 
-def search(query: str, num_results: int = 5) -> str:
+def search(query: str, num_results: int = 5, *, api_key: str | None = None) -> str:
     """Run a synchronous Serper web search and return formatted results."""
-    api_key = os.environ.get("SERPER_API_KEY", "")
+    if api_key is None:
+        api_key = os.environ.get("SERPER_API_KEY", "")
     if not api_key:
         return "Error: SERPER_API_KEY environment variable is not set"
-    response = httpx.post(
-        SERPER_URL,
-        json={"q": query},
-        headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-        timeout=45,
-    )
-    response.raise_for_status()
+    try:
+        response = httpx.post(
+            SERPER_URL,
+            json={"q": query},
+            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+            timeout=45,
+        )
+        response.raise_for_status()
+    except Exception:
+        raise RuntimeError("web search is unavailable") from None
     organic = response.json().get("organic") or []
     return format_results(organic[:num_results], query)
 
 
-async def run(query: str, *, num_results: int = 5) -> str:
+async def run_with_api_key(
+    api_key: str | None, query: str, *, num_results: int = 5
+) -> str:
     """Run a web search via Serper and return formatted results.
 
     Args:
@@ -58,4 +63,25 @@ async def run(query: str, *, num_results: int = 5) -> str:
     Returns:
         Formatted results (title, URL, snippet).
     """
-    return await asyncio.to_thread(search, query, num_results)
+    if not api_key:
+        return "Error: SERPER_API_KEY environment variable is not set"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                SERPER_URL,
+                json={"q": query},
+                headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+                timeout=45,
+            )
+        response.raise_for_status()
+        organic = response.json().get("organic") or []
+    except Exception:
+        raise RuntimeError("web search is unavailable") from None
+    return format_results(organic[:num_results], query)
+
+
+async def run(query: str, *, num_results: int = 5) -> str:
+    """Run search directly using ``SERPER_API_KEY`` from the current process."""
+    return await run_with_api_key(
+        os.environ.get("SERPER_API_KEY"), query, num_results=num_results
+    )

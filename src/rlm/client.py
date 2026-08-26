@@ -1,7 +1,6 @@
 """Thin LLM client wrapper. Extracts token usage from responses."""
 
 import asyncio
-import os
 from typing import Any, Awaitable, Callable
 
 from openai import (
@@ -15,7 +14,11 @@ from openai import (
 )
 from pydantic import ValidationError
 
+from rlm.config import ProviderConfig
 from rlm.types import TokenUsage
+
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+RETRY_COUNT_HEADER = "x-stainless-retry-count"
 
 _RETRYABLE: tuple[type[BaseException], ...] = (
     APIConnectionError,
@@ -32,9 +35,6 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
 _RETRY_DELAYS: tuple[int, ...] = (15, 30, 60, 90, 120)
 
 
-PI_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1"
-
-
 def resolve_provider() -> tuple[str | None, str | None, dict[str, str]]:
     """Pick the first provider whose key is set: ``(base_url, api_key, headers)``.
 
@@ -46,42 +46,38 @@ def resolve_provider() -> tuple[str | None, str | None, dict[str, str]]:
        non-OpenAI custom endpoint.
     2. **PI Inference** — ``PRIME_API_KEY`` at PI's base, with
        ``PRIME_TEAM_ID`` forwarded as ``X-Prime-Team-ID``.
-    3. **OpenAI** — ``OPENAI_API_KEY`` set: delegate to AsyncOpenAI's
-       native env handling (``OPENAI_API_KEY`` + ``OPENAI_BASE_URL``).
-       Covers OpenAI direct and verifiers' rollout tunnel both.
+    3. **OpenAI** — ``OPENAI_API_KEY`` set: capture ``OPENAI_API_KEY`` and
+       ``OPENAI_BASE_URL`` into the trusted provider configuration. Covers
+       OpenAI direct and verifiers' rollout tunnel both.
 
     Falls back to PI + ``"EMPTY"`` so the SDK can't silently inherit
     ``OPENAI_API_KEY`` and ship it to the PI default base.
     """
-    if api_key := os.environ.get("RLM_API_KEY"):
-        return os.environ.get("RLM_BASE_URL"), api_key, {}
-    if api_key := os.environ.get("PRIME_API_KEY"):
-        headers: dict[str, str] = {}
-        if team_id := os.environ.get("PRIME_TEAM_ID"):
-            headers["X-Prime-Team-ID"] = team_id
-        return PI_INFERENCE_BASE_URL, api_key, headers
-    if os.environ.get("OPENAI_API_KEY"):
-        return None, None, {}
-    return PI_INFERENCE_BASE_URL, "EMPTY", {}
+    provider = ProviderConfig.from_env()
+    return provider.base_url, provider.api_key, provider.headers.copy()
 
 
-def make_client() -> AsyncOpenAI:
-    """Create an AsyncOpenAI client from environment variables.
-
-    See ``resolve_provider`` for provider precedence. Tags every outbound
-    request with ``X-RLM-Depth: <RLM_DEPTH>`` so an interceptor (e.g.
-    verifiers' interception server) can distinguish parent-agent calls
-    (depth 0) from sub-agent calls (depth >= 1) and decide whether to
-    record them in the rollout's trajectory.
-    """
-    base_url, api_key, extra_headers = resolve_provider()
-    headers = {"X-RLM-Depth": os.environ.get("RLM_DEPTH", "0"), **extra_headers}
-    return AsyncOpenAI(
-        base_url=base_url,
-        api_key=api_key,
-        max_retries=int(os.environ.get("RLM_SDK_MAX_RETRIES", 5)),
-        default_headers=headers,
+def make_client(provider: ProviderConfig | None = None) -> AsyncOpenAI:
+    """Create an AsyncOpenAI client from explicit or environment configuration."""
+    provider = provider or ProviderConfig.from_env()
+    reserved = sorted(
+        name
+        for name in provider.headers
+        if name.lower() in {IDEMPOTENCY_KEY_HEADER.lower(), RETRY_COUNT_HEADER}
     )
+    if reserved:
+        raise ValueError(f"provider headers contain reserved names: {reserved}")
+    return AsyncOpenAI(
+        base_url=provider.base_url,
+        api_key=provider.api_key,
+        max_retries=provider.max_retries,
+        default_headers=provider.headers,
+    )
+
+
+def model_call_headers(call_id: str) -> dict[str, str]:
+    """Build transport headers for one idempotent model call."""
+    return {IDEMPOTENCY_KEY_HEADER: call_id}
 
 
 async def call_with_retries(
@@ -92,12 +88,20 @@ async def call_with_retries(
     Extends the SDK's retry set with ``NotFoundError`` to ride out intermittent
     tunnel/proxy 404s that the SDK itself does not retry.
     """
-    for delay in _RETRY_DELAYS:
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        if attempt:
+            await asyncio.sleep(_RETRY_DELAYS[attempt - 1])
+        attempt_kwargs = kwargs
+        if attempt:
+            attempt_kwargs = dict(kwargs)
+            headers = dict(attempt_kwargs.get("extra_headers") or {})
+            headers[RETRY_COUNT_HEADER] = str(attempt)
+            attempt_kwargs["extra_headers"] = headers
         try:
-            return await func(**kwargs)
+            return await func(**attempt_kwargs)
         except _RETRYABLE:
-            await asyncio.sleep(delay)
-    return await func(**kwargs)
+            if attempt == len(_RETRY_DELAYS):
+                raise
 
 
 def extract_usage(response) -> TokenUsage:

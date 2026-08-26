@@ -8,22 +8,24 @@ import json
 import logging
 import os
 import time
+import uuid
+from copy import deepcopy
 from pathlib import Path
 
 from openai import AsyncOpenAI, BadRequestError
 
-from rlm.client import call_with_retries, extract_usage, make_client
-from rlm.mcp import (
-    MCP_CONFIG_ENV,
-    MCPServer,
-    dump_mcp_servers,
-    generate_mcp_skills,
-    load_mcp_servers,
+from rlm.client import (
+    call_with_retries,
+    extract_usage,
+    make_client,
+    model_call_headers,
 )
+from rlm.config import RuntimeConfig
+from rlm.mcp import MCPServer, load_mcp_servers, validate_mcp_servers
 from rlm.prompt import build_system_prompt
 from rlm.session import Session
 from rlm.skills import enable_builtin_skills
-from rlm.tools.registry import preset_skills
+from rlm.supervisor import SessionTreeSupervisor
 from rlm.tools import (
     SKILLS_DIR,
     BuiltinTool,
@@ -35,7 +37,13 @@ from rlm.tools import (
     get_builtin_tool,
     get_installed_skills,
 )
-from rlm.types import CompactionApplied, RLMMetrics, RLMResult, TokenUsage
+from rlm.types import (
+    CompactionApplied,
+    ProgrammaticToolCallStats,
+    RLMMetrics,
+    RLMResult,
+    TokenUsage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,101 +127,50 @@ def _parse_tool_call_args(raw: str) -> tuple[dict | None, dict | None]:
     return args, None
 
 
-def _parse_summarize_at_tokens(value: int | str | None) -> int | None:
-    """Normalize ``summarize_at_tokens`` to a positive int or ``None``.
-
-    Accepts:
-      - ``None`` / empty string → disabled.
-      - ``int`` → fixed threshold.
-      - ``str`` (from env var) → "N".
-    """
-    if value is None or value == "":
-        return None
-    if isinstance(value, bool):
-        raise ValueError("summarize_at_tokens must be an int")
-    if isinstance(value, str):
-        try:
-            parsed = int(value.strip())
-        except ValueError as exc:
-            raise ValueError(
-                f"summarize_at_tokens must be an int (got {value!r})"
-            ) from exc
-    elif isinstance(value, int):
-        parsed = value
-    else:
-        raise ValueError(
-            f"summarize_at_tokens must be int or None (got {type(value).__name__})"
-        )
-
-    if parsed <= 0:
-        raise ValueError(f"summarize_at_tokens must be positive (got {parsed})")
-    return parsed
-
-
 class RLMEngine:
     def __init__(
         self,
-        model: str | None = None,
-        summarize_at_tokens: int | None = None,
-        system_prompt_path: str | None = None,
-        append_to_system_prompt: str | None = None,
+        *,
         cwd: str | None = None,
         session: Session | None = None,
         client: AsyncOpenAI | None = None,
         mcp_servers: dict[str, MCPServer] | None = None,
+        runtime_config: RuntimeConfig | None = None,
+        supervisor: SessionTreeSupervisor | None = None,
+        invocation_id: str | None = None,
     ):
-        self.model = model or os.environ.get("RLM_MODEL", "openai/gpt-5-mini")
+        self.runtime_config = runtime_config or RuntimeConfig.from_env()
+        config = self.runtime_config
+        self.model = config.model
         self.cwd = cwd or os.getcwd()
-        self.exec_timeout = int(os.environ.get("RLM_EXEC_TIMEOUT", "300"))
-        max_output = int(os.environ.get("RLM_MAX_OUTPUT", "-1"))
-        if max_output == 0:
-            raise ValueError(
-                "RLM_MAX_OUTPUT must be positive, or -1 to disable truncation"
-            )
-        self.max_output = max_output
-
-        # Auto-compaction threshold: user kwarg wins; otherwise parse env var.
-        if summarize_at_tokens is None:
-            env_value = os.environ.get("RLM_SUMMARIZE_AT_TOKENS")
-        else:
-            env_value = summarize_at_tokens
-        self.summarize_at_tokens = _parse_summarize_at_tokens(env_value)
-
-        # Cap on auto-compactions (RLM_MAX_COMPACTIONS): once reached, the branch is
-        # never compacted again and the context grows to the model's natural limit.
-        # Unset or <= 0 means unlimited.
-        _max_compactions = int(os.environ.get("RLM_MAX_COMPACTIONS", "0"))
-        self.max_compactions = _max_compactions if _max_compactions > 0 else None
-
-        self.system_prompt_path = system_prompt_path or os.environ.get(
-            "RLM_SYSTEM_PROMPT_PATH"
-        )
-        self.append_to_system_prompt = append_to_system_prompt or os.environ.get(
-            "RLM_APPEND_TO_SYSTEM_PROMPT"
-        )
-        self.max_depth = int(os.environ.get("RLM_MAX_DEPTH", "0"))
-        self.depth = int(os.environ.get("RLM_DEPTH", "0"))
+        self.exec_timeout = config.policy.exec_timeout
+        self.summarize_at_tokens = config.policy.summarize_at_tokens
+        self.max_compactions = config.policy.max_compactions
+        self.system_prompt_path = config.system_prompt_path
+        self.append_to_system_prompt = config.append_to_system_prompt
+        self.max_depth = config.policy.max_depth
+        self.depth = config.invocation.depth
+        self.allow_git = config.policy.allow_git
 
         # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
         # parse RLM_MCP_CONFIG (a standard mcpServers config).
-        self.mcp_servers = (
+        self.mcp_servers = validate_mcp_servers(
             mcp_servers if mcp_servers is not None else load_mcp_servers()
         )
 
         # Built-in skills (rlm.skills) to enable for this run, from RLM_SKILLS (comma-separated).
-        raw_skills = os.environ.get("RLM_SKILLS")
-        self.skills = (
-            [s.strip() for s in raw_skills.split(",") if s.strip()]
-            if raw_skills is not None
-            else list(preset_skills())
-        )
+        self.skills = list(config.skills)
+        self.kernel_env = dict(config.kernel_env)
+        self.max_tokens = config.policy.max_tokens
 
-        # Token budget
-        _max_tok = int(os.environ.get("RLM_MAX_TOKENS", "0"))
-        self.max_tokens = _max_tok if _max_tok > 0 else None
-
-        self.client = client or make_client()
+        self._owns_client = client is None
+        self.client = client or make_client(config.provider)
         self.session = session
+        self._supervisor = supervisor
+        self._invocation_id = invocation_id or (
+            supervisor.root_id if supervisor is not None else uuid.uuid4().hex
+        )
+        self._owns_supervisor = False
         self._total_usage = TokenUsage()
         self._last_prompt_tokens = 0
 
@@ -225,7 +182,6 @@ class RLMEngine:
 
         # IPython REPL (started lazily in single-agent execution)
         self._repl: IPythonREPL | None = None
-        self._known_children: set[str] = set()
 
         # Turn index (0-based) at the start of the current branch. Used to
         # report "turns since last compaction" when a compaction fires.
@@ -239,6 +195,7 @@ class RLMEngine:
         self._has_result = False
         self._started = False
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     def _ensure_session(self):
         """Create session if not set."""
@@ -257,11 +214,11 @@ class RLMEngine:
         try:
             return await self.prompt(prompt)
         finally:
-            self.close()
+            await self.aclose()
 
     async def prompt(self, prompt: str) -> RLMResult:
         """Run one user turn while preserving conversation and kernel state."""
-        if self._closed:
+        if self._closed or self._close_task is not None:
             raise RuntimeError("RLM engine is closed")
 
         if self.depth > self.max_depth:
@@ -289,7 +246,6 @@ class RLMEngine:
             prompt_tokens=self._total_usage.prompt_tokens,
             completion_tokens=self._total_usage.completion_tokens,
         )
-
         self._metrics.stop_reason = ""
         try:
             result = await self._run_loop()
@@ -344,32 +300,52 @@ class RLMEngine:
             prompt_preview=prompt[:200],
             cwd=self.cwd,
         )
+        # Credential-free built-ins run locally; privileged skills are brokered.
+        local_skills = [name for name in self.skills if name != "search"]
+        enable_builtin_skills(local_skills, self.session.dir)
+        broker_endpoint = None
+        if self.depth < self.max_depth or self.mcp_servers or "search" in self.skills:
+            if self._supervisor is None:
+                self._supervisor = SessionTreeSupervisor(
+                    root_session=self.session,
+                    runtime_config=self.runtime_config,
+                    cwd=self.cwd,
+                    mcp_servers=self.mcp_servers,
+                    root_invocation_id=self._invocation_id,
+                )
+                self._owns_supervisor = True
+            try:
+                await self._supervisor.start()
+                broker_endpoint = self._supervisor.endpoint_for(self._invocation_id)
+                if self.mcp_servers or "search" in self.skills:
+                    reserved_names = {"rlm", *local_skills, *discover_skills()}
+                    brokered_skills = self._supervisor.write_brokered_skill_modules(
+                        self.session.dir, reserved_names
+                    )
+                    logger.info(
+                        "rlm: exposed %d supervisor-owned skill(s) - %s",
+                        len(brokered_skills),
+                        ", ".join(brokered_skills),
+                    )
+            except BaseException:
+                if self._owns_supervisor:
+                    await self._supervisor.aclose()
+                    self._supervisor = None
+                    self._owns_supervisor = False
+                raise
 
-        # Skills the kernel pre-imports, all written into the session dir (the REPL and prompt
-        # read them back from there): enabled built-in skills (rlm.skills) + any wired MCP tools
-        # (PTC). ipython is the sole builtin tool, so the kernel always starts.
-        enable_builtin_skills(self.skills, self.session.dir)
-        if self.mcp_servers:
-            mcp_skills = await generate_mcp_skills(
-                self.mcp_servers, self.session.dir, self.cwd
-            )
-            logger.info(
-                "rlm: exposed %d MCP tool(s) as skills - %s",
-                len(mcp_skills),
-                ", ".join(mcp_skills),
-            )
-
-        repl_env = (
-            {MCP_CONFIG_ENV: dump_mcp_servers(self.mcp_servers)}
-            if self.mcp_servers
-            else None
+        self._repl = IPythonREPL(
+            cwd=self.cwd,
+            session=self.session,
+            kernel_env=self.kernel_env,
+            depth=self.depth,
+            max_depth=self.max_depth,
+            broker_endpoint=broker_endpoint,
         )
-        self._repl = IPythonREPL(cwd=self.cwd, session=self.session, env=repl_env)
         try:
             self._repl.start()
-            self._known_children = {p.name for p in self.session.dir.glob("sub-*")}
 
-            self._active_tools = get_active_builtin_tools()
+            self._active_tools = get_active_builtin_tools(self.exec_timeout)
             self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
             system_prompt = self._load_system_prompt(self._active_tools)
 
@@ -381,6 +357,10 @@ class RLMEngine:
         except BaseException:
             self._repl.shutdown()
             self._repl = None
+            if self._owns_supervisor and self._supervisor is not None:
+                await self._supervisor.aclose()
+                self._supervisor = None
+                self._owns_supervisor = False
             raise
 
     async def _run_loop(self) -> RLMResult:
@@ -393,9 +373,11 @@ class RLMEngine:
         for turn in itertools.count(self._turn):
             self._turn = turn + 1
             # Call LLM
+            call_id = uuid.uuid4().hex
             request_kwargs = {
                 "model": self.model,
                 "messages": messages,
+                "extra_headers": model_call_headers(call_id),
             }
             if self._active_tool_schemas:
                 request_kwargs["tools"] = self._active_tool_schemas
@@ -411,7 +393,6 @@ class RLMEngine:
                 self._metrics.stop_reason = "request_too_large"
                 final_text = "[request body too large]"
                 break
-
             usage = extract_usage(response)
             self._total_usage.prompt_tokens += usage.prompt_tokens
             self._total_usage.completion_tokens += usage.completion_tokens
@@ -488,47 +469,68 @@ class RLMEngine:
             if tool is None:
                 tool_result = ToolOutcome(content=f"Error: unknown tool '{tool_name}'")
             else:
-                tool_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        tool.execute, tool_args, self._tool_context(messages)
-                    )
-                )
+                repl = self._repl
+                scope_id = None
+                if (
+                    tool_name == "ipython"
+                    and repl is not None
+                    and self._supervisor is not None
+                    and self._invocation_id is not None
+                ):
+                    scope_id = await self._supervisor.open_scope(self._invocation_id)
                 try:
-                    tool_result = await asyncio.shield(tool_task)
-                except asyncio.CancelledError:
-                    repl = self._repl
-                    settled_result = None
-                    if repl is not None:
-                        repl.interrupt()
+                    if scope_id is not None:
+                        repl.set_broker_scope(scope_id)
+                    tool_task = asyncio.create_task(
+                        asyncio.to_thread(
+                            tool.execute, tool_args, self._tool_context(messages)
+                        )
+                    )
                     try:
-                        while True:
-                            try:
-                                settled_result = await asyncio.shield(tool_task)
-                            except asyncio.CancelledError:
-                                if repl is not None:
-                                    repl.interrupt()
-                                continue
-                            except Exception:
-                                logger.warning(
-                                    "rlm: tool failed while cancellation was settling",
-                                    exc_info=True,
-                                )
-                            break
-                    finally:
+                        tool_result = await asyncio.shield(tool_task)
+                    except asyncio.CancelledError:
+                        settled_result = None
                         if repl is not None:
-                            repl.finish_interrupt()
-                    if settled_result is not None:
-                        for event in settled_result.metric_events:
-                            self._metrics.record(event)
-                    raise
+                            repl.interrupt()
+                        try:
+                            while True:
+                                try:
+                                    settled_result = await asyncio.shield(tool_task)
+                                except asyncio.CancelledError:
+                                    if repl is not None:
+                                        repl.interrupt()
+                                    continue
+                                except Exception:
+                                    logger.warning(
+                                        "rlm: tool failed while cancellation was settling",
+                                        exc_info=True,
+                                    )
+                                break
+                        finally:
+                            if repl is not None:
+                                repl.finish_interrupt()
+                        if settled_result is not None:
+                            for event in settled_result.metric_events:
+                                self._metrics.record(event)
+                        raise
+                finally:
+                    if scope_id is not None:
+                        try:
+                            await self._supervisor.close_scope(scope_id)
+                        finally:
+                            if repl is not None:
+                                try:
+                                    repl.set_broker_scope(None)
+                                except Exception:
+                                    logger.warning(
+                                        "rlm: failed to clear broker scope",
+                                        exc_info=True,
+                                    )
             duration = time.time() - t0
             for event in tool_result.metric_events:
                 self._metrics.record(event)
 
             result = tool_result.content
-
-            if self.max_output > 0 and len(result) > self.max_output:
-                result = result[: self.max_output] + "\n... [output truncated]"
 
             self.session.log_tool_result(turn, tool_name, result, duration)
             messages.append(
@@ -538,9 +540,6 @@ class RLMEngine:
                     "content": result,
                 }
             )
-
-            # Detect new child sessions spawned via rlm()
-            self._detect_new_children()
 
             # Auto-compaction: if this turn's prompt_tokens reached the
             # configured threshold, ask the model for a handoff summary and
@@ -575,11 +574,52 @@ class RLMEngine:
         )
         return result
 
+    async def aclose(self) -> None:
+        """Finalize artifacts and stop the complete recursive session tree."""
+        if self._closed and self._close_task is None:
+            return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._aclose_impl())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(self._close_task)
+                break
+            except asyncio.CancelledError:
+                if self._close_task.done():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _aclose_impl(self) -> None:
+        self._closed = True
+        try:
+            if self._owns_supervisor and self._supervisor is not None:
+                await self._supervisor.aclose()
+        finally:
+            try:
+                if self._owns_client:
+                    await self.client.close()
+            finally:
+                self._close_local()
+
     def close(self) -> None:
-        """Finalize artifacts and stop the persistent kernel."""
+        """Close synchronous resources, or run async cleanup outside an event loop."""
         if self._closed:
             return
+        if self._owns_supervisor or self._owns_client:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(self.aclose())
+            else:
+                raise RuntimeError("use 'await engine.aclose()' inside an event loop")
+            return
         self._closed = True
+        self._close_local()
+
+    def _close_local(self) -> None:
         if self._repl is not None:
             try:
                 self._repl.shutdown()
@@ -588,6 +628,14 @@ class RLMEngine:
             self._repl = None
         if self.session is not None:
             if self._has_result:
+                direct_tool_stats = None
+                child_tool_stats = None
+                if self._supervisor is not None and self._invocation_id is not None:
+                    direct_tool_stats, child_tool_stats = (
+                        self._supervisor.programmatic_tool_call_stats(
+                            self._invocation_id
+                        )
+                    )
                 self.session.finalize(
                     self._last_answer,
                     usage={
@@ -596,12 +644,37 @@ class RLMEngine:
                     },
                     turns=self._turn,
                     metrics=self._metrics,
+                    trusted_direct_tool_stats=direct_tool_stats,
+                    trusted_child_tool_stats=child_tool_stats,
                 )
             else:
                 self.session.close()
 
+    def _programmatic_tool_call_stats(
+        self,
+    ) -> tuple[ProgrammaticToolCallStats, ProgrammaticToolCallStats, int]:
+        if self.session is None:
+            return ProgrammaticToolCallStats(), ProgrammaticToolCallStats(), 0
+        direct = ProgrammaticToolCallStats.from_log(
+            self.session.dir / "programmatic_tool_calls.jsonl"
+        )
+        child_aggregate = self.session.aggregate_child_metrics(
+            "local_programmatic_tool_call_stats"
+        )
+        child = child_aggregate.tool_call_stats
+        if self._supervisor is not None:
+            trusted_direct, trusted_child = (
+                self._supervisor.programmatic_tool_call_stats(self._invocation_id)
+            )
+            direct = direct.merge(trusted_direct)
+            child = child.merge(trusted_child)
+        return direct, child, child_aggregate.num_sessions
+
     async def _compact_branch(
-        self, messages: list[dict], turn: int, active_tools: list[dict]
+        self,
+        messages: list[dict],
+        turn: int,
+        active_tools: list[dict],
     ) -> None:
         """Ask the model for a handoff summary and rebuild ``messages``.
 
@@ -636,14 +709,23 @@ class RLMEngine:
         if self._repl is not None:
             checkpoint_prompt += REPL_RESTART_NOTE
         messages.append({"role": "user", "content": checkpoint_prompt})
-        request_kwargs: dict = {"model": self.model, "messages": messages}
+        call_id = uuid.uuid4().hex
+        request_kwargs: dict = {
+            "model": self.model,
+            "messages": messages,
+            "extra_headers": model_call_headers(call_id),
+        }
         if active_tools:
             request_kwargs["tools"] = active_tools
             request_kwargs["tool_choice"] = "none"
-        response = await call_with_retries(
-            self.client.chat.completions.create,
-            **request_kwargs,
-        )
+        try:
+            response = await call_with_retries(
+                self.client.chat.completions.create,
+                **request_kwargs,
+            )
+        except BaseException:
+            messages.pop()
+            raise
         usage = extract_usage(response)
         self._total_usage.prompt_tokens += usage.prompt_tokens
         self._total_usage.completion_tokens += usage.completion_tokens
@@ -684,6 +766,54 @@ class RLMEngine:
         self._branch_start_turn = turn + 1
         self._metrics.turns_since_last_compaction = 0
 
+    def execution_snapshot(self) -> dict:
+        """Return a credential-free snapshot of cumulative execution state."""
+        if self.session is None:
+            raise RuntimeError("RLM session is not initialized")
+        direct_tool_stats, child_tool_stats, num_child_sessions = (
+            self._programmatic_tool_call_stats()
+        )
+        metrics = deepcopy(self._metrics)
+        metrics.apply_programmatic_tool_call_stats(
+            direct_tool_stats, child_tool_stats, num_child_sessions
+        )
+        metric_values = {
+            key: value
+            for key, value in metrics.to_dict().items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+        snapshot = {
+            "model": self.model,
+            "turns": self._turn,
+            "usage": {
+                "prompt_tokens": self._total_usage.prompt_tokens,
+                "completion_tokens": self._total_usage.completion_tokens,
+                "total_tokens": self._total_usage.total,
+            },
+            "metrics": metric_values,
+            "programmatic_tool_call_stats": direct_tool_stats.merge(
+                child_tool_stats
+            ).to_dict(),
+            "supervisor": {
+                "subagent_calls": self._supervisor.total_calls
+                if self._supervisor is not None
+                else 0,
+                "active_subagent_calls": self._supervisor.active_calls
+                if self._supervisor is not None
+                else 0,
+            },
+            "limits": {
+                "max_depth": self.runtime_config.policy.max_depth,
+                "max_concurrent_subagents": self.runtime_config.policy.max_concurrent_subagents,
+                "max_subagent_calls": self.runtime_config.policy.max_subagent_calls,
+                "max_tokens": self.runtime_config.policy.max_tokens,
+                "summarize_at_tokens": self.runtime_config.policy.summarize_at_tokens,
+                "max_compactions": self.runtime_config.policy.max_compactions,
+                "allow_git": self.runtime_config.policy.allow_git,
+            },
+        }
+        return snapshot
+
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         if self.system_prompt_path:
             return Path(self.system_prompt_path).read_text()
@@ -692,22 +822,13 @@ class RLMEngine:
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
             allow_recursion=self.depth < self.max_depth,
+            allow_git=self.allow_git,
             active_tools=active_tools,
-            cli_skills=get_installed_skills(),
+            shell_skills=get_installed_skills(),
         )
         if self.append_to_system_prompt:
             system_prompt += "\n\n" + self.append_to_system_prompt
         return system_prompt
-
-    def _detect_new_children(self):
-        """Scan session dir for new sub-* directories and log them."""
-        if not self.session:
-            return
-        current = {p.name for p in self.session.dir.glob("sub-*")}
-        new = current - self._known_children
-        for child_name in sorted(new):
-            self.session.log_sub_spawn(child_name, "(spawned via rlm())")
-        self._known_children = current
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:
         return ToolContext(
@@ -716,6 +837,7 @@ class RLMEngine:
             total_usage=self._total_usage,
             last_prompt_tokens=self._last_prompt_tokens,
             exec_timeout=self.exec_timeout,
+            allow_git=self.allow_git,
             repl=self._repl,
             state=self._tool_state,
             cwd=self.cwd,
