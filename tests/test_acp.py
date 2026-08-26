@@ -308,7 +308,7 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
         model="test-model",
         provider=ProviderConfig(base_url=None, api_key="test-key"),
         invocation=InvocationContext(),
-        policy=ExecutionPolicy(summarize_at_tokens=1),
+        policy=ExecutionPolicy(summarize_at_tokens=1, max_depth=0),
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
