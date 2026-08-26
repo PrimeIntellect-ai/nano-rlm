@@ -3,7 +3,6 @@ import pytest
 from rlm.client import make_client
 from rlm.config import (
     KERNEL_ENV_CONFIG_ENV,
-    CompactionConfig,
     ExecutionPolicy,
     InvocationContext,
     ProviderConfig,
@@ -36,7 +35,8 @@ def test_runtime_config_resolves_and_redacts_environment():
         max_depth=4,
         exec_timeout=30,
         max_tokens=500,
-        compaction=CompactionConfig(summarize_at_tokens=2048),
+        compaction=True,
+        summarize_at_tokens=2048,
         max_compactions=3,
         max_concurrent_subagents=4,
         max_subagent_calls=64,
@@ -53,7 +53,7 @@ def test_runtime_config_resolves_and_redacts_environment():
 def test_compaction_is_disabled_by_default():
     config = RuntimeConfig.from_env(environ={})
 
-    assert config.policy.compaction is None
+    assert config.policy.compaction is False
 
 
 def test_runtime_config_rejects_unsafe_recursive_and_environment_values():

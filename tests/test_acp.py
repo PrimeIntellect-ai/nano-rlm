@@ -23,7 +23,6 @@ from rlm.acp import (
 )
 from rlm.engine import RLMEngine
 from rlm.config import (
-    CompactionConfig,
     ExecutionPolicy,
     InvocationContext,
     ProviderConfig,
@@ -48,7 +47,8 @@ def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
             "max_depth": 0,
             "exec_timeout": 300,
             "max_tokens": None,
-            "compaction": None,
+            "compaction": False,
+            "summarize_at_tokens": None,
             "max_compactions": None,
             "max_concurrent_subagents": 4,
             "max_subagent_calls": 64,
@@ -143,7 +143,8 @@ class _Engine:
                 "max_concurrent_subagents": 4,
                 "max_subagent_calls": 64,
                 "max_tokens": None,
-                "compaction": None,
+                "compaction": False,
+                "summarize_at_tokens": None,
                 "max_compactions": None,
                 "allow_git": False,
             },
@@ -314,7 +315,7 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
         model="test-model",
         provider=ProviderConfig(base_url=None, api_key="test-key"),
         invocation=InvocationContext(),
-        policy=ExecutionPolicy(compaction=CompactionConfig(summarize_at_tokens=1)),
+        policy=ExecutionPolicy(compaction=True, summarize_at_tokens=1),
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]

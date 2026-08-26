@@ -17,7 +17,6 @@ from conftest import (
 )
 from rlm.compaction import DROPPED_TOOL_RESULT, context_error
 from rlm.config import (
-    CompactionConfig,
     ExecutionPolicy,
     InvocationContext,
     ProviderConfig,
@@ -112,11 +111,8 @@ def _config(
         policy=ExecutionPolicy(
             max_depth=max_depth,
             max_concurrent_subagents=max(4, max_depth),
-            compaction=(
-                CompactionConfig(summarize_at_tokens=summarize_at_tokens)
-                if compaction
-                else None
-            ),
+            compaction=compaction,
+            summarize_at_tokens=summarize_at_tokens,
         ),
     )
 
