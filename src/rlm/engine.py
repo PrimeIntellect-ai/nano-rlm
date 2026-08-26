@@ -169,7 +169,10 @@ class RLMEngine:
         self.model = config.model
         self.cwd = cwd or os.getcwd()
         self.exec_timeout = config.policy.exec_timeout
-        self.summarize_at_tokens = config.policy.summarize_at_tokens
+        self.compaction = config.policy.compaction
+        self.summarize_at_tokens = (
+            self.compaction.summarize_at_tokens if self.compaction is not None else None
+        )
         self.max_compactions = config.policy.max_compactions
         self.system_prompt_path = config.system_prompt_path
         self.append_to_system_prompt = config.append_to_system_prompt
@@ -314,7 +317,7 @@ class RLMEngine:
     async def _start(self, prompt: str) -> None:
         """Initialize the session, tools, conversation, and persistent kernel."""
 
-        if self.summarize_at_tokens is None:
+        if self.compaction is not None and self.summarize_at_tokens is None:
             self.summarize_at_tokens = await resolve_compaction_threshold(
                 self.client, self.model
             )
@@ -735,8 +738,9 @@ class RLMEngine:
         return direct, child, child_aggregate.num_sessions
 
     def _can_compact(self) -> bool:
-        return self.max_compactions is None or (
-            self._metrics.num_compactions < self.max_compactions
+        return self.compaction is not None and (
+            self.max_compactions is None
+            or self._metrics.num_compactions < self.max_compactions
         )
 
     async def _compact_branch(
@@ -884,7 +888,11 @@ class RLMEngine:
                 "max_concurrent_subagents": self.runtime_config.policy.max_concurrent_subagents,
                 "max_subagent_calls": self.runtime_config.policy.max_subagent_calls,
                 "max_tokens": self.runtime_config.policy.max_tokens,
-                "summarize_at_tokens": self.summarize_at_tokens,
+                "compaction": (
+                    None
+                    if self.compaction is None
+                    else {"summarize_at_tokens": self.summarize_at_tokens}
+                ),
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "allow_git": self.runtime_config.policy.allow_git,
             },

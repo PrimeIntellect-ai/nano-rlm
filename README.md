@@ -6,7 +6,7 @@ The model gets a single built-in tool, `ipython`: a persistent IPython kernel fo
 
 For convenience, rlm ships built-in *skills* that can be enabled per run via `RLM_SKILLS` (comma-separated, off by default): `edit` (single-occurrence string replacement) and `search` (web search via Serper, needs `SERPER_API_KEY`). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)` or `await search(query=...)`.
 
-Context is reclaimed automatically. The engine compacts at 90% of the model context window when the provider advertises it. `RLM_SUMMARIZE_AT_TOKENS` sets an explicit threshold. The IPython kernel keeps running across compaction, so REPL state survives (see [Compaction](#compaction)).
+Context compaction is optional. When enabled, the engine compacts at 90% of the model context window when the provider advertises it. `RLM_SUMMARIZE_AT_TOKENS` sets an explicit threshold. The IPython kernel keeps running across compaction, so REPL state survives (see [Compaction](#compaction)).
 
 Inside the IPython session, a callable `rlm` is pre-injected into the namespace. When recursion is allowed, the model can call `await rlm(...)` to spawn sub-agents. Skills supplied by the host environment (see [Skills](#skills)) are importable directly by name, e.g. `import websearch`.
 
@@ -108,7 +108,8 @@ versioned contract described above.
 | `RLM_EXEC_TIMEOUT` | `300` | Seconds per IPython execution |
 | `RLM_MAX_OUTPUT` | `-1` | Max chars returned from a tool call (`-1` disables truncation; `0` is invalid) |
 | `RLM_MAX_TOOL_OUTPUT_CHARS` | — | Preserve only a head/tail window of this many characters from raw IPython output before it enters the conversation. |
-| `RLM_SUMMARIZE_AT_TOKENS` | — | Proactive compaction threshold for the current prompt, completion, and pending tool result. When unset, the engine uses 90% of an advertised context window. Context-overflow recovery remains enabled when metadata is unavailable. |
+| `RLM_COMPACTION` | — | Set to `1` to enable context compaction. |
+| `RLM_SUMMARIZE_AT_TOKENS` | — | Proactive compaction threshold for the current prompt, completion, and pending tool result. Setting it also enables compaction. When unset, enabled compaction uses 90% of an advertised context window. |
 | `RLM_MAX_TOKENS` | `0` | Optional completion-token budget (`0` disables) |
 | `RLM_APPEND_TO_SYSTEM_PROMPT` | — | Extra instructions appended to the generated system prompt |
 | `RLM_SYSTEM_PROMPT_PATH` | — | Path to a file whose contents fully replace the generated system prompt |
@@ -140,7 +141,7 @@ Recursive calls are created by a session-local supervisor rather than by the IPy
 
 ## Compaction
 
-There is no model-driven compaction tool. By default, the engine reads the model context window from the provider's `/models` response and compacts at 90% of that limit. Set `RLM_SUMMARIZE_AT_TOKENS` to override the threshold. The estimate includes prompt tokens, completion tokens, and a pending tool result. If the provider does not advertise a context window, the engine compacts and retries when the provider reports an overflow. It also learns a later proactive threshold when the error includes the limit.
+There is no model-driven compaction tool. Set `RLM_COMPACTION=1` to enable compaction. The engine reads the model context window from the provider's `/models` response and compacts at 90% of that limit. Set `RLM_SUMMARIZE_AT_TOKENS` to override the threshold and enable compaction. The estimate includes prompt tokens, completion tokens, and a pending tool result. If the provider does not advertise a context window, the engine compacts and retries when the provider reports an overflow. It also learns a later proactive threshold when the error includes the limit.
 
 The engine asks the model for a handoff summary and resumes the task on a fresh branch seeded with that summary. The original task prompt is dropped, so the summary carries the goal forward. If an oversized tool result prevents the checkpoint request from fitting, the engine replaces only the newest required tool results with a context-limit marker and retries the checkpoint.
 

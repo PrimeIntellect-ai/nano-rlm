@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 from openai import BadRequestError
+import pytest
 
 from conftest import (
     DummyChoice,
@@ -16,6 +17,7 @@ from conftest import (
 )
 from rlm.client import context_window_from_error
 from rlm.config import (
+    CompactionConfig,
     ExecutionPolicy,
     InvocationContext,
     ProviderConfig,
@@ -97,7 +99,12 @@ class _ScriptedClient(DummyClient):
         return action
 
 
-def _config(*, max_depth: int = 0, summarize_at_tokens: int | None = None):
+def _config(
+    *,
+    max_depth: int = 0,
+    summarize_at_tokens: int | None = None,
+    compaction: bool = True,
+):
     return RuntimeConfig(
         model="test-model",
         provider=ProviderConfig(base_url=None, api_key="test-key"),
@@ -105,7 +112,11 @@ def _config(*, max_depth: int = 0, summarize_at_tokens: int | None = None):
         policy=ExecutionPolicy(
             max_depth=max_depth,
             max_concurrent_subagents=max(4, max_depth),
-            summarize_at_tokens=summarize_at_tokens,
+            compaction=(
+                CompactionConfig(summarize_at_tokens=summarize_at_tokens)
+                if compaction
+                else None
+            ),
         ),
     )
 
@@ -143,6 +154,23 @@ async def test_tool_result_overflow_compacts_and_retries(session):
         for message in checkpoint_messages
     )
     assert client.calls[3]["tool_choice"] == "none"
+
+
+async def test_context_overflow_propagates_when_compaction_is_disabled(session):
+    client = _ScriptedClient([_overflow()])
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(compaction=False),
+    )
+
+    try:
+        with pytest.raises(BadRequestError):
+            await engine.run("overflow without compaction")
+    finally:
+        engine.close()
+
+    assert engine._metrics.num_compactions == 0
 
 
 async def test_decode_context_limit_uses_discovered_threshold(session):
