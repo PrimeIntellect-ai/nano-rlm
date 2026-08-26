@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from openai import APIError, AsyncOpenAI, BadRequestError
 
@@ -97,7 +97,8 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
     key = (str(client.base_url), model)
     if key not in _window_cache:
         try:
-            payload = await client.get("/models", cast_to=dict)
+            # The SDK needs a parameterized mapping type to parse into (bare `dict` fails).
+            payload = await client.get("/models", cast_to=cast(Any, dict[str, Any]))
             _window_cache[key] = _model_context_window(payload, model)
         except (APIError, AttributeError):
             _window_cache[key] = None
