@@ -215,6 +215,34 @@ async def test_cancel_while_awaiting_registry_lock_closes_child_session(
     assert created[0]._msg_file.closed
     assert supervisor._invocations == {}
     assert supervisor._capabilities == {}
+    assert supervisor.lineage.snapshot()["sessions"][1]["status"] == "cancelled"
+
+
+async def test_child_factory_failure_marks_lineage_failed(tmp_path):
+    class FailingEngine:
+        def __init__(self, **kwargs):
+            raise RuntimeError("engine init failed")
+
+    session = Session(tmp_path / "root")
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=_config(max_depth=1),
+        cwd=str(tmp_path),
+        engine_factory=FailingEngine,
+    )
+    await supervisor.start()
+    scope = await supervisor.open_scope(supervisor.root_id)
+    endpoint = supervisor.endpoint_for(supervisor.root_id)
+    try:
+        task = await supervisor._start_child(endpoint.capability, scope, "x")
+        with pytest.raises(RuntimeError, match="engine init failed"):
+            await task
+    finally:
+        await supervisor.close_scope(scope)
+        await supervisor.aclose()
+        session.close()
+
+    assert supervisor.lineage.snapshot()["sessions"][1]["status"] == "failed"
 
 
 async def test_saturated_nested_calls_do_not_deadlock(tmp_path):

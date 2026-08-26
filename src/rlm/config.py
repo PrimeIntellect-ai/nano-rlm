@@ -9,6 +9,8 @@ from typing import Mapping
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
+from rlm.lineage import LINEAGE_HEADER_NAMES
+
 
 PI_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1"
 KERNEL_ENV_CONFIG_ENV = "RLM_KERNEL_ENV"
@@ -66,7 +68,11 @@ class ProviderConfig(_ConfigModel):
     @field_validator("headers")
     @classmethod
     def _reserve_transport_headers(cls, headers: dict[str, str]) -> dict[str, str]:
-        reserved_names = {"idempotency-key", "x-stainless-retry-count"}
+        reserved_names = {
+            "idempotency-key",
+            "x-stainless-retry-count",
+            *(header.lower() for header in LINEAGE_HEADER_NAMES),
+        }
         reserved = sorted(name for name in headers if name.lower() in reserved_names)
         if reserved:
             raise ValueError(f"provider headers contain reserved names: {reserved}")
