@@ -9,6 +9,8 @@ from typing import Mapping
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
+from rlm.tools.registry import preset_skills
+
 
 PI_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1"
 KERNEL_ENV_CONFIG_ENV = "RLM_KERNEL_ENV"
@@ -158,7 +160,7 @@ class RuntimeConfig(_ConfigModel):
         environ: Mapping[str, str] | None = None,
     ) -> RuntimeConfig:
         env = os.environ if environ is None else environ
-        raw_skills = env.get("RLM_SKILLS", "")
+        raw_skills = env.get("RLM_SKILLS")
         max_depth = int(env.get("RLM_MAX_DEPTH", "0"))
         default_concurrency = max(4, max_depth)
         max_concurrent_subagents = _positive_int(
@@ -194,7 +196,11 @@ class RuntimeConfig(_ConfigModel):
             ),
             system_prompt_path=env.get("RLM_SYSTEM_PROMPT_PATH"),
             append_to_system_prompt=env.get("RLM_APPEND_TO_SYSTEM_PROMPT"),
-            skills=tuple(s.strip() for s in raw_skills.split(",") if s.strip()),
+            skills=(
+                tuple(s.strip() for s in raw_skills.split(",") if s.strip())
+                if raw_skills is not None
+                else preset_skills()
+            ),
             kernel_env=_kernel_env(env.get(KERNEL_ENV_CONFIG_ENV)),
             search_api_key=env.get("SERPER_API_KEY"),
         )
