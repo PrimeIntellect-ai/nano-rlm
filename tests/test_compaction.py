@@ -14,6 +14,7 @@ from conftest import (
     DummyToolCall,
     DummyUsage,
 )
+from rlm.client import context_window_from_error
 from rlm.config import (
     ExecutionPolicy,
     InvocationContext,
@@ -53,10 +54,38 @@ def _overflow() -> BadRequestError:
     )
 
 
+def test_context_window_is_learned_from_provider_error():
+    response = httpx.Response(
+        400,
+        request=httpx.Request("POST", "http://interceptor/v1/chat/completions"),
+    )
+    error = BadRequestError(
+        "maximum context length is 32,768 tokens",
+        response=response,
+        body={"error": {"message": "maximum context length is 32,768 tokens"}},
+    )
+
+    assert context_window_from_error(error) == 32_768
+
+
 class _ScriptedClient(DummyClient):
-    def __init__(self, actions: list[DummyResponse | BaseException]):
+    def __init__(
+        self,
+        actions: list[DummyResponse | BaseException],
+        *,
+        max_model_len: int | None = None,
+    ):
         super().__init__([])
         self.actions = list(actions)
+        self.max_model_len = max_model_len
+        self.base_url = f"http://scripted-{id(self)}"
+
+    async def get(self, path: str, **kwargs: Any) -> dict:
+        assert path == "/models"
+        card = {"id": "test-model"}
+        if self.max_model_len is not None:
+            card["max_model_len"] = self.max_model_len
+        return {"data": [card]}
 
     async def create(self, **kwargs: Any) -> DummyResponse:
         self.calls.append(deepcopy(kwargs))
@@ -116,7 +145,7 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert client.calls[3]["tool_choice"] == "none"
 
 
-async def test_decode_context_limit_compacts_and_retries(session):
+async def test_decode_context_limit_uses_discovered_threshold(session):
     client = _ScriptedClient(
         [
             _response(
@@ -132,12 +161,13 @@ async def test_decode_context_limit_compacts_and_retries(session):
             ),
             _response(DummyMessage(content="summary")),
             _response(DummyMessage(content="done")),
-        ]
+        ],
+        max_model_len=112,
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        runtime_config=_config(summarize_at_tokens=100),
+        runtime_config=_config(),
     )
 
     try:

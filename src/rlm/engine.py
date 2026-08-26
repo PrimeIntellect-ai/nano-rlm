@@ -16,9 +16,12 @@ from openai import AsyncOpenAI, BadRequestError
 
 from rlm.client import (
     call_with_retries,
+    compaction_threshold,
+    context_window_from_error,
     extract_usage,
     make_client,
     model_call_headers,
+    resolve_compaction_threshold,
 )
 from rlm.config import RuntimeConfig
 from rlm.mcp import MCPServer, load_mcp_servers, validate_mcp_servers
@@ -52,19 +55,15 @@ logger = logging.getLogger(__name__)
 # compaction threshold. The model's next reply is expected to be a
 # plain-text handoff summary; any tool calls it emits are ignored and
 # the message is compacted in place of them.
-CHECKPOINT_COMPACTION_PROMPT = (
-    "You are performing a CONTEXT CHECKPOINT COMPACTION. "
-    "Create a handoff summary for another LLM that will resume the task.\n"
-    "\n"
-    "Include:\n"
-    "- Current progress and key decisions made\n"
-    "- Important context, constraints, or user preferences\n"
-    "- What remains to be done (clear next steps)\n"
-    "- Any critical data, examples, or references needed to continue\n"
-    "\n"
-    "Be concise, structured, and focused on helping the next LLM "
-    "seamlessly continue the work."
-)
+CHECKPOINT_COMPACTION_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work."""
 
 # Appended to the checkpoint prompt when the IPython REPL is active.
 REPL_RESTART_NOTE = (
@@ -78,17 +77,13 @@ REPL_RESTART_NOTE = (
 # Wrapper text that frames the summary as the sole user-facing context
 # for the post-compaction branch. The original task prompt is dropped;
 # the summary is responsible for carrying the goal.
-POST_COMPACTION_FRAMING = (
-    "Another language model started to solve this problem and produced "
-    "a summary of its thinking process. Use this to build on the work "
-    "that has already been done and avoid duplicating work. Here is "
-    "the summary produced by the other language model, use the "
-    "information in this summary to assist with your own analysis:"
-)
+POST_COMPACTION_FRAMING = """Another language model started to solve this problem and produced \
+a summary of its thinking process. Use this to build on the work \
+that has already been done and avoid duplicating work. Here is \
+the summary produced by the other language model, use the \
+information in this summary to assist with your own analysis:"""
 
-COMPACTED_TOOL_RESULT = (
-    "[tool output dropped because it exceeded the model context limit]"
-)
+COMPACTED_TOOL_RESULT = "[tool output dropped because it exceeded the context limit]"
 
 
 def _is_context_overflow(e: BadRequestError) -> bool:
@@ -319,6 +314,11 @@ class RLMEngine:
     async def _start(self, prompt: str) -> None:
         """Initialize the session, tools, conversation, and persistent kernel."""
 
+        if self.summarize_at_tokens is None:
+            self.summarize_at_tokens = await resolve_compaction_threshold(
+                self.client, self.model
+            )
+
         self._ensure_session()
 
         self.session.write_meta(
@@ -426,6 +426,9 @@ class RLMEngine:
                         or not self._can_compact()
                     ):
                         raise
+                    context_window = context_window_from_error(e)
+                    if context_window is not None:
+                        self.summarize_at_tokens = compaction_threshold(context_window)
                     await self._compact_branch(
                         messages, turn, self._active_tool_schemas
                     )
@@ -881,7 +884,7 @@ class RLMEngine:
                 "max_concurrent_subagents": self.runtime_config.policy.max_concurrent_subagents,
                 "max_subagent_calls": self.runtime_config.policy.max_subagent_calls,
                 "max_tokens": self.runtime_config.policy.max_tokens,
-                "summarize_at_tokens": self.runtime_config.policy.summarize_at_tokens,
+                "summarize_at_tokens": self.summarize_at_tokens,
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "allow_git": self.runtime_config.policy.allow_git,
             },
