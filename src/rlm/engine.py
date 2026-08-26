@@ -341,6 +341,8 @@ class RLMEngine:
             depth=self.depth,
             max_depth=self.max_depth,
             broker_endpoint=broker_endpoint,
+            exec_timeout=self.exec_timeout,
+            allow_git=self.allow_git,
         )
         try:
             self._repl.start()

@@ -195,3 +195,20 @@ def test_bash_tool_honors_explicit_allow_git(monkeypatch):
     )
     assert "not allowed" in refused.content
     assert "not allowed" not in allowed.content
+
+
+def test_kernel_receives_policy_env(session):
+    repl = IPythonREPL(
+        cwd=str(session.dir),
+        session=session,
+        exec_timeout=42,
+        allow_git=True,
+    )
+    repl.start()
+    try:
+        out = repl.execute(
+            "import os; print(os.environ.get('RLM_EXEC_TIMEOUT'), os.environ.get('RLM_ALLOW_GIT'))"
+        )
+    finally:
+        repl.shutdown()
+    assert out.strip() == "42 1"
