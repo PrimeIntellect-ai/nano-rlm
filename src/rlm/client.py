@@ -1,14 +1,10 @@
 """Thin LLM client wrapper. Extracts token usage from responses."""
 
 import asyncio
-import logging
-import re
-from collections.abc import Mapping
 from typing import Any, Awaitable, Callable
 
 from openai import (
     APIConnectionError,
-    APIError,
     APIResponseValidationError,
     APITimeoutError,
     AsyncOpenAI,
@@ -20,8 +16,6 @@ from pydantic import ValidationError
 
 from rlm.config import ProviderConfig
 from rlm.types import TokenUsage
-
-logger = logging.getLogger(__name__)
 
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 RETRY_COUNT_HEADER = "x-stainless-retry-count"
@@ -39,27 +33,6 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
 
 # Widely-spaced delays (seconds) between attempts; total ~5 min wall budget.
 _RETRY_DELAYS: tuple[int, ...] = (15, 30, 60, 90, 120)
-
-CONTEXT_WINDOW_FIELDS = (
-    "max_model_len",
-    "context_length",
-    "context_window",
-    "max_context_length",
-)
-CONTEXT_WINDOW_PATTERNS = (
-    re.compile(
-        r"(?:maximum|max(?:imum)?)[^.\n]{0,40}(?:context length|context window)"
-        r"[^\d]{0,20}([\d,]+)",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"[\"']?(?:max_model_len|context_length)[\"']?\s*[:=]\s*([\d,]+)",
-        re.IGNORECASE,
-    ),
-)
-
-_context_window_cache: dict[tuple[str, str], int | None] = {}
-_context_window_lock = asyncio.Lock()
 
 
 def resolve_provider() -> tuple[str | None, str | None, dict[str, str]]:
@@ -105,54 +78,6 @@ def make_client(provider: ProviderConfig | None = None) -> AsyncOpenAI:
 def model_call_headers(call_id: str) -> dict[str, str]:
     """Build transport headers for one idempotent model call."""
     return {IDEMPOTENCY_KEY_HEADER: call_id}
-
-
-def model_context_window(payload: Mapping[str, Any], model: str) -> int | None:
-    """Read a context-window extension from the requested model card."""
-    for card in payload.get("data") or []:
-        if not isinstance(card, Mapping) or card.get("id") != model:
-            continue
-        for field in CONTEXT_WINDOW_FIELDS:
-            value = card.get(field)
-            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                return value
-        break
-    return None
-
-
-def context_window_from_error(error: BaseException) -> int | None:
-    """Extract a context window from common provider overflow diagnostics."""
-    details = f"{error} {getattr(error, 'body', '') or ''}"
-    for pattern in CONTEXT_WINDOW_PATTERNS:
-        match = pattern.search(details)
-        if match:
-            return int(match.group(1).replace(",", ""))
-    return None
-
-
-def compaction_threshold(context_window: int) -> int:
-    """Reserve ten percent of the model context for checkpointing."""
-    return max(1, context_window * 9 // 10)
-
-
-async def resolve_compaction_threshold(client: AsyncOpenAI, model: str) -> int | None:
-    """Discover a proactive compaction threshold from model metadata."""
-    key = (str(getattr(client, "base_url", "")), model)
-    if key in _context_window_cache:
-        window = _context_window_cache[key]
-        return compaction_threshold(window) if window is not None else None
-
-    async with _context_window_lock:
-        if key not in _context_window_cache:
-            try:
-                payload = await client.get("/models", cast_to=dict)
-                _context_window_cache[key] = model_context_window(payload, model)
-            except (APIError, AttributeError) as error:
-                logger.debug("model context-window lookup failed: %s", error)
-                _context_window_cache[key] = None
-
-    window = _context_window_cache[key]
-    return compaction_threshold(window) if window is not None else None
 
 
 async def call_with_retries(

@@ -11,17 +11,25 @@ import time
 import uuid
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 from openai import AsyncOpenAI, BadRequestError
 
 from rlm.client import (
     call_with_retries,
-    compaction_threshold,
-    context_window_from_error,
     extract_usage,
     make_client,
     model_call_headers,
-    resolve_compaction_threshold,
+)
+from rlm.compaction import (
+    CHECKPOINT_PROMPT,
+    REPL_NOTE,
+    SUMMARY_FRAMING,
+    discover_threshold,
+    drop_latest_tool_result,
+    estimated_tokens,
+    is_context_overflow,
+    threshold_from_error,
 )
 from rlm.config import RuntimeConfig
 from rlm.mcp import MCPServer, load_mcp_servers, validate_mcp_servers
@@ -49,76 +57,6 @@ from rlm.types import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# Injected as a user message when the branch's context size reaches the
-# compaction threshold. The model's next reply is expected to be a
-# plain-text handoff summary; any tool calls it emits are ignored and
-# the message is compacted in place of them.
-CHECKPOINT_COMPACTION_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
-
-Include:
-- Current progress and key decisions made
-- Important context, constraints, or user preferences
-- What remains to be done (clear next steps)
-- Any critical data, examples, or references needed to continue
-
-Be concise, structured, and focused on helping the next LLM seamlessly continue the work."""
-
-# Appended to the checkpoint prompt when the IPython REPL is active.
-REPL_RESTART_NOTE = (
-    "\n\n"
-    "Note: the IPython kernel stays running across this compaction. "
-    "All variables, imports, and in-memory data are preserved. "
-    "Mention important variable names and what they contain so the "
-    "next LLM knows what's available."
-)
-
-# Wrapper text that frames the summary as the sole user-facing context
-# for the post-compaction branch. The original task prompt is dropped;
-# the summary is responsible for carrying the goal.
-POST_COMPACTION_FRAMING = """Another language model started to solve this problem and produced \
-a summary of its thinking process. Use this to build on the work \
-that has already been done and avoid duplicating work. Here is \
-the summary produced by the other language model, use the \
-information in this summary to assist with your own analysis:"""
-
-COMPACTED_TOOL_RESULT = "[tool output dropped because it exceeded the context limit]"
-
-
-def _is_context_overflow(e: BadRequestError) -> bool:
-    """Return whether a bad request reports an overlong model input."""
-    haystack = f"{e} {getattr(e, 'body', '') or ''}".lower()
-    return any(
-        marker in haystack
-        for marker in (
-            "request entity too large",
-            "context_length",
-            "context length",
-            "context window",
-            "prompt is too long",
-            "too many tokens",
-            "token limit exceeded",
-        )
-    )
-
-
-def _drop_latest_tool_result(messages: list[dict]) -> bool:
-    """Replace one recent tool result so an overflowed checkpoint can fit."""
-    for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-        if message.get("role") != "tool":
-            continue
-        if message.get("content") == COMPACTED_TOOL_RESULT:
-            continue
-        messages[index] = {**message, "content": COMPACTED_TOOL_RESULT}
-        return True
-    return False
-
-
-def _estimated_tokens(value: str) -> int:
-    """Estimate text tokens conservatively enough for proactive compaction."""
-    return (len(value) + 3) // 4
 
 
 def _parse_tool_call_args(raw: str) -> tuple[dict | None, dict | None]:
@@ -318,9 +256,7 @@ class RLMEngine:
         """Initialize the session, tools, conversation, and persistent kernel."""
 
         if self.compaction is not None and self.summarize_at_tokens is None:
-            self.summarize_at_tokens = await resolve_compaction_threshold(
-                self.client, self.model
-            )
+            self.summarize_at_tokens = await discover_threshold(self.client, self.model)
 
         self._ensure_session()
 
@@ -405,64 +341,7 @@ class RLMEngine:
 
         for turn in itertools.count(self._turn):
             self._turn = turn + 1
-            # Call LLM
-            call_id = uuid.uuid4().hex
-            request_kwargs = {
-                "model": self.model,
-                "messages": messages,
-                "extra_headers": model_call_headers(call_id),
-            }
-            if self._active_tool_schemas:
-                request_kwargs["tools"] = self._active_tool_schemas
-                request_kwargs["parallel_tool_calls"] = False
-            recovered_overflow = False
-            while True:
-                try:
-                    response = await call_with_retries(
-                        self.client.chat.completions.create,
-                        **request_kwargs,
-                    )
-                except BadRequestError as e:
-                    if (
-                        not _is_context_overflow(e)
-                        or recovered_overflow
-                        or not self._can_compact()
-                    ):
-                        raise
-                    context_window = context_window_from_error(e)
-                    if context_window is not None:
-                        self.summarize_at_tokens = compaction_threshold(context_window)
-                    await self._compact_branch(
-                        messages, turn, self._active_tool_schemas
-                    )
-                    recovered_overflow = True
-                    request_kwargs["extra_headers"] = model_call_headers(
-                        uuid.uuid4().hex
-                    )
-                    continue
-
-                usage = extract_usage(response)
-                self._total_usage.prompt_tokens += usage.prompt_tokens
-                self._total_usage.completion_tokens += usage.completion_tokens
-                self._last_prompt_tokens = usage.prompt_tokens
-                context_tokens = usage.prompt_tokens + usage.completion_tokens
-                choice = response.choices[0]
-                if (
-                    getattr(choice, "finish_reason", None) == "length"
-                    and self.summarize_at_tokens is not None
-                    and context_tokens >= self.summarize_at_tokens
-                    and not recovered_overflow
-                    and self._can_compact()
-                ):
-                    await self._compact_branch(
-                        messages, turn, self._active_tool_schemas
-                    )
-                    recovered_overflow = True
-                    request_kwargs["extra_headers"] = model_call_headers(
-                        uuid.uuid4().hex
-                    )
-                    continue
-                break
+            response, usage = await self._complete(messages, turn)
 
             self._metrics.turns_since_last_compaction = (
                 turn + 1 - self._branch_start_turn
@@ -607,27 +486,11 @@ class RLMEngine:
                 }
             )
 
-            # Auto-compaction: include the completion and pending tool result
-            # when checking the configured threshold. Fires at most once per loop
-            # iteration; the compaction op takes its own LLM call. A
-            # max_compactions cap, once hit, disables further compaction so
-            # the context grows to the model's natural limit.
-            context_tokens = (
-                usage.prompt_tokens
-                + usage.completion_tokens
-                + _estimated_tokens(result)
-            )
-            if (
-                self.summarize_at_tokens is not None
-                and context_tokens >= self.summarize_at_tokens
-                and self._can_compact()
-            ):
+            if self._should_compact(usage, result):
                 try:
-                    await self._compact_branch(
-                        messages, turn, self._active_tool_schemas
-                    )
+                    await self._compact_branch(messages, turn)
                 except BadRequestError as e:
-                    if not _is_context_overflow(e):
+                    if not is_context_overflow(e):
                         raise
                     self._metrics.stop_reason = "request_too_large"
                     final_text = "[request body too large]"
@@ -743,11 +606,64 @@ class RLMEngine:
             or self._metrics.num_compactions < self.max_compactions
         )
 
+    def _should_compact(self, usage: TokenUsage, extra_text: str = "") -> bool:
+        if self.summarize_at_tokens is None or not self._can_compact():
+            return False
+        tokens = usage.total + estimated_tokens(extra_text)
+        return tokens >= self.summarize_at_tokens
+
+    async def _call_model(
+        self, messages: list[dict], *, checkpoint: bool = False
+    ) -> tuple[Any, TokenUsage]:
+        request: dict = {
+            "model": self.model,
+            "messages": messages,
+            "extra_headers": model_call_headers(uuid.uuid4().hex),
+        }
+        if self._active_tool_schemas:
+            request["tools"] = self._active_tool_schemas
+            if checkpoint:
+                request["tool_choice"] = "none"
+            else:
+                request["parallel_tool_calls"] = False
+
+        response = await call_with_retries(
+            self.client.chat.completions.create, **request
+        )
+        usage = extract_usage(response)
+        self._total_usage.prompt_tokens += usage.prompt_tokens
+        self._total_usage.completion_tokens += usage.completion_tokens
+        if not checkpoint:
+            self._last_prompt_tokens = usage.prompt_tokens
+        return response, usage
+
+    async def _complete(
+        self, messages: list[dict], turn: int
+    ) -> tuple[Any, TokenUsage]:
+        """Complete one turn, with at most one compact-and-retry cycle."""
+        for attempt in range(2):
+            try:
+                response, usage = await self._call_model(messages)
+            except BadRequestError as error:
+                if attempt or not self._can_compact() or not is_context_overflow(error):
+                    raise
+                if threshold := threshold_from_error(error):
+                    self.summarize_at_tokens = threshold
+            else:
+                choice = response.choices[0]
+                if (
+                    attempt
+                    or choice.finish_reason != "length"
+                    or not self._should_compact(usage)
+                ):
+                    return response, usage
+            await self._compact_branch(messages, turn)
+        raise AssertionError("unreachable")
+
     async def _compact_branch(
         self,
         messages: list[dict],
         turn: int,
-        active_tools: list[dict],
     ) -> None:
         """Ask the model for a handoff summary and rebuild ``messages``.
 
@@ -756,8 +672,7 @@ class RLMEngine:
         summary is housekeeping, not a work turn, but its tokens land in
         ``_total_usage`` for cost accounting.
 
-        ``active_tools`` is forwarded as ``tools=`` with
-        ``tool_choice="none"`` so the rendered system prompt matches
+        Active tools are forwarded with ``tool_choice="none"`` so the system prompt matches
         regular turns (vLLM's chat-completions layer injects the tools
         block into the system message only when ``tools=`` is set). With
         a matching system prompt, prime-rl's RL trajectory walker keeps
@@ -766,55 +681,28 @@ class RLMEngine:
         keeps the original "text-only summary" behaviour by forbidding
         tool calls on this turn.
         """
-        # Measure what's about to be dropped BEFORE appending the
-        # checkpoint prompt — otherwise the prompt's own chars get
-        # counted as "dropped conversation content", inflating the
-        # metric and the session log's dropped_chars field.
         dropped_chars = _count_messages_chars(messages[1:])
         turns_since_last = turn + 1 - self._branch_start_turn
 
-        # Append the checkpoint prompt and ask the model for a text-only
-        # summary turn. Tools are advertised to the server (so the system
-        # prompt renders identically to regular turns) but
-        # ``tool_choice="none"`` forbids the model from calling any.
-        # Warn about the REPL restart only when a kernel is actually running.
-        checkpoint_prompt = CHECKPOINT_COMPACTION_PROMPT
+        checkpoint_prompt = CHECKPOINT_PROMPT
         if self._repl is not None:
-            checkpoint_prompt += REPL_RESTART_NOTE
+            checkpoint_prompt += REPL_NOTE
         while True:
-            messages.append({"role": "user", "content": checkpoint_prompt})
-            call_id = uuid.uuid4().hex
-            request_kwargs: dict = {
-                "model": self.model,
-                "messages": messages,
-                "extra_headers": model_call_headers(call_id),
-            }
-            if active_tools:
-                request_kwargs["tools"] = active_tools
-                request_kwargs["tool_choice"] = "none"
+            checkpoint = [
+                *messages,
+                {"role": "user", "content": checkpoint_prompt},
+            ]
             try:
-                response = await call_with_retries(
-                    self.client.chat.completions.create,
-                    **request_kwargs,
-                )
+                response, usage = await self._call_model(checkpoint, checkpoint=True)
                 break
             except BadRequestError as e:
-                messages.pop()
-                if not _is_context_overflow(e) or not _drop_latest_tool_result(
-                    messages
-                ):
+                if not is_context_overflow(e) or not drop_latest_tool_result(messages):
                     raise
-            except BaseException:
-                messages.pop()
-                raise
-        usage = extract_usage(response)
-        self._total_usage.prompt_tokens += usage.prompt_tokens
-        self._total_usage.completion_tokens += usage.completion_tokens
 
         summary_text = response.choices[0].message.content or ""
 
         system_msg = messages[0]
-        compacted_user_content = POST_COMPACTION_FRAMING + "\n\n" + summary_text
+        compacted_user_content = SUMMARY_FRAMING + "\n\n" + summary_text
         messages[:] = [
             system_msg,
             {"role": "user", "content": compacted_user_content},

@@ -15,7 +15,7 @@ from conftest import (
     DummyToolCall,
     DummyUsage,
 )
-from rlm.client import context_window_from_error
+from rlm.compaction import DROPPED_TOOL_RESULT, threshold_from_error
 from rlm.config import (
     CompactionConfig,
     ExecutionPolicy,
@@ -23,7 +23,7 @@ from rlm.config import (
     ProviderConfig,
     RuntimeConfig,
 )
-from rlm.engine import COMPACTED_TOOL_RESULT, RLMEngine
+from rlm.engine import RLMEngine
 from rlm.session import Session
 from rlm.supervisor import SessionTreeSupervisor
 
@@ -56,7 +56,7 @@ def _overflow() -> BadRequestError:
     )
 
 
-def test_context_window_is_learned_from_provider_error():
+def test_threshold_is_learned_from_provider_error():
     response = httpx.Response(
         400,
         request=httpx.Request("POST", "http://interceptor/v1/chat/completions"),
@@ -67,7 +67,7 @@ def test_context_window_is_learned_from_provider_error():
         body={"error": {"message": "maximum context length is 32,768 tokens"}},
     )
 
-    assert context_window_from_error(error) == 32_768
+    assert threshold_from_error(error) == 29_491
 
 
 class _ScriptedClient(DummyClient):
@@ -150,8 +150,7 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert engine._metrics.num_compactions == 1
     checkpoint_messages = client.calls[3]["messages"]
     assert any(
-        message.get("content") == COMPACTED_TOOL_RESULT
-        for message in checkpoint_messages
+        message.get("content") == DROPPED_TOOL_RESULT for message in checkpoint_messages
     )
     assert client.calls[3]["tool_choice"] == "none"
 
