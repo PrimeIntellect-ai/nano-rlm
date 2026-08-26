@@ -84,6 +84,7 @@ class DummyMessage:
 @dataclass
 class DummyChoice:
     message: DummyMessage
+    finish_reason: str = "stop"
 
 
 @dataclass

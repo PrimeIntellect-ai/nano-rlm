@@ -108,7 +108,7 @@ versioned contract described above.
 | `RLM_EXEC_TIMEOUT` | `300` | Seconds per IPython execution |
 | `RLM_MAX_OUTPUT` | `-1` | Max chars returned from a tool call (`-1` disables truncation; `0` is invalid) |
 | `RLM_MAX_TOOL_OUTPUT_CHARS` | — | Preserve only a head/tail window of this many characters from raw IPython output before it enters the conversation. |
-| `RLM_SUMMARIZE_AT_TOKENS` | — | Auto-compaction threshold: when a turn's prompt tokens reach this value, the conversation is compacted into a summary. Unset disables auto-compaction. |
+| `RLM_SUMMARIZE_AT_TOKENS` | — | Proactive compaction threshold for the current prompt, completion, and pending tool result. Unset disables the proactive threshold; context-overflow recovery remains enabled. |
 | `RLM_MAX_TOKENS` | `0` | Optional completion-token budget (`0` disables) |
 | `RLM_APPEND_TO_SYSTEM_PROMPT` | — | Extra instructions appended to the generated system prompt |
 | `RLM_SYSTEM_PROMPT_PATH` | — | Path to a file whose contents fully replace the generated system prompt |
@@ -140,9 +140,11 @@ Recursive calls are created by a session-local supervisor rather than by the IPy
 
 ## Compaction
 
-There is no model-driven compaction tool. Compaction is automatic: set `RLM_SUMMARIZE_AT_TOKENS` and, once a turn's prompt token count reaches that threshold, the engine asks the model for a handoff summary and resumes the task on a fresh branch seeded with that summary. The original task prompt is dropped — the summary carries the goal forward.
+There is no model-driven compaction tool. Set `RLM_SUMMARIZE_AT_TOKENS` to compact before the estimated active context reaches the model limit. The estimate includes prompt tokens, completion tokens, and a pending tool result. The engine also compacts and retries once when the provider reports a context overflow or a decode reaches the configured threshold.
 
-The IPython kernel keeps running across the compaction, so all variables, imports, and in-memory data are preserved; the model is told to mention important variable names in its summary so the resumed branch knows what's available. With `RLM_SUMMARIZE_AT_TOKENS` unset, no auto-compaction occurs.
+The engine asks the model for a handoff summary and resumes the task on a fresh branch seeded with that summary. The original task prompt is dropped, so the summary carries the goal forward. If an oversized tool result prevents the checkpoint request from fitting, the engine replaces only the newest required tool results with a context-limit marker and retries the checkpoint.
+
+The IPython kernel keeps running across the compaction, so all variables, imports, and in-memory data are preserved. The model is told to mention important variable names in its summary so the resumed branch knows what is available. The same policy applies to the main agent and all recursive agents.
 
 ## Session Directory
 

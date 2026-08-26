@@ -86,11 +86,44 @@ POST_COMPACTION_FRAMING = (
     "information in this summary to assist with your own analysis:"
 )
 
+COMPACTED_TOOL_RESULT = (
+    "[tool output dropped because it exceeded the model context limit]"
+)
 
-def _is_request_too_large(e: BadRequestError) -> bool:
-    """True if a 400 matches the proxy's "Request Entity Too Large" body."""
+
+def _is_context_overflow(e: BadRequestError) -> bool:
+    """Return whether a bad request reports an overlong model input."""
     haystack = f"{e} {getattr(e, 'body', '') or ''}".lower()
-    return "request entity too large" in haystack
+    return any(
+        marker in haystack
+        for marker in (
+            "request entity too large",
+            "context_length",
+            "context length",
+            "context window",
+            "prompt is too long",
+            "too many tokens",
+            "token limit exceeded",
+        )
+    )
+
+
+def _drop_latest_tool_result(messages: list[dict]) -> bool:
+    """Replace one recent tool result so an overflowed checkpoint can fit."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message.get("role") != "tool":
+            continue
+        if message.get("content") == COMPACTED_TOOL_RESULT:
+            continue
+        messages[index] = {**message, "content": COMPACTED_TOOL_RESULT}
+        return True
+    return False
+
+
+def _estimated_tokens(value: str) -> int:
+    """Estimate text tokens conservatively enough for proactive compaction."""
+    return (len(value) + 3) // 4
 
 
 def _parse_tool_call_args(raw: str) -> tuple[dict | None, dict | None]:
@@ -379,21 +412,51 @@ class RLMEngine:
             if self._active_tool_schemas:
                 request_kwargs["tools"] = self._active_tool_schemas
                 request_kwargs["parallel_tool_calls"] = False
-            try:
-                response = await call_with_retries(
-                    self.client.chat.completions.create,
-                    **request_kwargs,
-                )
-            except BadRequestError as e:
-                if not _is_request_too_large(e):
-                    raise
-                self._metrics.stop_reason = "request_too_large"
-                final_text = "[request body too large]"
+            recovered_overflow = False
+            while True:
+                try:
+                    response = await call_with_retries(
+                        self.client.chat.completions.create,
+                        **request_kwargs,
+                    )
+                except BadRequestError as e:
+                    if (
+                        not _is_context_overflow(e)
+                        or recovered_overflow
+                        or not self._can_compact()
+                    ):
+                        raise
+                    await self._compact_branch(
+                        messages, turn, self._active_tool_schemas
+                    )
+                    recovered_overflow = True
+                    request_kwargs["extra_headers"] = model_call_headers(
+                        uuid.uuid4().hex
+                    )
+                    continue
+
+                usage = extract_usage(response)
+                self._total_usage.prompt_tokens += usage.prompt_tokens
+                self._total_usage.completion_tokens += usage.completion_tokens
+                self._last_prompt_tokens = usage.prompt_tokens
+                context_tokens = usage.prompt_tokens + usage.completion_tokens
+                choice = response.choices[0]
+                if (
+                    getattr(choice, "finish_reason", None) == "length"
+                    and self.summarize_at_tokens is not None
+                    and context_tokens >= self.summarize_at_tokens
+                    and not recovered_overflow
+                    and self._can_compact()
+                ):
+                    await self._compact_branch(
+                        messages, turn, self._active_tool_schemas
+                    )
+                    recovered_overflow = True
+                    request_kwargs["extra_headers"] = model_call_headers(
+                        uuid.uuid4().hex
+                    )
+                    continue
                 break
-            usage = extract_usage(response)
-            self._total_usage.prompt_tokens += usage.prompt_tokens
-            self._total_usage.completion_tokens += usage.completion_tokens
-            self._last_prompt_tokens = usage.prompt_tokens
 
             self._metrics.turns_since_last_compaction = (
                 turn + 1 - self._branch_start_turn
@@ -538,26 +601,27 @@ class RLMEngine:
                 }
             )
 
-            # Auto-compaction: if this turn's prompt_tokens reached the
-            # configured threshold, ask the model for a handoff summary and
-            # rebuild the branch around it. Fires at most once per loop
+            # Auto-compaction: include the completion and pending tool result
+            # when checking the configured threshold. Fires at most once per loop
             # iteration; the compaction op takes its own LLM call. A
             # max_compactions cap, once hit, disables further compaction so
             # the context grows to the model's natural limit.
+            context_tokens = (
+                usage.prompt_tokens
+                + usage.completion_tokens
+                + _estimated_tokens(result)
+            )
             if (
                 self.summarize_at_tokens is not None
-                and usage.prompt_tokens >= self.summarize_at_tokens
-                and (
-                    self.max_compactions is None
-                    or self._metrics.num_compactions < self.max_compactions
-                )
+                and context_tokens >= self.summarize_at_tokens
+                and self._can_compact()
             ):
                 try:
                     await self._compact_branch(
                         messages, turn, self._active_tool_schemas
                     )
                 except BadRequestError as e:
-                    if not _is_request_too_large(e):
+                    if not _is_context_overflow(e):
                         raise
                     self._metrics.stop_reason = "request_too_large"
                     final_text = "[request body too large]"
@@ -667,6 +731,11 @@ class RLMEngine:
             child = child.merge(trusted_child)
         return direct, child, child_aggregate.num_sessions
 
+    def _can_compact(self) -> bool:
+        return self.max_compactions is None or (
+            self._metrics.num_compactions < self.max_compactions
+        )
+
     async def _compact_branch(
         self,
         messages: list[dict],
@@ -676,7 +745,7 @@ class RLMEngine:
         """Ask the model for a handoff summary and rebuild ``messages``.
 
         Called in-place: mutates ``messages`` to ``[system, user(framing +
-        summary)]`` and restarts the ipython kernel. The LLM call for the
+        summary)]`` while preserving the IPython kernel. The LLM call for the
         summary is housekeeping, not a work turn, but its tokens land in
         ``_total_usage`` for cost accounting.
 
@@ -705,24 +774,32 @@ class RLMEngine:
         checkpoint_prompt = CHECKPOINT_COMPACTION_PROMPT
         if self._repl is not None:
             checkpoint_prompt += REPL_RESTART_NOTE
-        messages.append({"role": "user", "content": checkpoint_prompt})
-        call_id = uuid.uuid4().hex
-        request_kwargs: dict = {
-            "model": self.model,
-            "messages": messages,
-            "extra_headers": model_call_headers(call_id),
-        }
-        if active_tools:
-            request_kwargs["tools"] = active_tools
-            request_kwargs["tool_choice"] = "none"
-        try:
-            response = await call_with_retries(
-                self.client.chat.completions.create,
-                **request_kwargs,
-            )
-        except BaseException:
-            messages.pop()
-            raise
+        while True:
+            messages.append({"role": "user", "content": checkpoint_prompt})
+            call_id = uuid.uuid4().hex
+            request_kwargs: dict = {
+                "model": self.model,
+                "messages": messages,
+                "extra_headers": model_call_headers(call_id),
+            }
+            if active_tools:
+                request_kwargs["tools"] = active_tools
+                request_kwargs["tool_choice"] = "none"
+            try:
+                response = await call_with_retries(
+                    self.client.chat.completions.create,
+                    **request_kwargs,
+                )
+                break
+            except BadRequestError as e:
+                messages.pop()
+                if not _is_context_overflow(e) or not _drop_latest_tool_result(
+                    messages
+                ):
+                    raise
+            except BaseException:
+                messages.pop()
+                raise
         usage = extract_usage(response)
         self._total_usage.prompt_tokens += usage.prompt_tokens
         self._total_usage.completion_tokens += usage.completion_tokens
