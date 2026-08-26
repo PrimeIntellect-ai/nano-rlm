@@ -766,6 +766,38 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert engine.closed is True
 
 
+async def test_acp_prompt_snapshot_records_resumed_request_compaction(
+    monkeypatch, tmp_path
+):
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
+            DummyMessage(content="summary"),
+            DummyMessage(content="done"),
+        ]
+    )
+
+    def make_engine(**kwargs):
+        return RLMEngine(client=client, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("rlm.acp.RLMEngine", make_engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    runtime_metadata = _runtime_metadata()
+    runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["summarize_at_tokens"] = 1
+    created = await agent.new_session(str(tmp_path), **runtime_metadata)
+
+    try:
+        response = await agent.prompt(created.session_id, [text_block("compact")])
+        lineage = response.field_meta[SESSION_METADATA_KEY]["lineage"]
+        compaction_id = lineage["compactions"][0]["compaction_id"]
+
+        assert lineage["requests"][-1]["kind"] == "turn"
+        assert lineage["requests"][-1]["compaction_id"] == compaction_id
+    finally:
+        await agent.close_session(created.session_id)
+
+
 async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
     _Engine.instances.clear()
     monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))

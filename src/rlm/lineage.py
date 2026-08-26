@@ -121,6 +121,7 @@ class LineageTracker:
         session = self._sessions[session_id]
         context_id = self._active_contexts[session_id]
         context = self._contexts[context_id]
+        effective_compaction_id = compaction_id or context.get("compaction_id")
         request_id = uuid.uuid4().hex
         request = {
             "request_id": request_id,
@@ -128,8 +129,8 @@ class LineageTracker:
             "context_id": context_id,
             "kind": kind,
         }
-        if compaction_id is not None:
-            request["compaction_id"] = compaction_id
+        if effective_compaction_id is not None:
+            request["compaction_id"] = effective_compaction_id
         self._requests[request_id] = request
 
         if kind == "compaction":
@@ -142,7 +143,7 @@ class LineageTracker:
             context_id=context_id,
             previous_context_id=context.get("previous_context_id"),
             transition=context["transition"],
-            compaction_id=compaction_id or context.get("compaction_id"),
+            compaction_id=effective_compaction_id,
             depth=session["depth"],
         )
 

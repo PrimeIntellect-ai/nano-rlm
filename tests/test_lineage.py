@@ -64,6 +64,7 @@ def test_completed_compaction_starts_linked_context_epoch():
     assert resumed_headers["X-RLM-Previous-Context-ID"] == source_context_id
     assert resumed_headers["X-RLM-Transition"] == "compact"
     assert resumed_headers["X-RLM-Compaction-ID"] == compaction.compaction_id
+    assert snapshot["requests"][-1]["compaction_id"] == compaction.compaction_id
     assert snapshot["compactions"] == [
         {
             "compaction_id": compaction.compaction_id,
