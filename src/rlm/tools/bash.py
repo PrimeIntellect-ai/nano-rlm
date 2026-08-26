@@ -6,6 +6,7 @@ Enabled by default alongside ipython; override the tool set with ``RLM_BUILTIN_T
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import Any
 
@@ -54,11 +55,16 @@ EDIT_SCHEMA = {
 }
 
 
-def run_bash(command: str, timeout: int, cwd: str | None = None) -> str:
+def run_bash(
+    command: str,
+    timeout: int,
+    cwd: str | None = None,
+    allow_git: bool | None = None,
+) -> str:
     """Guarded ``bash -c`` execution shared by the bash tool and the bash skill."""
     if not isinstance(command, str) or not command.strip():
         return "Error: empty command"
-    blocked = find_blocked_command(command)
+    blocked = find_blocked_command(command, allow_git=allow_git)
     if blocked:
         return refusal(blocked)
     try:
@@ -88,7 +94,10 @@ class BashTool:
     def execute(self, args: dict[str, Any], context: ToolContext) -> ToolOutcome:
         return ToolOutcome(
             content=run_bash(
-                args.get("command", ""), context.exec_timeout, cwd=context.cwd
+                args.get("command", ""),
+                context.exec_timeout,
+                cwd=context.cwd,
+                allow_git=context.allow_git,
             )
         )
 
@@ -105,6 +114,8 @@ class EditTool:
         path, old, new = args.get("path"), args.get("old_str"), args.get("new_str")
         if not path or old is None or new is None:
             return ToolOutcome(content="Error: path, old_str and new_str are required")
+        if context.cwd and not os.path.isabs(path):
+            path = os.path.join(context.cwd, path)
         try:
             text = open(path, encoding="utf-8").read()
         except OSError as e:

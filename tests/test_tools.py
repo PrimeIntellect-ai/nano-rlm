@@ -154,3 +154,44 @@ print(all(os.environ.get(name, '').startswith({repl._ipc_dir!r}) for name in ('I
 
     assert first.strip().splitlines() == ["yes", "True", "True", "True"]
     assert second.strip().splitlines() == ["yes", "True", "True", "True"]
+
+
+def _tool_ctx(**overrides):
+    from rlm.tools.base import ToolContext
+    from rlm.types import RLMMetrics, TokenUsage
+
+    kwargs = dict(
+        messages=[],
+        metrics=RLMMetrics(),
+        total_usage=TokenUsage(),
+        last_prompt_tokens=0,
+        exec_timeout=10,
+    )
+    kwargs.update(overrides)
+    return ToolContext(**kwargs)
+
+
+def test_edit_tool_resolves_relative_path_against_cwd(tmp_path):
+    from rlm.tools.bash import EditTool
+
+    (tmp_path / "f.txt").write_text("hello world")
+    out = EditTool().execute(
+        {"path": "f.txt", "old_str": "hello", "new_str": "goodbye"},
+        _tool_ctx(cwd=str(tmp_path)),
+    )
+    assert "Edited" in out.content
+    assert (tmp_path / "f.txt").read_text() == "goodbye world"
+
+
+def test_bash_tool_honors_explicit_allow_git(monkeypatch):
+    from rlm.tools.bash import BashTool
+
+    monkeypatch.delenv("RLM_ALLOW_GIT", raising=False)
+    refused = BashTool().execute(
+        {"command": "git log --all"}, _tool_ctx(allow_git=False)
+    )
+    allowed = BashTool().execute(
+        {"command": "git log --all"}, _tool_ctx(allow_git=True)
+    )
+    assert "not allowed" in refused.content
+    assert "not allowed" not in allowed.content
