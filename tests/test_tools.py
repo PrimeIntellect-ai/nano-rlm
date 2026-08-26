@@ -92,3 +92,23 @@ def test_ipython_kernel_does_not_inherit_parent_stdio(session, capfd):
     assert captured.out == ""
     assert captured.err == ""
     assert result.strip() == "4 14"
+
+
+def test_tooling_presets(monkeypatch):
+    from rlm.tools.registry import preset_skills, preset_tools
+
+    monkeypatch.delenv("RLM_TOOLING", raising=False)
+    assert preset_tools() == ("bash", "edit", "ipython")
+    assert preset_skills() == ("bash", "edit")
+
+    monkeypatch.setenv("RLM_TOOLING", "tools")
+    assert preset_skills() == ()
+
+    monkeypatch.setenv("RLM_TOOLING", "skills")
+    assert preset_tools() == ("ipython",)
+
+    monkeypatch.setenv("RLM_TOOLING", "bogus")
+    import pytest
+
+    with pytest.raises(ValueError):
+        preset_tools()

@@ -24,6 +24,32 @@ _TOOLS_BY_NAME: dict[str, BuiltinTool] = {
 _DEFAULT = ("bash", "edit", "ipython")
 
 
+_TOOLING_PRESETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    # preset -> (builtin tools, builtin skills)
+    "dual": (("bash", "edit", "ipython"), ("bash", "edit")),
+    "tools": (("bash", "edit", "ipython"), ()),
+    "skills": (("ipython",), ("bash", "edit")),
+}
+
+
+def tooling_preset() -> str:
+    """The RLM_TOOLING preset name: dual (default), tools, or skills."""
+    preset = os.environ.get("RLM_TOOLING", "dual").strip() or "dual"
+    if preset not in _TOOLING_PRESETS:
+        raise ValueError(
+            f"RLM_TOOLING must be one of {sorted(_TOOLING_PRESETS)}, got {preset!r}"
+        )
+    return preset
+
+
+def preset_tools() -> tuple[str, ...]:
+    return _TOOLING_PRESETS[tooling_preset()][0]
+
+
+def preset_skills() -> tuple[str, ...]:
+    return _TOOLING_PRESETS[tooling_preset()][1]
+
+
 def _selected() -> tuple[BuiltinTool, ...]:
     spec = os.environ.get("RLM_BUILTIN_TOOLS", "").strip()
     if spec:
@@ -35,9 +61,11 @@ def _selected() -> tuple[BuiltinTool, ...]:
                 f"available: {sorted(_TOOLS_BY_NAME)}"
             )
         return tuple(_TOOLS_BY_NAME[n] for n in names)
-    # default: the standard set plus any extra registered tools (fixtures/extensions)
+    # default: the RLM_TOOLING preset's tools plus any extra registered tools
+    # (fixtures/extensions).
+    preset = preset_tools()
     extras = [n for n in _TOOLS_BY_NAME if n not in _DEFAULT]
-    return tuple(_TOOLS_BY_NAME[n] for n in [*_DEFAULT, *extras])
+    return tuple(_TOOLS_BY_NAME[n] for n in [*preset, *extras])
 
 
 def get_active_builtin_tools() -> list[BuiltinTool]:

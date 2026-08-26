@@ -23,6 +23,7 @@ from rlm.mcp import (
 from rlm.prompt import build_system_prompt
 from rlm.session import Session
 from rlm.skills import enable_builtin_skills
+from rlm.tools.registry import preset_skills
 from rlm.tools import (
     SKILLS_DIR,
     BuiltinTool,
@@ -204,7 +205,7 @@ class RLMEngine:
         self.skills = (
             [s.strip() for s in raw_skills.split(",") if s.strip()]
             if raw_skills is not None
-            else ["bash", "edit"]
+            else list(preset_skills())
         )
 
         # Token budget

@@ -124,6 +124,13 @@ def build_system_prompt(
                 "it returns the output as a string, useful when mixing shell and Python "
                 "in one cell or avoiding shell quoting."
             )
+        elif "bash" in installed_skills:
+            skill_lines.append(
+                "Run shell with `out = await bash('''command here''')` — always "
+                "triple-quote the command so shell quotes and multi-line scripts never "
+                "need escaping. It returns the output as a string; no need for "
+                "`subprocess` or `%%bash`. Chain related commands with && in one call."
+            )
         if "edit" in installed_skills:
             skill_lines.append(EDIT_SKILL_PROMPT)
         if "search" in installed_skills:
@@ -140,7 +147,7 @@ def build_system_prompt(
             ]
         )
 
-    if has_ipython and not has_bash:
+    if has_ipython and not has_bash and "bash" not in (installed_skills or []):
         parts.extend(["", IPYTHON_CONTROL_PROMPT])
     elif has_ipython:
         parts.extend(["", PROJECT_ENV_PROMPT])
