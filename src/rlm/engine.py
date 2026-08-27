@@ -399,15 +399,15 @@ class RLMEngine:
         for turn in itertools.count(self._turn):
             self._turn = turn + 1
             # Call LLM
-            provenance = self._lineage.start_request(
+            request_id = self._lineage.start_request(
                 self._invocation_id,
                 kind="turn",
             )
-            call_id = provenance.request_id
+            call_id = request_id
             request_kwargs = {
                 "model": self.model,
                 "messages": messages,
-                "extra_headers": model_call_headers(provenance),
+                "extra_headers": model_call_headers(request_id),
             }
             if self._active_tool_schemas:
                 request_kwargs["tools"] = self._active_tool_schemas
@@ -747,7 +747,7 @@ class RLMEngine:
             checkpoint_prompt += REPL_RESTART_NOTE
         messages.append({"role": "user", "content": checkpoint_prompt})
         compaction = self._lineage.begin_compaction(self._invocation_id)
-        provenance = self._lineage.start_request(
+        request_id = self._lineage.start_request(
             self._invocation_id,
             kind="compaction",
             compaction_id=compaction.compaction_id,
@@ -755,7 +755,7 @@ class RLMEngine:
         request_kwargs: dict = {
             "model": self.model,
             "messages": messages,
-            "extra_headers": model_call_headers(provenance),
+            "extra_headers": model_call_headers(request_id),
         }
         if active_tools:
             request_kwargs["tools"] = active_tools

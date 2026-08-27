@@ -357,19 +357,21 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
         header["Idempotency-Key"] == header["X-ACP-Lineage-Request-ID"]
         for header in (turn, compaction, resumed)
     )
-    assert turn["X-ACP-Lineage-Session-ID"] == engine._invocation_id
-    assert turn["X-ACP-Lineage-Context-ID"] == compaction["X-ACP-Lineage-Context-ID"]
-    assert turn["X-ACP-Lineage-Transition"] == "root"
-    assert "X-ACP-Lineage-Compaction-ID" not in turn
-    assert (
-        compaction["X-ACP-Lineage-Compaction-ID"]
-        == resumed["X-ACP-Lineage-Compaction-ID"]
-    )
-    assert (
-        resumed["X-ACP-Lineage-Previous-Context-ID"] == turn["X-ACP-Lineage-Context-ID"]
-    )
-    assert resumed["X-ACP-Lineage-Context-ID"] != turn["X-ACP-Lineage-Context-ID"]
-    assert resumed["X-ACP-Lineage-Transition"] == "compact"
+    lineage = engine.execution_snapshot()["lineage"]
+    requests = {request["request_id"]: request for request in lineage["requests"]}
+    contexts = {context["context_id"]: context for context in lineage["contexts"]}
+    turn_request, compaction_request, resumed_request = [
+        requests[headers["X-ACP-Lineage-Request-ID"]]
+        for headers in (turn, compaction, resumed)
+    ]
+    assert turn_request["session_id"] == engine._invocation_id
+    assert turn_request["context_id"] == compaction_request["context_id"]
+    assert compaction_request["kind"] == "compaction"
+    assert resumed_request["context_id"] != turn_request["context_id"]
+    resumed_context = contexts[resumed_request["context_id"]]
+    assert resumed_context["previous_context_id"] == turn_request["context_id"]
+    assert resumed_context["transition"] == "compact"
+    assert resumed_request["compaction_id"] == compaction_request["compaction_id"]
 
 
 async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
@@ -496,14 +498,18 @@ async def test_failed_prompt_restores_pre_compaction_context(session):
     finally:
         engine.close()
 
-    initial, summary, compacted, retried = [
-        call["extra_headers"] for call in client.calls
+    request_ids = [
+        call["extra_headers"]["X-ACP-Lineage-Request-ID"] for call in client.calls
     ]
+    lineage = engine.execution_snapshot()["lineage"]
+    requests = {request["request_id"]: request for request in lineage["requests"]}
+    contexts = {context["context_id"]: context for context in lineage["contexts"]}
+    initial, summary, compacted, retried = [requests[item] for item in request_ids]
     assert result.answer == "continued"
-    assert summary["X-ACP-Lineage-Context-ID"] == initial["X-ACP-Lineage-Context-ID"]
-    assert compacted["X-ACP-Lineage-Context-ID"] != initial["X-ACP-Lineage-Context-ID"]
-    assert retried["X-ACP-Lineage-Context-ID"] == initial["X-ACP-Lineage-Context-ID"]
-    assert retried["X-ACP-Lineage-Transition"] == "root"
+    assert summary["context_id"] == initial["context_id"]
+    assert compacted["context_id"] != initial["context_id"]
+    assert retried["context_id"] == initial["context_id"]
+    assert contexts[retried["context_id"]]["transition"] == "root"
 
 
 async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):

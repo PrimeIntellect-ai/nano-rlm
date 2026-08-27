@@ -13,35 +13,7 @@ SessionStatus = Literal["running", "completed", "failed", "cancelled"]
 CompactionStatus = Literal["in_progress", "completed", "failed", "cancelled"]
 
 REQUEST_ID_HEADER = "X-ACP-Lineage-Request-ID"
-SESSION_ID_HEADER = "X-ACP-Lineage-Session-ID"
-PARENT_SESSION_ID_HEADER = "X-ACP-Lineage-Parent-Session-ID"
-CONTEXT_ID_HEADER = "X-ACP-Lineage-Context-ID"
-PREVIOUS_CONTEXT_ID_HEADER = "X-ACP-Lineage-Previous-Context-ID"
-TRANSITION_HEADER = "X-ACP-Lineage-Transition"
-COMPACTION_ID_HEADER = "X-ACP-Lineage-Compaction-ID"
-DEPTH_HEADER = "X-ACP-Lineage-Depth"
-LINEAGE_HEADER_NAMES = (
-    REQUEST_ID_HEADER,
-    SESSION_ID_HEADER,
-    PARENT_SESSION_ID_HEADER,
-    CONTEXT_ID_HEADER,
-    PREVIOUS_CONTEXT_ID_HEADER,
-    TRANSITION_HEADER,
-    COMPACTION_ID_HEADER,
-    DEPTH_HEADER,
-)
-
-
-@dataclass(frozen=True)
-class RequestProvenance:
-    request_id: str
-    session_id: str
-    parent_session_id: str | None
-    context_id: str
-    previous_context_id: str | None
-    transition: ContextTransition
-    compaction_id: str | None
-    depth: int
+LINEAGE_HEADER_NAMES = (REQUEST_ID_HEADER,)
 
 
 @dataclass(frozen=True)
@@ -121,10 +93,9 @@ class LineageTracker:
         *,
         kind: RequestKind,
         compaction_id: str | None = None,
-    ) -> RequestProvenance:
+    ) -> str:
         if kind == "compaction" and compaction_id is None:
             raise ValueError("compaction requests require a compaction ID")
-        session = self._sessions[session_id]
         context_id = self._active_contexts[session_id]
         context = self._contexts[context_id]
         effective_compaction_id = compaction_id or context.get("compaction_id")
@@ -142,16 +113,7 @@ class LineageTracker:
         if kind == "compaction":
             self._compactions[compaction_id]["summary_request_id"] = request_id
 
-        return RequestProvenance(
-            request_id=request_id,
-            session_id=session_id,
-            parent_session_id=session.get("parent_session_id"),
-            context_id=context_id,
-            previous_context_id=context.get("previous_context_id"),
-            transition=context["transition"],
-            compaction_id=effective_compaction_id,
-            depth=session["depth"],
-        )
+        return request_id
 
     def begin_compaction(self, session_id: str) -> Compaction:
         compaction_id = uuid.uuid4().hex
