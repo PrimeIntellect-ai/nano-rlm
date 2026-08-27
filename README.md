@@ -109,8 +109,10 @@ versioned contract described above.
 | `RLM_EXEC_TIMEOUT` | `300` | Seconds per IPython execution |
 | `RLM_MAX_OUTPUT` | `-1` | Max chars returned from a tool call (`-1` disables truncation; `0` is invalid) |
 | `RLM_MAX_TOOL_OUTPUT_CHARS` | — | Preserve only a head/tail window of this many characters from raw IPython output before it enters the conversation. |
-| `RLM_SUMMARIZE_AT_TOKENS` | — | Auto-compaction threshold: when a turn's prompt tokens reach this value, the conversation is compacted into a summary. Unset disables auto-compaction. |
-| `RLM_MAX_TOKENS` | `0` | Optional completion-token budget (`0` disables) |
+| `RLM_SUMMARIZE_AT_TOKENS` | — | Auto-compaction threshold (context budget) for the **root**: when a turn's prompt tokens reach this value, the conversation is compacted into a summary. Unset disables auto-compaction. |
+| `RLM_SUBAGENT_SUMMARIZE_AT_TOKENS` | — | Context budget for **sub-agents** (depth ≥ 1); falls back to `RLM_SUMMARIZE_AT_TOKENS` when unset. Lets the root run a large context (e.g. 100k) while sub-agents stay lean (e.g. 50k). |
+| `RLM_MAX_TOTAL_TOKENS` | — | Tree-total token budget across all engines (prompt + completion). Once reached, no further sub-agents spawn. Unset = unbounded. |
+| `RLM_MAX_TOKENS` | `0` | Optional per-session completion-token budget (`0` disables) |
 | `RLM_APPEND_TO_SYSTEM_PROMPT` | — | Extra instructions appended to the generated system prompt. Used by the **root** (depth 0), and the fallback for every tier below. |
 | `RLM_SUBAGENT_APPEND_TO_SYSTEM_PROMPT` | — | Append for **sub-agents** (depth ≥ 1) that can still recurse (nodes). Falls back to `RLM_APPEND_TO_SYSTEM_PROMPT` when unset. |
 | `RLM_LEAF_APPEND_TO_SYSTEM_PROMPT` | — | Append for **leaf** sub-agents that cannot recurse (`depth == RLM_MAX_DEPTH`). Falls back to `RLM_SUBAGENT_APPEND_TO_SYSTEM_PROMPT`, then `RLM_APPEND_TO_SYSTEM_PROMPT`. Lets the root be told to delegate, nodes that they may delegate further, and leaves to just do the work and return. |
