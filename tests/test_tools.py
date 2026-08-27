@@ -97,6 +97,10 @@ def test_tooling_presets(monkeypatch):
     from rlm.tools.registry import preset_skills, preset_tools
 
     monkeypatch.delenv("RLM_TOOLING", raising=False)
+    assert preset_tools() == ("ipython",)
+    assert preset_skills() == ("bash", "edit")
+
+    monkeypatch.setenv("RLM_TOOLING", "dual")
     assert preset_tools() == ("bash", "edit", "ipython")
     assert preset_skills() == ("bash", "edit")
 
