@@ -96,6 +96,8 @@ class SessionTreeSupervisor:
         self._close_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._total_calls = 0
+        # cumulative prompt+completion tokens of completed sub-agents
+        self._total_tokens = 0
         self._tasks: set[asyncio.Task[Any]] = set()
         self._child_tasks: set[asyncio.Task[RLMResult]] = set()
         self._connection_tasks: set[asyncio.Task[None]] = set()
@@ -269,6 +271,11 @@ class SessionTreeSupervisor:
                 return asyncio.create_task(
                     self._limit_result(parent, "recursive call limit reached")
                 )
+            token_budget = parent.runtime_config.policy.max_total_tokens
+            if token_budget is not None and self._total_tokens >= token_budget:
+                return asyncio.create_task(
+                    self._limit_result(parent, "token budget reached")
+                )
             self._total_calls += 1
             task = asyncio.create_task(
                 self._run_child(parent_id, prompt, scope.request_id)
@@ -374,6 +381,9 @@ class SessionTreeSupervisor:
                     invocation_id=child.id,
                 )
                 result = await engine.run(prompt)
+                usage = getattr(result, "usage", None)
+                if usage is not None:
+                    self._total_tokens += usage.prompt_tokens + usage.completion_tokens
                 self.lineage.set_session_status(child_id, "completed")
                 return result
             except asyncio.CancelledError:
