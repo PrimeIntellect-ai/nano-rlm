@@ -178,6 +178,7 @@ class RLMEngine:
         self.system_prompt_path = config.system_prompt_path
         self.append_to_system_prompt = config.resolved_append_to_system_prompt
         self.max_depth = config.policy.max_depth
+        self.max_turns = config.policy.max_turns
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
 
@@ -423,6 +424,11 @@ class RLMEngine:
 
         for turn in itertools.count(self._turn):
             self._turn = turn + 1
+            # Per-session turn cap (applies to every engine incl. sub-agents): stop before the
+            # (max_turns+1)th model call so a leaf can't loop unbounded and get cancelled later.
+            if self.max_turns is not None and self._turn > self.max_turns:
+                self._metrics.stop_reason = "max_turns"
+                break
             # Call LLM
             request_id = self._lineage.start_request(
                 self._invocation_id,

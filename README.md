@@ -103,6 +103,7 @@ versioned contract described above.
 | `RLM_MCP_CONFIG` | — | Standard `mcpServers` config (streamable HTTP or stdio); each server's tools become pre-imported IPython skills (`<server>_<tool>`). See [MCP tools as skills](#mcp-tools-as-skills). |
 | `RLM_KERNEL_ENV` | `{}` | JSON object of task variables explicitly passed to IPython and its subprocesses. Supervisor, provider, MCP, and broker configuration names are reserved. |
 | `RLM_MAX_DEPTH` | `0` | Max recursion depth (`0` means no sub-agents) |
+| `RLM_MAX_TURNS` | — | Per-session turn cap (one turn = one model call + its tool execution). Applies to every engine in the tree, including sub-agents, so a leaf can't loop unbounded. Unset = uncapped. |
 | `RLM_MAX_CONCURRENT_SUBAGENTS` | `max(4, RLM_MAX_DEPTH)` | Maximum live recursive agents in a session tree. Capacity is reserved per depth to prevent nested-call deadlocks. |
 | `RLM_MAX_SUBAGENT_CALLS` | `64` | Maximum accepted recursive calls across the complete session tree. |
 | `RLM_EXEC_TIMEOUT` | `300` | Seconds per IPython execution |

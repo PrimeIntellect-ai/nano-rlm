@@ -135,6 +135,9 @@ class ExecutionPolicy(_ConfigModel):
     """Resource and context-management policy for one RLM engine."""
 
     max_depth: int = Field(default=1, ge=0)
+    max_turns: int | None = Field(default=None, gt=0)
+    """Per-session turn cap (one turn = one model call + its tool execution). Applies to EVERY
+    engine in the tree, including sub-agents, so a leaf can't loop unbounded. None = uncapped."""
     exec_timeout: int = Field(default=300, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
     summarize_at_tokens: int | None = Field(default=256_000, gt=0)
@@ -212,6 +215,9 @@ class RuntimeConfig(_ConfigModel):
             invocation=InvocationContext.from_env(env),
             policy=ExecutionPolicy(
                 max_depth=max_depth,
+                max_turns=_optional_positive_int(
+                    env.get("RLM_MAX_TURNS"), "RLM_MAX_TURNS"
+                ),
                 exec_timeout=int(env.get("RLM_EXEC_TIMEOUT", "300")),
                 max_tokens=_optional_positive_int(
                     env.get("RLM_MAX_TOKENS"), "RLM_MAX_TOKENS"
