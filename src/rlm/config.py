@@ -154,9 +154,34 @@ class RuntimeConfig(_ConfigModel):
     policy: ExecutionPolicy
     system_prompt_path: str | None = None
     append_to_system_prompt: str | None = None
+    subagent_append_to_system_prompt: str | None = None
+    leaf_append_to_system_prompt: str | None = None
     skills: tuple[str, ...] = ()
     kernel_env: tuple[tuple[str, str], ...] = Field(default=(), repr=False)
     search_api_key: str | None = Field(default=None, repr=False)
+
+    @property
+    def resolved_append_to_system_prompt(self) -> str | None:
+        """The append for this engine's role in the session tree.
+
+        root (depth 0)                            -> append_to_system_prompt
+        node (depth >= 1, can still recurse)      -> subagent_append_to_system_prompt
+        leaf (depth == max_depth, cannot recurse) -> leaf_append_to_system_prompt
+
+        Each tier falls back to the next-more-general one (leaf -> subagent -> root),
+        so any unset append preserves the prior single-append behavior. Mirrors the
+        allow_recursion gating that build_system_prompt uses for the built-in rlm hint.
+        """
+        if self.invocation.depth == 0:
+            return self.append_to_system_prompt
+        if (
+            self.invocation.depth >= self.policy.max_depth
+            and self.leaf_append_to_system_prompt is not None
+        ):
+            return self.leaf_append_to_system_prompt
+        if self.subagent_append_to_system_prompt is not None:
+            return self.subagent_append_to_system_prompt
+        return self.append_to_system_prompt
 
     @classmethod
     def from_env(
@@ -201,6 +226,10 @@ class RuntimeConfig(_ConfigModel):
             ),
             system_prompt_path=env.get("RLM_SYSTEM_PROMPT_PATH"),
             append_to_system_prompt=env.get("RLM_APPEND_TO_SYSTEM_PROMPT"),
+            subagent_append_to_system_prompt=env.get(
+                "RLM_SUBAGENT_APPEND_TO_SYSTEM_PROMPT"
+            ),
+            leaf_append_to_system_prompt=env.get("RLM_LEAF_APPEND_TO_SYSTEM_PROMPT"),
             skills=(
                 tuple(s.strip() for s in raw_skills.split(",") if s.strip())
                 if raw_skills is not None
