@@ -48,7 +48,10 @@ async def run(url: str, *, max_chars: int = DEFAULT_MAX_CHARS) -> str:
     except Exception as exc:
         return f"Error fetching {url}: {type(exc).__name__}: {exc}"
     content_type = response.headers.get("content-type", "").lower()
-    body = response.text
+    try:
+        body = response.text
+    except (UnicodeDecodeError, LookupError):
+        body = response.content.decode("utf-8", errors="replace")
     is_html = "html" in content_type or "<html" in body[:1000].lower()
     text = html_to_text(body) if is_html else body.strip()
     if len(text) > max_chars:
