@@ -52,7 +52,16 @@ SEARCH_SKILL_PROMPT = (
     "For web search, use the pre-imported async `search` skill from IPython: "
     '`await search(query="...")`. Results come back as title, URL, and snippet; '
     "assign the result to a variable so you can revisit it. To cover "
-    "several angles at once, fan out with `asyncio.gather(search(...), search(...))`."
+    "several angles at once, fan out with `asyncio.gather(search(...), search(...))`. "
+    "Do NOT hand-roll web search with curl/requests/urllib/httpx to Google, Bing, "
+    "DuckDuckGo, or Wikipedia APIs — `search` is the supported path and ad-hoc scrapers "
+    "return unreliable, noisy results."
+)
+
+FETCH_SKILL_PROMPT = (
+    "To read a specific page, use the pre-imported async `fetch` skill: "
+    '`await fetch(url="...")` returns the page as cleaned text. Use it to open URLs '
+    "from `search` results — do NOT curl/requests them yourself."
 )
 
 
@@ -138,6 +147,8 @@ def build_system_prompt(
             skill_lines.append(EDIT_SKILL_PROMPT)
         if "search" in installed_skills:
             skill_lines.append(SEARCH_SKILL_PROMPT)
+        if "fetch" in installed_skills:
+            skill_lines.append(FETCH_SKILL_PROMPT)
     if skill_lines:
         parts.extend(["", *skill_lines])
 
