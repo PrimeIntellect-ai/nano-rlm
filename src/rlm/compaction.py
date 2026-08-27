@@ -6,15 +6,17 @@ from typing import Any, cast
 
 from openai import APIError, AsyncOpenAI, BadRequestError
 
-CHECKPOINT_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+CHECKPOINT_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary another LLM can ACT on immediately to resume the task.
 
-Include:
-- Current progress and key decisions made
-- Important context, constraints, or user preferences
-- What remains to be done (clear next steps)
-- Any critical data, examples, or references needed to continue
+It MUST contain, as fenced code blocks (not prose):
+- The exact shell/test command(s) to reproduce and verify - copy-pasteable, with the real path and test filter
+- Any edit still to apply, as the concrete `await edit(path=..., old_str=..., new_str=...)` call
 
-Be concise, structured, and focused on helping the next LLM seamlessly continue the work.
+Then:
+- A NUMBERED list of remaining next steps
+- Current progress, key decisions, and constraints
+
+Be concise and concrete: prefer runnable commands over descriptions.
 
 Reply with the summary as plain text. Do not call any tools - summarize from the conversation as it stands."""
 

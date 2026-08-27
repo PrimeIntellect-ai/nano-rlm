@@ -31,6 +31,7 @@ from rlm.compaction import (
     estimated_tokens,
 )
 from rlm.config import RuntimeConfig
+from rlm.lineage import LineageTracker
 from rlm.mcp import MCPServer, load_mcp_servers, validate_mcp_servers
 from rlm.prompt import build_system_prompt
 from rlm.session import Session
@@ -100,6 +101,9 @@ class RLMEngine:
         runtime_config: RuntimeConfig | None = None,
         supervisor: SessionTreeSupervisor | None = None,
         invocation_id: str | None = None,
+        lineage: LineageTracker | None = None,
+        parent_session_id: str | None = None,
+        spawned_by_request_id: str | None = None,
     ):
         self.runtime_config = runtime_config or RuntimeConfig.from_env()
         config = self.runtime_config
@@ -133,9 +137,19 @@ class RLMEngine:
         self._invocation_id = invocation_id or (
             supervisor.root_id if supervisor is not None else uuid.uuid4().hex
         )
+        self._lineage = lineage or (
+            supervisor.lineage if supervisor is not None else LineageTracker()
+        )
+        self._lineage.register_session(
+            self._invocation_id,
+            parent_session_id=parent_session_id,
+            depth=self.depth,
+            spawned_by_request_id=spawned_by_request_id,
+        )
         self._owns_supervisor = False
         self._total_usage = TokenUsage()
         self._last_prompt_tokens = 0
+        self._last_call_id: str | None = None
 
         # Metrics
         self._metrics = RLMMetrics()
@@ -198,12 +212,19 @@ class RLMEngine:
         self._has_result = False
 
         if not self._started:
-            await self._start(prompt)
+            try:
+                await self._start(prompt)
+            except BaseException as exc:
+                self._metrics.stop_reason = (
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+                )
+                raise
             messages_before = self._messages[:1]
         else:
             messages_before = list(self._messages)
             self._messages.append({"role": "user", "content": prompt})
         branch_start_before = self._branch_start_turn
+        context_before = self._lineage.active_context(self._invocation_id)
         turn_before = self._turn
         usage_before = TokenUsage(
             prompt_tokens=self._total_usage.prompt_tokens,
@@ -234,9 +255,12 @@ class RLMEngine:
             # that really ran and remain part of session accounting.
             self._messages[:] = messages_before
             self._branch_start_turn = branch_start_before
+            self._lineage.restore_context(self._invocation_id, context_before)
             self._turn = turn_before
             if isinstance(exc, asyncio.CancelledError):
                 self._metrics.stop_reason = "cancelled"
+            else:
+                self._metrics.stop_reason = "error"
             raise
         result.usage = TokenUsage(
             prompt_tokens=self._total_usage.prompt_tokens - usage_before.prompt_tokens,
@@ -278,6 +302,7 @@ class RLMEngine:
                     cwd=self.cwd,
                     mcp_servers=self.mcp_servers,
                     root_invocation_id=self._invocation_id,
+                    lineage=self._lineage,
                 )
                 self._owns_supervisor = True
             try:
@@ -307,6 +332,8 @@ class RLMEngine:
             depth=self.depth,
             max_depth=self.max_depth,
             broker_endpoint=broker_endpoint,
+            exec_timeout=self.exec_timeout,
+            allow_git=self.allow_git,
         )
         try:
             self._repl.start()
@@ -339,6 +366,7 @@ class RLMEngine:
         for turn in itertools.count(self._turn):
             self._turn = turn + 1
             response, usage = await self._complete(messages, turn)
+            call_id = self._last_call_id
 
             self._metrics.turns_since_last_compaction = (
                 turn + 1 - self._branch_start_turn
@@ -419,7 +447,9 @@ class RLMEngine:
                     and self._supervisor is not None
                     and self._invocation_id is not None
                 ):
-                    scope_id = await self._supervisor.open_scope(self._invocation_id)
+                    scope_id = await self._supervisor.open_scope(
+                        self._invocation_id, call_id
+                    )
                 try:
                     if scope_id is not None:
                         repl.set_broker_scope(scope_id)
@@ -555,6 +585,7 @@ class RLMEngine:
             self._repl = None
         if self.session is not None:
             if self._has_result:
+                self._lineage.set_session_status(self._invocation_id, "completed")
                 direct_tool_stats = None
                 child_tool_stats = None
                 if self._supervisor is not None and self._invocation_id is not None:
@@ -575,6 +606,10 @@ class RLMEngine:
                     trusted_child_tool_stats=child_tool_stats,
                 )
             else:
+                status = (
+                    "failed" if self._metrics.stop_reason == "error" else "cancelled"
+                )
+                self._lineage.set_session_status(self._invocation_id, status)
                 self.session.close()
 
     def _programmatic_tool_call_stats(
@@ -610,12 +645,22 @@ class RLMEngine:
         return tokens >= self.summarize_at_tokens
 
     async def _call_model(
-        self, messages: list[dict], *, checkpoint: bool = False
+        self,
+        messages: list[dict],
+        *,
+        checkpoint: bool = False,
+        compaction_id: str | None = None,
     ) -> tuple[Any, TokenUsage]:
+        if checkpoint:
+            request_id = self._lineage.start_request(
+                self._invocation_id, kind="compaction", compaction_id=compaction_id
+            )
+        else:
+            request_id = self._lineage.start_request(self._invocation_id, kind="turn")
         request: dict = {
             "model": self.model,
             "messages": messages,
-            "extra_headers": model_call_headers(uuid.uuid4().hex),
+            "extra_headers": model_call_headers(request_id),
         }
         if self._active_tool_schemas:
             request["tools"] = self._active_tool_schemas
@@ -632,6 +677,7 @@ class RLMEngine:
         self._total_usage.completion_tokens += usage.completion_tokens
         if not checkpoint:
             self._last_prompt_tokens = usage.prompt_tokens
+            self._last_call_id = request_id
         return response, usage
 
     async def _complete(
@@ -681,17 +727,29 @@ class RLMEngine:
         checkpoint_prompt = CHECKPOINT_PROMPT
         if self._repl is not None:
             checkpoint_prompt += REPL_NOTE
-        while True:
-            checkpoint = [
-                *messages,
-                {"role": "user", "content": checkpoint_prompt},
-            ]
-            try:
-                response, usage = await self._call_model(checkpoint, checkpoint=True)
-                break
-            except BadRequestError as e:
-                if not context_error(e)[0] or not drop_latest_tool_result(messages):
-                    raise
+        compaction = self._lineage.begin_compaction(self._invocation_id)
+        try:
+            while True:
+                checkpoint = [
+                    *messages,
+                    {"role": "user", "content": checkpoint_prompt},
+                ]
+                try:
+                    response, usage = await self._call_model(
+                        checkpoint,
+                        checkpoint=True,
+                        compaction_id=compaction.compaction_id,
+                    )
+                    break
+                except BadRequestError as e:
+                    if not context_error(e)[0] or not drop_latest_tool_result(messages):
+                        raise
+        except BaseException as exc:
+            self._lineage.finish_compaction(
+                compaction.compaction_id,
+                "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
+            )
+            raise
 
         summary_text = response.choices[0].message.content or ""
 
@@ -701,6 +759,7 @@ class RLMEngine:
             system_msg,
             {"role": "user", "content": compacted_user_content},
         ]
+        self._lineage.finish_compaction(compaction.compaction_id, "completed")
 
         # Log the compaction for traceability.
         self.session.log(
@@ -775,6 +834,7 @@ class RLMEngine:
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "allow_git": self.runtime_config.policy.allow_git,
             },
+            "lineage": self._lineage.snapshot(),
         }
         return snapshot
 

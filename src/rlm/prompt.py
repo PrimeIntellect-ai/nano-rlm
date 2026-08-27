@@ -34,41 +34,19 @@ GIT_HISTORY_GUARD_PROMPT = (
     "`--glob`, `--alternate-refs`, `--reflog`, `--walk-reflogs`, or `-g` will "
     "be refused."
 )
+PROJECT_ENV_PROMPT = (
+    "The ipython kernel is an isolated venv without the project's packages — "
+    "never import project modules there. Everything that executes project code "
+    "(tests, repros, imports) goes through bash with the project's interpreter."
+)
 IPYTHON_CONTROL_PROMPT = (
-    "IPython is the agent's long-lived notebook: a persistent control "
-    "environment for reasoning, context management, state, tool orchestration, "
-    "and recursive subcalls. Use it to keep intermediate variables, inspect "
-    "and transform outputs, write small helper functions, and preserve useful "
-    "state across turns or compaction.\n\n"
-    "Do not assume IPython is the native runtime of the external thing being "
-    "investigated. A repository, package, service, dataset, paper, website, "
-    "benchmark, or API may have its own environment and normal interface. "
-    "Evaluate external systems through their own interface, then use IPython "
-    "to coordinate the process and analyze what comes back.\n\n"
-    "When running shell commands from IPython, use `%%bash` cells. If you use "
-    "`%%bash`, it must be the first line of the code cell: no comments, "
-    "spaces, blank lines, imports, or Python statements before it. Avoid "
-    "`!cmd` shell escapes for project commands so shell behavior is explicit "
-    "and multi-line commands share one shell context.\n\n"
-    "Important: do not install dependencies into the IPython kernel just to "
-    "make an external project import or run there. If a project import, test, "
-    "script, CLI, or dependency check is needed, run it through that project's "
-    "own environment and normal command interface. For example, in a Python "
-    "repo use its documented commands, `uv run ...`, `.venv/bin/python ...`, "
-    "or the active project interpreter from the repo root. Treat failures from "
-    "that native environment as the relevant result."
-    "\n\n"
-    "Use Python for reading, searching, and editing files — it gives you "
-    "reusable variables you can slice, filter, and act on without re-reading. "
-    "Always assign read/search results to named variables so you can revisit "
-    "them later."
+    "Run shell commands with `%%bash` as the very first line of a code cell "
+    "(no comments, imports, or statements before it). " + PROJECT_ENV_PROMPT
 )
 EDIT_SKILL_PROMPT = (
-    "For targeted existing-file edits, prefer the pre-imported async `edit` "
-    "skill from IPython: `old = '''...'''; new = '''...'''; await "
-    'edit(path="pkg/file.py", old_str=old, new_str=new)`. Use exact '
-    "old/new strings; if the text contains triple double quotes, use triple "
-    "single-quoted variables or build `old`/`new` from inspected file slices."
+    "Inside ipython you can also edit files with the pre-imported async `edit` "
+    'skill: `await edit(path="pkg/file.py", old_str=..., new_str=...)` — handy '
+    "for multiline or quote-heavy replacements built from Python strings."
 )
 SEARCH_SKILL_PROMPT = (
     "For web search, use the pre-imported async `search` skill from IPython: "
@@ -95,9 +73,24 @@ def build_system_prompt(
     per-tool schemas, so redundant tool guidance here just inflates
     every request.
     """
+    has_bash = _has_tool(active_tools, "bash")
+    has_edit = _has_tool(active_tools, "edit")
+    has_ipython = _has_tool(active_tools, "ipython")
+    role = "You are a coding agent."
+    if has_bash:
+        role += " You have access to a bash tool for running shell commands."
+    if has_edit:
+        role += (
+            " You also have an edit tool for single-occurrence string "
+            "replacement in a file."
+        )
+    if has_ipython:
+        role += (
+            " You also have an ipython tool: a persistent Python REPL "
+            "(variables, imports, and function definitions persist across calls)."
+        )
     parts: list[str] = [
-        "You are a general purpose agent that uses code to solve tasks.",
-        "You solve tasks by breaking down problems into sub-tasks, writing and executing code, observing results, and iterating one step at a time.",
+        role,
         "When you are done, stop calling tools and state your final answer.",
         "",
         f"Working directory: {cwd}",
@@ -127,6 +120,19 @@ def build_system_prompt(
             )
         else:
             skill_lines.append("The listed skills are IPython-only.")
+        if "bash" in installed_skills and _has_tool(active_tools, "bash"):
+            skill_lines.append(
+                "Inside ipython you can also run shell with `await bash(command=...)` — "
+                "it returns the output as a string, useful when mixing shell and Python "
+                "in one cell or avoiding shell quoting."
+            )
+        elif "bash" in installed_skills:
+            skill_lines.append(
+                "Run shell with `out = await bash('''command here''')` — always "
+                "triple-quote the command so shell quotes and multi-line scripts never "
+                "need escaping. It returns the output as a string; no need for "
+                "`subprocess` or `%%bash`. Chain related commands with && in one call."
+            )
         if "edit" in installed_skills:
             skill_lines.append(EDIT_SKILL_PROMPT)
         if "search" in installed_skills:
@@ -143,8 +149,10 @@ def build_system_prompt(
             ]
         )
 
-    if _has_tool(active_tools, "ipython"):
+    if has_ipython and not has_bash and "bash" not in (installed_skills or []):
         parts.extend(["", IPYTHON_CONTROL_PROMPT])
+    elif has_ipython:
+        parts.extend(["", PROJECT_ENV_PROMPT])
 
     if _should_include_git_history_guard(active_tools, allow_git):
         parts.extend(["", GIT_HISTORY_GUARD_PROMPT])

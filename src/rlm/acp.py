@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from importlib.metadata import version
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from acp import (
     PROTOCOL_VERSION,
@@ -54,6 +54,7 @@ from rlm.session import Session
 CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
+ACP_LINEAGE_METADATA_KEY = "ai.prime.acp/lineage-v1"
 
 
 class _ContractModel(BaseModel):
@@ -103,6 +104,49 @@ class _LimitsSnapshot(_ContractModel):
     allow_git: bool
 
 
+class _LineageSessionSnapshot(_ContractModel):
+    session_id: str = Field(min_length=1)
+    parent_session_id: str | None = None
+    depth: int = Field(ge=0)
+    initial_context_id: str = Field(min_length=1)
+    spawned_by_request_id: str | None = None
+    status: Literal["running", "completed", "failed", "cancelled"]
+
+
+class _LineageContextSnapshot(_ContractModel):
+    context_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    previous_context_id: str | None = None
+    transition: Literal["root", "spawn", "compact"]
+    compaction_id: str | None = None
+
+
+class _LineageCompactionSnapshot(_ContractModel):
+    """One attempt; a completed compaction alone publishes its target context."""
+
+    compaction_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    source_context_id: str = Field(min_length=1)
+    target_context_id: str | None = Field(default=None, min_length=1)
+    summary_request_id: str = Field(min_length=1)
+    status: Literal["in_progress", "completed", "failed", "cancelled"]
+
+
+class _LineageRequestSnapshot(_ContractModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    context_id: str = Field(min_length=1)
+    kind: Literal["turn", "compaction"]
+    compaction_id: str | None = None
+
+
+class _LineageSnapshot(_ContractModel):
+    sessions: list[_LineageSessionSnapshot]
+    contexts: list[_LineageContextSnapshot]
+    compactions: list[_LineageCompactionSnapshot]
+    requests: list[_LineageRequestSnapshot]
+
+
 class _SessionSnapshot(_ContractModel):
     session_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
     last_stop_reason: str | None
@@ -146,8 +190,12 @@ def _session_metadata(state: _SessionState) -> dict[str, Any]:
         "last_stop_reason": state.last_stop_reason,
         **state.engine.execution_snapshot(),
     }
+    lineage = _LineageSnapshot.model_validate(snapshot.pop("lineage"))
     validated = _SessionSnapshot.model_validate(snapshot)
-    return {SESSION_METADATA_KEY: validated.model_dump(mode="json")}
+    return {
+        SESSION_METADATA_KEY: validated.model_dump(mode="json", exclude_none=True),
+        ACP_LINEAGE_METADATA_KEY: lineage.model_dump(mode="json", exclude_none=True),
+    }
 
 
 def _validation_fields(error: ValidationError) -> list[str]:
@@ -287,6 +335,7 @@ class RLMACPAgent(Agent):
                 session=session,
                 mcp_servers=resolved_mcp_servers,
                 runtime_config=runtime_config,
+                invocation_id=external_session_id,
             )
         except BaseException:
             session.close()
@@ -323,7 +372,9 @@ class RLMACPAgent(Agent):
                     await _cancel_and_wait(task)
                     raise
                 state.last_stop_reason = "cancelled"
-                return PromptResponse(stop_reason="cancelled")
+                return PromptResponse(
+                    stop_reason="cancelled", field_meta=_session_metadata(state)
+                )
             except Exception:
                 state.last_stop_reason = "error"
                 raise
@@ -337,7 +388,9 @@ class RLMACPAgent(Agent):
             )
             state.last_stop_reason = state.engine.stop_reason or stop_reason
             if state.closing:
-                return PromptResponse(stop_reason="cancelled")
+                return PromptResponse(
+                    stop_reason="cancelled", field_meta=_session_metadata(state)
+                )
 
             delivery = asyncio.create_task(
                 self._client.session_update(
@@ -354,7 +407,9 @@ class RLMACPAgent(Agent):
                     raise
                 if not state.closing:
                     raise
-                return PromptResponse(stop_reason="cancelled")
+                return PromptResponse(
+                    stop_reason="cancelled", field_meta=_session_metadata(state)
+                )
             finally:
                 state.delivery_task = None
 

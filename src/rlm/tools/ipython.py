@@ -180,6 +180,8 @@ class IPythonREPL:
         depth: int | None = None,
         max_depth: int | None = None,
         broker_endpoint: BrokerEndpoint | None = None,
+        exec_timeout: int | None = None,
+        allow_git: bool | None = None,
     ):
         self.cwd = cwd
         self.session = session
@@ -187,6 +189,8 @@ class IPythonREPL:
         self.depth = depth
         self.max_depth = max_depth
         self.broker_endpoint = broker_endpoint
+        self.exec_timeout = exec_timeout
+        self.allow_git = allow_git
         self._km = None
         self._kc = None
         self._ipc_dir = None
@@ -256,6 +260,10 @@ if {bool(session_dir)!r}:
 os.environ['RLM_SESSION_DIR'] = {session_dir!r} or ''
 os.environ['RLM_DEPTH'] = str({depth!r} + 1)
 os.environ['NO_COLOR'] = '1'
+if {self.exec_timeout!r} is not None:
+    os.environ['RLM_EXEC_TIMEOUT'] = str({self.exec_timeout!r})
+if {self.allow_git!r} is not None:
+    os.environ['RLM_ALLOW_GIT'] = '1' if {self.allow_git!r} else '0'
 
 import nest_asyncio
 nest_asyncio.apply()
