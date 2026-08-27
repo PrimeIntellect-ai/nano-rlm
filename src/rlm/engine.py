@@ -1001,6 +1001,7 @@ class RLMEngine:
             self.cwd,
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
+            depth=self.depth,
             allow_recursion=self.depth < self.max_depth,
             allow_git=self.allow_git,
             active_tools=active_tools,
