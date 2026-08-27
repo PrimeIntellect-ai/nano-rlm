@@ -122,10 +122,12 @@ class _LineageContextSnapshot(_ContractModel):
 
 
 class _LineageCompactionSnapshot(_ContractModel):
+    """One attempt; a completed compaction alone publishes its target context."""
+
     compaction_id: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
     source_context_id: str = Field(min_length=1)
-    target_context_id: str = Field(min_length=1)
+    target_context_id: str | None = Field(default=None, min_length=1)
     summary_request_id: str = Field(min_length=1)
     status: Literal["in_progress", "completed", "failed", "cancelled"]
 

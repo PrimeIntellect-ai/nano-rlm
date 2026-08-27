@@ -149,8 +149,15 @@ def test_failed_compaction_does_not_activate_target_context():
     snapshot = lineage.snapshot()
 
     assert next_request.context_id == source_context_id
-    assert snapshot["compactions"][0]["status"] == "failed"
+    assert snapshot["compactions"] == [
+        {
+            "compaction_id": compaction.compaction_id,
+            "session_id": "trace-1",
+            "source_context_id": source_context_id,
+            "status": "failed",
+            "summary_request_id": snapshot["requests"][0]["request_id"],
+        }
+    ]
     assert [context["context_id"] for context in snapshot["contexts"]] == [
-        source_context_id,
-        compaction.target_context_id,
+        source_context_id
     ]

@@ -162,7 +162,6 @@ class LineageTracker:
             "compaction_id": compaction_id,
             "session_id": session_id,
             "source_context_id": source_context_id,
-            "target_context_id": target_context_id,
             "status": "in_progress",
         }
         return Compaction(
@@ -177,13 +176,12 @@ class LineageTracker:
         if status == "in_progress":
             raise ValueError("a compaction cannot finish in progress")
         compaction["status"] = status
-        self._contexts[compaction["target_context_id"]] = self._pending_contexts.pop(
-            compaction_id
-        )
+        target = self._pending_contexts.pop(compaction_id)
         if status == "completed":
-            self._active_contexts[compaction["session_id"]] = compaction[
-                "target_context_id"
-            ]
+            target_context_id = target["context_id"]
+            self._contexts[target_context_id] = target
+            compaction["target_context_id"] = target_context_id
+            self._active_contexts[compaction["session_id"]] = target_context_id
 
     def snapshot(self) -> dict[str, list[dict]]:
         return {
