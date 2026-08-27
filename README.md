@@ -74,7 +74,10 @@ no standalone entry point: outside a session the call raises.
 
 All runtime configuration enters through the `ai.prime.rlm/runtime-v1` contract object
 (model, provider credentials, execution policy, prompt configuration, skills, kernel
-environment, search credential). Recursive children inherit the parent's configuration
+environment, search credential). Prompt configuration is role-aware: optional
+`subagent_append_to_system_prompt` (nodes that can still recurse) and
+`leaf_append_to_system_prompt` (depth == max_depth) override `append_to_system_prompt`
+for sub-agents, each falling back to the next-more-general tier. Recursive children inherit the parent's configuration
 in-memory (`model_copy`); nothing is re-read from the process environment.
 
 The process environment configures only process infrastructure:
