@@ -148,7 +148,11 @@ class RLMEngine:
         self.model = config.model
         self.cwd = cwd or os.getcwd()
         self.exec_timeout = config.policy.exec_timeout
-        self.summarize_at_tokens = config.policy.summarize_at_tokens
+        # Context budget by role: sub-agents (depth >= 1) may use a leaner threshold than the root.
+        if config.invocation.depth >= 1 and config.policy.subagent_summarize_at_tokens is not None:
+            self.summarize_at_tokens = config.policy.subagent_summarize_at_tokens
+        else:
+            self.summarize_at_tokens = config.policy.summarize_at_tokens
         self.max_compactions = config.policy.max_compactions
         self.system_prompt_path = config.system_prompt_path
         self.append_to_system_prompt = config.resolved_append_to_system_prompt

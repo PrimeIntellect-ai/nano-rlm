@@ -136,6 +136,13 @@ class ExecutionPolicy(_ConfigModel):
     exec_timeout: int = Field(default=300, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
     summarize_at_tokens: int | None = Field(default=None, gt=0)
+    """Context budget for the ROOT (depth 0): auto-compact when a turn's prompt tokens reach this."""
+    subagent_summarize_at_tokens: int | None = Field(default=None, gt=0)
+    """Context budget for SUB-AGENTS (depth >= 1); falls back to summarize_at_tokens when unset.
+    Lets the root run a large context (e.g. 100k) while sub-agents stay lean (e.g. 50k)."""
+    max_total_tokens: int | None = Field(default=None, gt=0)
+    """Tree-total token budget across the whole recursive session tree (all engines, prompt +
+    completion). Once reached, no further sub-agents are spawned. None = unbounded."""
     max_compactions: int | None = Field(default=None, gt=0)
     max_concurrent_subagents: int = Field(default=4, gt=0)
     max_subagent_calls: int = Field(default=64, gt=0)
@@ -219,6 +226,13 @@ class RuntimeConfig(_ConfigModel):
                 ),
                 summarize_at_tokens=_summarize_at_tokens(
                     env.get("RLM_SUMMARIZE_AT_TOKENS")
+                ),
+                subagent_summarize_at_tokens=_optional_positive_int(
+                    env.get("RLM_SUBAGENT_SUMMARIZE_AT_TOKENS"),
+                    "RLM_SUBAGENT_SUMMARIZE_AT_TOKENS",
+                ),
+                max_total_tokens=_optional_positive_int(
+                    env.get("RLM_MAX_TOTAL_TOKENS"), "RLM_MAX_TOTAL_TOKENS"
                 ),
                 max_compactions=_optional_positive_int(
                     env.get("RLM_MAX_COMPACTIONS"), "RLM_MAX_COMPACTIONS"
