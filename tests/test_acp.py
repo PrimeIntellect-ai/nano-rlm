@@ -42,13 +42,11 @@ def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
         "policy": {
             "max_depth": 0,
             "exec_timeout": 300,
-            "max_output": -1,
             "max_tokens": None,
             "summarize_at_tokens": None,
             "max_compactions": None,
             "max_concurrent_subagents": 4,
             "max_subagent_calls": 64,
-            "max_tool_output_chars": None,
             "allow_git": False,
         },
         "system_prompt_path": None,
@@ -144,7 +142,6 @@ class _Engine:
                 "max_tokens": None,
                 "summarize_at_tokens": None,
                 "max_compactions": None,
-                "max_tool_output_chars": None,
                 "allow_git": False,
             },
             "lineage": {
@@ -754,6 +751,16 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert first.usage.total_tokens == 5
     assert second.stop_reason == "end_turn"
     assert created.field_meta is None
+    first_snapshot = first.field_meta[SESSION_METADATA_KEY]
+    assert first_snapshot["session_id"] == "test-session"
+    assert first_snapshot["turns"] == 1
+    assert first_snapshot["usage"]["total_tokens"] == 5
+    assert first_snapshot["last_stop_reason"] == "done"
+    second_snapshot = second.field_meta[SESSION_METADATA_KEY]
+    assert second_snapshot["session_id"] == "test-session"
+    assert second_snapshot["turns"] == 2
+    assert second_snapshot["usage"]["total_tokens"] == 10
+    assert second_snapshot["last_stop_reason"] == "done"
     assert first.field_meta[ACP_LINEAGE_METADATA_KEY]["sessions"] == [
         {
             "session_id": "test-session",

@@ -12,6 +12,7 @@ from pathlib import Path
 
 # Built-in skill name -> local module, or ``None`` for a supervisor-owned skill.
 _BUILTIN_SKILLS: dict[str, str | None] = {
+    "bash": "rlm.skills.bash",
     "edit": "rlm.skills.edit",
     "search": None,
 }

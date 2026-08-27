@@ -19,11 +19,9 @@ def test_runtime_config_resolves_and_redacts_environment():
             "RLM_DEPTH": "2",
             "RLM_MAX_DEPTH": "4",
             "RLM_EXEC_TIMEOUT": "30",
-            "RLM_MAX_OUTPUT": "1200",
             "RLM_MAX_TOKENS": "500",
             "RLM_SUMMARIZE_AT_TOKENS": "2048",
             "RLM_MAX_COMPACTIONS": "3",
-            "RLM_MAX_TOOL_OUTPUT_CHARS": "700",
             "RLM_ALLOW_GIT": "1",
             "RLM_SKILLS": "search, edit",
             KERNEL_ENV_CONFIG_ENV: '{"TASK_TOKEN": "task-secret"}',
@@ -36,13 +34,11 @@ def test_runtime_config_resolves_and_redacts_environment():
     assert config.policy == ExecutionPolicy(
         max_depth=4,
         exec_timeout=30,
-        max_output=1200,
         max_tokens=500,
         summarize_at_tokens=2048,
         max_compactions=3,
         max_concurrent_subagents=4,
         max_subagent_calls=64,
-        max_tool_output_chars=700,
         allow_git=True,
     )
     assert config.skills == ("search", "edit")

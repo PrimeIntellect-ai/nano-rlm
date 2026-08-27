@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from typing_extensions import Self
 
 from rlm.lineage import LINEAGE_HEADER_NAMES
+from rlm.tools.registry import preset_skills
 
 
 PI_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1"
@@ -130,21 +131,12 @@ class ExecutionPolicy(_ConfigModel):
 
     max_depth: int = Field(default=0, ge=0)
     exec_timeout: int = Field(default=300, gt=0)
-    max_output: int = -1
     max_tokens: int | None = Field(default=None, gt=0)
     summarize_at_tokens: int | None = Field(default=None, gt=0)
     max_compactions: int | None = Field(default=None, gt=0)
     max_concurrent_subagents: int = Field(default=4, gt=0)
     max_subagent_calls: int = Field(default=64, gt=0)
-    max_tool_output_chars: int | None = Field(default=None, gt=0)
     allow_git: bool = False
-
-    @field_validator("max_output")
-    @classmethod
-    def _validate_max_output(cls, value: int) -> int:
-        if value == 0 or value < -1:
-            raise ValueError("must be positive, or -1 to disable truncation")
-        return value
 
     @model_validator(mode="after")
     def _validate_concurrency(self) -> Self:
@@ -173,12 +165,7 @@ class RuntimeConfig(_ConfigModel):
         environ: Mapping[str, str] | None = None,
     ) -> RuntimeConfig:
         env = os.environ if environ is None else environ
-        max_output = int(env.get("RLM_MAX_OUTPUT", "-1"))
-        if max_output == 0:
-            raise ValueError(
-                "RLM_MAX_OUTPUT must be positive, or -1 to disable truncation"
-            )
-        raw_skills = env.get("RLM_SKILLS", "")
+        raw_skills = env.get("RLM_SKILLS")
         max_depth = int(env.get("RLM_MAX_DEPTH", "0"))
         default_concurrency = max(4, max_depth)
         max_concurrent_subagents = _positive_int(
@@ -196,7 +183,6 @@ class RuntimeConfig(_ConfigModel):
             policy=ExecutionPolicy(
                 max_depth=max_depth,
                 exec_timeout=int(env.get("RLM_EXEC_TIMEOUT", "300")),
-                max_output=max_output,
                 max_tokens=_optional_positive_int(
                     env.get("RLM_MAX_TOKENS"), "RLM_MAX_TOKENS"
                 ),
@@ -211,15 +197,15 @@ class RuntimeConfig(_ConfigModel):
                     env.get("RLM_MAX_SUBAGENT_CALLS", "64"),
                     "RLM_MAX_SUBAGENT_CALLS",
                 ),
-                max_tool_output_chars=_optional_positive_int(
-                    env.get("RLM_MAX_TOOL_OUTPUT_CHARS"),
-                    "RLM_MAX_TOOL_OUTPUT_CHARS",
-                ),
                 allow_git=env.get("RLM_ALLOW_GIT") == "1",
             ),
             system_prompt_path=env.get("RLM_SYSTEM_PROMPT_PATH"),
             append_to_system_prompt=env.get("RLM_APPEND_TO_SYSTEM_PROMPT"),
-            skills=tuple(s.strip() for s in raw_skills.split(",") if s.strip()),
+            skills=(
+                tuple(s.strip() for s in raw_skills.split(",") if s.strip())
+                if raw_skills is not None
+                else preset_skills()
+            ),
             kernel_env=_kernel_env(env.get(KERNEL_ENV_CONFIG_ENV)),
             search_api_key=env.get("SERPER_API_KEY"),
         )
