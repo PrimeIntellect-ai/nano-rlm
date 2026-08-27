@@ -13,7 +13,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from openai import AsyncOpenAI, BadRequestError
+from openai import APIStatusError, AsyncOpenAI
 
 from rlm.client import (
     call_with_retries,
@@ -518,7 +518,7 @@ class RLMEngine:
             if self._should_compact(usage, content):
                 try:
                     await self._compact_branch(messages, turn)
-                except BadRequestError as e:
+                except APIStatusError as e:
                     if not context_error(e)[0]:
                         raise
                     self._metrics.stop_reason = "request_too_large"
@@ -688,7 +688,7 @@ class RLMEngine:
         """Complete one turn, with at most one compact-and-retry cycle."""
         try:
             response, usage = await self._call_model(messages)
-        except BadRequestError as error:
+        except APIStatusError as error:
             overflow, threshold = context_error(error)
             if not self._can_compact() or not overflow:
                 raise
@@ -743,7 +743,7 @@ class RLMEngine:
                         compaction_id=compaction.compaction_id,
                     )
                     break
-                except BadRequestError as e:
+                except APIStatusError as e:
                     if not context_error(e)[0] or not drop_latest_tool_result(messages):
                         raise
         except BaseException as exc:
