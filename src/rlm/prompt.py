@@ -67,6 +67,7 @@ def build_system_prompt(
     skills_dir: str | None,
     installed_skills: list[str],
     *,
+    depth: int = 0,
     allow_recursion: bool,
     allow_git: bool,
     active_tools: list[BuiltinTool],
@@ -147,6 +148,14 @@ def build_system_prompt(
             skill_lines.append(FETCH_SKILL_PROMPT)
     if skill_lines:
         parts.extend(["", *skill_lines])
+
+    if depth > 0:
+        parts.extend(
+            [
+                "",
+                "You are a SUB-AGENT: your caller delegated a single task to you and is waiting in a separate context that has NOT seen any of your work. Your final message is the ONLY thing your caller receives, so make it a complete, self-contained result — the answer plus the evidence needed to trust it (sources, file paths, values). Do exactly the delegated task; don't widen the scope.",
+            ]
+        )
 
     if allow_recursion:
         parts.extend(
