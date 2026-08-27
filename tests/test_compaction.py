@@ -49,9 +49,11 @@ def _overflow() -> BadRequestError:
         request=httpx.Request("POST", "http://interceptor/v1/chat/completions"),
     )
     return BadRequestError(
-        "context_length",
+        "This model's maximum context length is 4096 tokens.",
         response=response,
-        body={"error": {"message": "context_length"}},
+        body={
+            "error": {"message": "This model's maximum context length is 4096 tokens."}
+        },
     )
 
 
