@@ -28,16 +28,16 @@ def test_root_and_child_requests_have_exact_parentage():
 
     assert root_headers == {
         "Idempotency-Key": root_request.request_id,
-        "X-RLM-Request-ID": root_request.request_id,
-        "X-RLM-Session-ID": "trace-1",
-        "X-RLM-Context-ID": root_context_id,
-        "X-RLM-Transition": "root",
-        "X-RLM-Depth": "0",
+        "X-ACP-Lineage-Request-ID": root_request.request_id,
+        "X-ACP-Lineage-Session-ID": "trace-1",
+        "X-ACP-Lineage-Context-ID": root_context_id,
+        "X-ACP-Lineage-Transition": "root",
+        "X-ACP-Lineage-Depth": "0",
     }
-    assert child_headers["X-RLM-Parent-Session-ID"] == "trace-1"
-    assert child_headers["X-RLM-Context-ID"] == child_context_id
-    assert child_headers["X-RLM-Transition"] == "spawn"
-    assert child_headers["X-RLM-Depth"] == "1"
+    assert child_headers["X-ACP-Lineage-Parent-Session-ID"] == "trace-1"
+    assert child_headers["X-ACP-Lineage-Context-ID"] == child_context_id
+    assert child_headers["X-ACP-Lineage-Transition"] == "spawn"
+    assert child_headers["X-ACP-Lineage-Depth"] == "1"
     assert snapshot["sessions"][1]["spawned_by_request_id"] == (root_request.request_id)
 
 
@@ -57,13 +57,13 @@ def test_completed_compaction_starts_linked_context_epoch():
     resumed_headers = model_call_headers(resumed_request)
     snapshot = lineage.snapshot()
 
-    assert summary_headers["X-RLM-Context-ID"] == source_context_id
-    assert summary_headers["X-RLM-Compaction-ID"] == compaction.compaction_id
-    assert "X-RLM-Previous-Context-ID" not in summary_headers
-    assert resumed_headers["X-RLM-Context-ID"] == compaction.target_context_id
-    assert resumed_headers["X-RLM-Previous-Context-ID"] == source_context_id
-    assert resumed_headers["X-RLM-Transition"] == "compact"
-    assert resumed_headers["X-RLM-Compaction-ID"] == compaction.compaction_id
+    assert summary_headers["X-ACP-Lineage-Context-ID"] == source_context_id
+    assert summary_headers["X-ACP-Lineage-Compaction-ID"] == compaction.compaction_id
+    assert "X-ACP-Lineage-Previous-Context-ID" not in summary_headers
+    assert resumed_headers["X-ACP-Lineage-Context-ID"] == compaction.target_context_id
+    assert resumed_headers["X-ACP-Lineage-Previous-Context-ID"] == source_context_id
+    assert resumed_headers["X-ACP-Lineage-Transition"] == "compact"
+    assert resumed_headers["X-ACP-Lineage-Compaction-ID"] == compaction.compaction_id
     assert snapshot["requests"][-1]["compaction_id"] == compaction.compaction_id
     assert snapshot["compactions"] == [
         {
@@ -87,10 +87,12 @@ async def test_concurrent_requests_receive_unique_stable_ids():
         return model_call_headers(provenance)
 
     headers = await asyncio.gather(*(start_request() for _ in range(64)))
-    request_ids = [item["X-RLM-Request-ID"] for item in headers]
+    request_ids = [item["X-ACP-Lineage-Request-ID"] for item in headers]
 
     assert len(set(request_ids)) == 64
-    assert all(item["Idempotency-Key"] == item["X-RLM-Request-ID"] for item in headers)
+    assert all(
+        item["Idempotency-Key"] == item["X-ACP-Lineage-Request-ID"] for item in headers
+    )
     assert [request["request_id"] for request in lineage.snapshot()["requests"]] == (
         request_ids
     )
@@ -119,11 +121,18 @@ def test_new_compaction_id_overrides_source_context_origin():
 
     ordinary_headers = model_call_headers(ordinary_request)
     summary_headers = model_call_headers(second_summary)
-    assert ordinary_headers["X-RLM-Compaction-ID"] == (first_compaction.compaction_id)
-    assert summary_headers["X-RLM-Context-ID"] == first_compaction.target_context_id
-    assert summary_headers["X-RLM-Previous-Context-ID"] == first_context_id
-    assert summary_headers["X-RLM-Transition"] == "compact"
-    assert summary_headers["X-RLM-Compaction-ID"] == (second_compaction.compaction_id)
+    assert ordinary_headers["X-ACP-Lineage-Compaction-ID"] == (
+        first_compaction.compaction_id
+    )
+    assert (
+        summary_headers["X-ACP-Lineage-Context-ID"]
+        == first_compaction.target_context_id
+    )
+    assert summary_headers["X-ACP-Lineage-Previous-Context-ID"] == first_context_id
+    assert summary_headers["X-ACP-Lineage-Transition"] == "compact"
+    assert summary_headers["X-ACP-Lineage-Compaction-ID"] == (
+        second_compaction.compaction_id
+    )
 
 
 def test_failed_compaction_does_not_activate_target_context():

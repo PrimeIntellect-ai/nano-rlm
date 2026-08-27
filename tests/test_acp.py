@@ -16,6 +16,7 @@ import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall
 from rlm.acp import (
+    ACP_LINEAGE_METADATA_KEY,
     CONTRACT_METADATA_KEY,
     RUNTIME_METADATA_KEY,
     SESSION_METADATA_KEY,
@@ -356,17 +357,22 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
         len({header["Idempotency-Key"] for header in (turn, compaction, resumed)}) == 3
     )
     assert all(
-        header["Idempotency-Key"] == header["X-RLM-Request-ID"]
+        header["Idempotency-Key"] == header["X-ACP-Lineage-Request-ID"]
         for header in (turn, compaction, resumed)
     )
-    assert turn["X-RLM-Session-ID"] == engine._invocation_id
-    assert turn["X-RLM-Context-ID"] == compaction["X-RLM-Context-ID"]
-    assert turn["X-RLM-Transition"] == "root"
-    assert "X-RLM-Compaction-ID" not in turn
-    assert compaction["X-RLM-Compaction-ID"] == resumed["X-RLM-Compaction-ID"]
-    assert resumed["X-RLM-Previous-Context-ID"] == turn["X-RLM-Context-ID"]
-    assert resumed["X-RLM-Context-ID"] != turn["X-RLM-Context-ID"]
-    assert resumed["X-RLM-Transition"] == "compact"
+    assert turn["X-ACP-Lineage-Session-ID"] == engine._invocation_id
+    assert turn["X-ACP-Lineage-Context-ID"] == compaction["X-ACP-Lineage-Context-ID"]
+    assert turn["X-ACP-Lineage-Transition"] == "root"
+    assert "X-ACP-Lineage-Compaction-ID" not in turn
+    assert (
+        compaction["X-ACP-Lineage-Compaction-ID"]
+        == resumed["X-ACP-Lineage-Compaction-ID"]
+    )
+    assert (
+        resumed["X-ACP-Lineage-Previous-Context-ID"] == turn["X-ACP-Lineage-Context-ID"]
+    )
+    assert resumed["X-ACP-Lineage-Context-ID"] != turn["X-ACP-Lineage-Context-ID"]
+    assert resumed["X-ACP-Lineage-Transition"] == "compact"
 
 
 async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
@@ -497,10 +503,10 @@ async def test_failed_prompt_restores_pre_compaction_context(session):
         call["extra_headers"] for call in client.calls
     ]
     assert result.answer == "continued"
-    assert summary["X-RLM-Context-ID"] == initial["X-RLM-Context-ID"]
-    assert compacted["X-RLM-Context-ID"] != initial["X-RLM-Context-ID"]
-    assert retried["X-RLM-Context-ID"] == initial["X-RLM-Context-ID"]
-    assert retried["X-RLM-Transition"] == "root"
+    assert summary["X-ACP-Lineage-Context-ID"] == initial["X-ACP-Lineage-Context-ID"]
+    assert compacted["X-ACP-Lineage-Context-ID"] != initial["X-ACP-Lineage-Context-ID"]
+    assert retried["X-ACP-Lineage-Context-ID"] == initial["X-ACP-Lineage-Context-ID"]
+    assert retried["X-ACP-Lineage-Transition"] == "root"
 
 
 async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
@@ -748,7 +754,7 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert first.usage.total_tokens == 5
     assert second.stop_reason == "end_turn"
     assert created.field_meta is None
-    assert first.field_meta[SESSION_METADATA_KEY]["lineage"]["sessions"] == [
+    assert first.field_meta[ACP_LINEAGE_METADATA_KEY]["sessions"] == [
         {
             "session_id": "test-session",
             "depth": 0,
@@ -762,6 +768,10 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert closed_snapshot["session_id"] == "test-session"
     assert closed_snapshot["turns"] == 2
     assert closed_snapshot["last_stop_reason"] == "done"
+    assert "lineage" not in closed_snapshot
+    assert closed.field_meta[ACP_LINEAGE_METADATA_KEY]["sessions"][0]["status"] == (
+        "completed"
+    )
     assert "test-secret" not in closed.model_dump_json(by_alias=True)
     assert engine.closed is True
 
@@ -789,7 +799,7 @@ async def test_acp_prompt_snapshot_records_resumed_request_compaction(
 
     try:
         response = await agent.prompt(created.session_id, [text_block("compact")])
-        lineage = response.field_meta[SESSION_METADATA_KEY]["lineage"]
+        lineage = response.field_meta[ACP_LINEAGE_METADATA_KEY]
         compaction_id = lineage["compactions"][0]["compaction_id"]
 
         assert lineage["requests"][-1]["kind"] == "turn"
@@ -816,6 +826,7 @@ async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
     cancelled = await pending
     assert cancelled.stop_reason == "cancelled"
     assert SESSION_METADATA_KEY in cancelled.field_meta
+    assert ACP_LINEAGE_METADATA_KEY in cancelled.field_meta
     assert engine.closed is False
     resumed = await agent.prompt(created.session_id, [text_block("after")])
     assert resumed.stop_reason == "end_turn"

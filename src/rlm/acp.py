@@ -54,6 +54,7 @@ from rlm.session import Session
 CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
+ACP_LINEAGE_METADATA_KEY = "ai.prime.acp/lineage-v1"
 
 
 class _ContractModel(BaseModel):
@@ -154,7 +155,6 @@ class _SessionSnapshot(_ContractModel):
     programmatic_tool_call_stats: _ProgrammaticToolCallSnapshot
     supervisor: _SupervisorSnapshot
     limits: _LimitsSnapshot
-    lineage: _LineageSnapshot
 
 
 @dataclass
@@ -188,8 +188,12 @@ def _session_metadata(state: _SessionState) -> dict[str, Any]:
         "last_stop_reason": state.last_stop_reason,
         **state.engine.execution_snapshot(),
     }
+    lineage = _LineageSnapshot.model_validate(snapshot.pop("lineage"))
     validated = _SessionSnapshot.model_validate(snapshot)
-    return {SESSION_METADATA_KEY: validated.model_dump(mode="json", exclude_none=True)}
+    return {
+        SESSION_METADATA_KEY: validated.model_dump(mode="json", exclude_none=True),
+        ACP_LINEAGE_METADATA_KEY: lineage.model_dump(mode="json", exclude_none=True),
+    }
 
 
 def _validation_fields(error: ValidationError) -> list[str]:

@@ -1,4 +1,4 @@
-"""Stable model-call lineage for recursive sessions and context compactions."""
+"""Stable ACP model-call lineage for recursive sessions and context compactions."""
 
 from __future__ import annotations
 
@@ -12,14 +12,14 @@ RequestKind = Literal["turn", "compaction"]
 SessionStatus = Literal["running", "completed", "failed", "cancelled"]
 CompactionStatus = Literal["in_progress", "completed", "failed", "cancelled"]
 
-REQUEST_ID_HEADER = "X-RLM-Request-ID"
-SESSION_ID_HEADER = "X-RLM-Session-ID"
-PARENT_SESSION_ID_HEADER = "X-RLM-Parent-Session-ID"
-CONTEXT_ID_HEADER = "X-RLM-Context-ID"
-PREVIOUS_CONTEXT_ID_HEADER = "X-RLM-Previous-Context-ID"
-TRANSITION_HEADER = "X-RLM-Transition"
-COMPACTION_ID_HEADER = "X-RLM-Compaction-ID"
-DEPTH_HEADER = "X-RLM-Depth"
+REQUEST_ID_HEADER = "X-ACP-Lineage-Request-ID"
+SESSION_ID_HEADER = "X-ACP-Lineage-Session-ID"
+PARENT_SESSION_ID_HEADER = "X-ACP-Lineage-Parent-Session-ID"
+CONTEXT_ID_HEADER = "X-ACP-Lineage-Context-ID"
+PREVIOUS_CONTEXT_ID_HEADER = "X-ACP-Lineage-Previous-Context-ID"
+TRANSITION_HEADER = "X-ACP-Lineage-Transition"
+COMPACTION_ID_HEADER = "X-ACP-Lineage-Compaction-ID"
+DEPTH_HEADER = "X-ACP-Lineage-Depth"
 LINEAGE_HEADER_NAMES = (
     REQUEST_ID_HEADER,
     SESSION_ID_HEADER,
