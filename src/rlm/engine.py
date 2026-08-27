@@ -22,6 +22,7 @@ from rlm.client import (
     model_call_headers,
 )
 from rlm.compaction import (
+    CHECKPOINT_ATTEMPTS,
     CHECKPOINT_PROMPT,
     REPL_NOTE,
     SUMMARY_FRAMING,
@@ -681,19 +682,27 @@ class RLMEngine:
         checkpoint_prompt = CHECKPOINT_PROMPT
         if self._repl is not None:
             checkpoint_prompt += REPL_NOTE
+        summary_text = ""
         while True:
             checkpoint = [
                 *messages,
                 {"role": "user", "content": checkpoint_prompt},
             ]
             try:
-                response, usage = await self._call_model(checkpoint, checkpoint=True)
+                # The model can ignore `tool_choice="none"` and reply with a tool call
+                # and no text; resample so the next branch never starts context-free.
+                for _ in range(CHECKPOINT_ATTEMPTS):
+                    response, usage = await self._call_model(
+                        checkpoint, checkpoint=True
+                    )
+                    message = response.choices[0].message
+                    if not message.tool_calls and (message.content or "").strip():
+                        summary_text = message.content
+                        break
                 break
             except BadRequestError as e:
                 if not context_error(e)[0] or not drop_latest_tool_result(messages):
                     raise
-
-        summary_text = response.choices[0].message.content or ""
 
         system_msg = messages[0]
         compacted_user_content = SUMMARY_FRAMING + "\n\n" + summary_text

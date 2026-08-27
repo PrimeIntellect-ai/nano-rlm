@@ -6,6 +6,8 @@ from typing import Any, cast
 
 from openai import APIError, AsyncOpenAI, BadRequestError
 
+CHECKPOINT_ATTEMPTS = 3
+
 CHECKPOINT_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
 Include:
