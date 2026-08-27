@@ -203,6 +203,7 @@ class RLMEngine:
         self.skills = list(config.skills)
         self.kernel_env = dict(config.kernel_env)
         self.max_tokens = config.policy.max_tokens
+        self.max_tool_output_chars = config.policy.max_tool_output_chars
 
         self._owns_client = client is None
         self.client = client or make_client(config.provider)
@@ -604,7 +605,7 @@ class RLMEngine:
             for event in tool_result.metric_events:
                 self._metrics.record(event)
 
-            result = tool_result.content
+            result = self._truncate_tool_output(tool_result.content)
 
             self.session.log_tool_result(turn, tool_name, result, duration)
             messages.append(
@@ -902,6 +903,24 @@ class RLMEngine:
             "lineage": self._lineage.snapshot(),
         }
         return snapshot
+
+    def _truncate_tool_output(self, text: str) -> str:
+        """Cap an oversized tool result with middle truncation (mirrors Codex): keep half the
+        budget as head and half as tail, elide the middle with a removed-count marker, and
+        prefix a warning naming the original size so the model knows what it lost."""
+        cap = self.max_tool_output_chars
+        if cap is None or not isinstance(text, str) or len(text) <= cap:
+            return text
+        head = cap // 2
+        tail = cap - head
+        removed = len(text) - head - tail
+        original_tokens = (len(text) + 3) // 4  # ~4 chars per token
+        total_lines = text.count("\n") + 1
+        return (
+            f"Warning: truncated output (original token count: {original_tokens})\n"
+            f"Total output lines: {total_lines}\n\n"
+            f"{text[:head]}…{removed} chars truncated…{text[-tail:]}"
+        )
 
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         if self.system_prompt_path:
