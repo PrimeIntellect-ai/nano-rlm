@@ -98,7 +98,13 @@ class LineageTracker:
         return context_id
 
     def set_session_status(self, session_id: str, status: SessionStatus) -> None:
-        self._sessions[session_id]["status"] = status
+        session = self._sessions[session_id]
+        # A session has one terminal outcome. Cleanup can observe cancellation after
+        # completed work (for example while awaiting a shielded close task), but that
+        # later observation must not rewrite the execution result.
+        if session["status"] != "running":
+            return
+        session["status"] = status
 
     def active_context(self, session_id: str) -> str:
         return self._active_contexts[session_id]

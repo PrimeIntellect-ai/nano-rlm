@@ -41,6 +41,17 @@ def test_root_and_child_requests_have_exact_parentage():
     assert snapshot["sessions"][1]["spawned_by_request_id"] == (root_request.request_id)
 
 
+def test_terminal_session_status_cannot_be_overwritten():
+    lineage = LineageTracker()
+    lineage.register_session("trace-1", parent_session_id=None, depth=0)
+
+    lineage.set_session_status("trace-1", "completed")
+    lineage.set_session_status("trace-1", "cancelled")
+    lineage.set_session_status("trace-1", "failed")
+
+    assert lineage.snapshot()["sessions"][0]["status"] == "completed"
+
+
 def test_completed_compaction_starts_linked_context_epoch():
     lineage = LineageTracker()
     source_context_id = lineage.register_session(

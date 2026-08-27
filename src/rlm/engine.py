@@ -248,7 +248,13 @@ class RLMEngine:
         self._has_result = False
 
         if not self._started:
-            await self._start(prompt)
+            try:
+                await self._start(prompt)
+            except BaseException as exc:
+                self._metrics.stop_reason = (
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+                )
+                raise
             messages_before = self._messages[:1]
         else:
             messages_before = list(self._messages)
@@ -676,9 +682,7 @@ class RLMEngine:
                 )
             else:
                 status = (
-                    "cancelled"
-                    if self._metrics.stop_reason == "cancelled" or not self._started
-                    else "failed"
+                    "failed" if self._metrics.stop_reason == "error" else "cancelled"
                 )
                 self._lineage.set_session_status(self._invocation_id, status)
                 self.session.close()

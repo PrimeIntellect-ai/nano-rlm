@@ -667,6 +667,23 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
     assert repls[1].stopped is True
 
 
+async def test_engine_failed_start_marks_lineage_failed(monkeypatch, session):
+    engine = RLMEngine(
+        client=DummyClient([]),  # type: ignore[arg-type]
+        session=session,
+    )
+
+    async def fail_start(prompt: str) -> None:
+        raise RuntimeError(f"cannot start: {prompt}")
+
+    monkeypatch.setattr(engine, "_start", fail_start)
+
+    with pytest.raises(RuntimeError, match="cannot start"):
+        await engine.run("first")
+
+    assert engine.execution_snapshot()["lineage"]["sessions"][0]["status"] == "failed"
+
+
 async def test_acp_failed_session_creation_closes_session(monkeypatch, tmp_path):
     session = Session(tmp_path / "session")
 
