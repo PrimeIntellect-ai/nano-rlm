@@ -184,11 +184,26 @@ class RLMEngine:
         self.system_prompt_path = system_prompt_path or os.environ.get(
             "RLM_SYSTEM_PROMPT_PATH"
         )
-        self.append_to_system_prompt = append_to_system_prompt or os.environ.get(
-            "RLM_APPEND_TO_SYSTEM_PROMPT"
-        )
         self.max_depth = int(os.environ.get("RLM_MAX_DEPTH", "0"))
         self.depth = int(os.environ.get("RLM_DEPTH", "0"))
+        # Role-specific system-prompt appends, so each tier gets instructions it can act on:
+        #   root (depth 0)                        -> RLM_APPEND_TO_SYSTEM_PROMPT (e.g. delegate)
+        #   node (depth >= 1 and can still recurse) -> RLM_SUBAGENT_APPEND_TO_SYSTEM_PROMPT
+        #   leaf (depth == max_depth, cannot recurse) -> RLM_LEAF_APPEND_TO_SYSTEM_PROMPT
+        # Each tier falls back to the next-more-general one (leaf -> subagent -> root), so any
+        # unset knob preserves prior behavior. Mirrors the allow_recursion gating in prompt.py.
+        _root_append = os.environ.get("RLM_APPEND_TO_SYSTEM_PROMPT")
+        _subagent_append = os.environ.get("RLM_SUBAGENT_APPEND_TO_SYSTEM_PROMPT")
+        _leaf_append = os.environ.get("RLM_LEAF_APPEND_TO_SYSTEM_PROMPT")
+        if self.depth == 0:
+            _env_append = _root_append
+        elif self.depth >= self.max_depth and _leaf_append is not None:
+            _env_append = _leaf_append
+        elif _subagent_append is not None:
+            _env_append = _subagent_append
+        else:
+            _env_append = _root_append
+        self.append_to_system_prompt = append_to_system_prompt or _env_append
 
         # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
         # parse RLM_MCP_CONFIG (a standard mcpServers config).
