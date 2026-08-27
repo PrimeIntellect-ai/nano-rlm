@@ -66,7 +66,7 @@ def test_threshold_is_learned_from_provider_error():
         body={"error": {"message": "maximum context length is 32,768 tokens"}},
     )
 
-    assert context_error(error) == (True, 29_491)
+    assert context_error(error) == (True, 16_384)
 
 
 class _ScriptedClient(DummyClient):

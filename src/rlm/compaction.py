@@ -36,6 +36,12 @@ information in this summary to assist with your own analysis:"""
 
 DROPPED_TOOL_RESULT = "[tool output dropped because it exceeded the context limit]"
 
+RESERVE_TOKENS = 16_384
+"""Compact when this many tokens remain below the model context window."""
+
+TOOL_OUTPUT_MAX_BYTES = 10_000
+"""Middle-out truncation budget for one tool result before it enters the conversation."""
+
 _CONTEXT_FIELDS = (
     "max_model_len",
     "context_length",
@@ -76,7 +82,8 @@ def context_error(error: BadRequestError) -> tuple[bool, int | None]:
 
 
 def default_threshold(context_window: int) -> int:
-    return max(1, context_window * 9 // 10)
+    """Leave a fixed reserve below the window; small windows keep at least half."""
+    return max(context_window - RESERVE_TOKENS, context_window // 2)
 
 
 def _model_context_window(payload: Mapping[str, Any], model: str) -> int | None:
@@ -108,6 +115,21 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
             _window_cache[key] = None
     window = _window_cache[key]
     return default_threshold(window) if window is not None else None
+
+
+def truncate_tool_output(text: str) -> str:
+    """Keep the head and tail of an oversized tool result and say what was cut."""
+    data = text.encode("utf-8")
+    if len(data) <= TOOL_OUTPUT_MAX_BYTES:
+        return text
+    keep = TOOL_OUTPUT_MAX_BYTES // 2
+    head = data[:keep].decode("utf-8", errors="ignore")
+    tail = data[-keep:].decode("utf-8", errors="ignore")
+    return (
+        f"Warning: truncated output (original token count: {estimated_tokens(text)})\n"
+        f"Total output lines: {text.count(chr(10)) + 1}\n\n"
+        f"{head}\n[... {len(data) - 2 * keep} bytes truncated ...]\n{tail}"
+    )
 
 
 def estimated_tokens(chars: str) -> int:

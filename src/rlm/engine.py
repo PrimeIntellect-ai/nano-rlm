@@ -29,6 +29,7 @@ from rlm.compaction import (
     discover_threshold,
     drop_latest_tool_result,
     estimated_tokens,
+    truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
 from rlm.lineage import LineageTracker
@@ -505,15 +506,16 @@ class RLMEngine:
             result = tool_result.content
 
             self.session.log_tool_result(turn, tool_name, result, duration)
+            content = truncate_tool_output(result)
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": result,
+                    "content": content,
                 }
             )
 
-            if self._should_compact(usage, result):
+            if self._should_compact(usage, content):
                 try:
                     await self._compact_branch(messages, turn)
                 except BadRequestError as e:
