@@ -16,7 +16,7 @@ import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall
 from rlm.acp import (
-    ACP_LINEAGE_METADATA_KEY,
+    ACP_SEMANTIC_EDGES_METADATA_KEY,
     CONTRACT_METADATA_KEY,
     RUNTIME_METADATA_KEY,
     SESSION_METADATA_KEY,
@@ -144,25 +144,7 @@ class _Engine:
                 "max_compactions": None,
                 "allow_git": False,
             },
-            "lineage": {
-                "sessions": [
-                    {
-                        "session_id": self.invocation_id,
-                        "depth": 0,
-                        "initial_context_id": "test-context",
-                        "status": "completed" if self.closed else "running",
-                    }
-                ],
-                "contexts": [
-                    {
-                        "context_id": "test-context",
-                        "session_id": self.invocation_id,
-                        "transition": "root",
-                    }
-                ],
-                "compactions": [],
-                "requests": [],
-            },
+            "semantic_edges": {"edges": []},
         }
 
 
@@ -354,24 +336,17 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
         len({header["Idempotency-Key"] for header in (turn, compaction, resumed)}) == 3
     )
     assert all(
-        header["Idempotency-Key"] == header["X-ACP-Lineage-Request-ID"]
+        header["Idempotency-Key"] == header["X-ACP-Model-Request-ID"]
         for header in (turn, compaction, resumed)
     )
-    lineage = engine.execution_snapshot()["lineage"]
-    requests = {request["request_id"]: request for request in lineage["requests"]}
-    contexts = {context["context_id"]: context for context in lineage["contexts"]}
-    turn_request, compaction_request, resumed_request = [
-        requests[headers["X-ACP-Lineage-Request-ID"]]
-        for headers in (turn, compaction, resumed)
+    semantic_edges = engine.execution_snapshot()["semantic_edges"]
+    assert semantic_edges["edges"] == [
+        {
+            "source_request_id": compaction["X-ACP-Model-Request-ID"],
+            "target_request_id": resumed["X-ACP-Model-Request-ID"],
+            "type": "compaction",
+        }
     ]
-    assert turn_request["session_id"] == engine._invocation_id
-    assert turn_request["context_id"] == compaction_request["context_id"]
-    assert compaction_request["kind"] == "compaction"
-    assert resumed_request["context_id"] != turn_request["context_id"]
-    resumed_context = contexts[resumed_request["context_id"]]
-    assert resumed_context["previous_context_id"] == turn_request["context_id"]
-    assert resumed_context["transition"] == "compact"
-    assert resumed_request["compaction_id"] == compaction_request["compaction_id"]
 
 
 async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
@@ -499,17 +474,19 @@ async def test_failed_prompt_restores_pre_compaction_context(session):
         engine.close()
 
     request_ids = [
-        call["extra_headers"]["X-ACP-Lineage-Request-ID"] for call in client.calls
+        call["extra_headers"]["X-ACP-Model-Request-ID"] for call in client.calls
     ]
-    lineage = engine.execution_snapshot()["lineage"]
-    requests = {request["request_id"]: request for request in lineage["requests"]}
-    contexts = {context["context_id"]: context for context in lineage["contexts"]}
-    initial, summary, compacted, retried = [requests[item] for item in request_ids]
+    semantic_edges = engine.execution_snapshot()["semantic_edges"]
     assert result.answer == "continued"
-    assert summary["context_id"] == initial["context_id"]
-    assert compacted["context_id"] != initial["context_id"]
-    assert retried["context_id"] == initial["context_id"]
-    assert contexts[retried["context_id"]]["transition"] == "root"
+    initial, summary, compacted, retried = request_ids
+    assert len({initial, summary, compacted, retried}) == 4
+    assert semantic_edges["edges"] == [
+        {
+            "source_request_id": summary,
+            "target_request_id": compacted,
+            "type": "compaction",
+        }
+    ]
 
 
 async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
@@ -673,7 +650,7 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
     assert repls[1].stopped is True
 
 
-async def test_engine_failed_start_marks_lineage_failed(monkeypatch, session):
+async def test_engine_failed_start_publishes_no_semantic_edge(monkeypatch, session):
     engine = RLMEngine(
         client=DummyClient([]),  # type: ignore[arg-type]
         session=session,
@@ -687,7 +664,7 @@ async def test_engine_failed_start_marks_lineage_failed(monkeypatch, session):
     with pytest.raises(RuntimeError, match="cannot start"):
         await engine.run("first")
 
-    assert engine.execution_snapshot()["lineage"]["sessions"][0]["status"] == "failed"
+    assert engine.execution_snapshot()["semantic_edges"] == {"edges": []}
 
 
 async def test_acp_failed_session_creation_closes_session(monkeypatch, tmp_path):
@@ -784,31 +761,20 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert second_snapshot["turns"] == 2
     assert second_snapshot["usage"]["total_tokens"] == 10
     assert second_snapshot["last_stop_reason"] == "done"
-    assert first.field_meta[ACP_LINEAGE_METADATA_KEY]["sessions"] == [
-        {
-            "session_id": "test-session",
-            "depth": 0,
-            "initial_context_id": "test-context",
-            "status": "running",
-        }
-    ]
+    assert first.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY] == {"edges": []}
 
     closed = await agent.close_session(created.session_id)
     closed_snapshot = closed.field_meta[SESSION_METADATA_KEY]
     assert closed_snapshot["session_id"] == "test-session"
     assert closed_snapshot["turns"] == 2
     assert closed_snapshot["last_stop_reason"] == "done"
-    assert "lineage" not in closed_snapshot
-    assert closed.field_meta[ACP_LINEAGE_METADATA_KEY]["sessions"][0]["status"] == (
-        "completed"
-    )
+    assert "semantic_edges" not in closed_snapshot
+    assert closed.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY] == {"edges": []}
     assert "test-secret" not in closed.model_dump_json(by_alias=True)
     assert engine.closed is True
 
 
-async def test_acp_prompt_snapshot_records_resumed_request_compaction(
-    monkeypatch, tmp_path
-):
+async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path):
     client = DummyClient(
         [
             DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
@@ -829,11 +795,18 @@ async def test_acp_prompt_snapshot_records_resumed_request_compaction(
 
     try:
         response = await agent.prompt(created.session_id, [text_block("compact")])
-        lineage = response.field_meta[ACP_LINEAGE_METADATA_KEY]
-        compaction_id = lineage["compactions"][0]["compaction_id"]
-
-        assert lineage["requests"][-1]["kind"] == "turn"
-        assert lineage["requests"][-1]["compaction_id"] == compaction_id
+        semantic_edges = response.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY]
+        assert semantic_edges["edges"] == [
+            {
+                "source_request_id": client.calls[1]["extra_headers"][
+                    "X-ACP-Model-Request-ID"
+                ],
+                "target_request_id": client.calls[2]["extra_headers"][
+                    "X-ACP-Model-Request-ID"
+                ],
+                "type": "compaction",
+            }
+        ]
     finally:
         await agent.close_session(created.session_id)
 
@@ -856,7 +829,7 @@ async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
     cancelled = await pending
     assert cancelled.stop_reason == "cancelled"
     assert SESSION_METADATA_KEY in cancelled.field_meta
-    assert ACP_LINEAGE_METADATA_KEY in cancelled.field_meta
+    assert ACP_SEMANTIC_EDGES_METADATA_KEY in cancelled.field_meta
     assert engine.closed is False
     resumed = await agent.prompt(created.session_id, [text_block("after")])
     assert resumed.stop_reason == "end_turn"

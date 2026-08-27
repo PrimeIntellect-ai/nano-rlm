@@ -58,7 +58,7 @@ RLM's ACP surface is a versioned training contract, not a compatibility layer
 over the standalone CLI. `initialize` advertises the exact
 `ai.prime.rlm/contract-v1` marker in its response `_meta`; clients must require
 it, then provide one complete `ai.prime.rlm/runtime-v1` object in
-`session/new._meta`. The runtime object contains the lineage session ID, model,
+`session/new._meta`. The runtime object contains the ACP session ID, model,
 provider, execution policy, prompt configuration, enabled built-in skills,
 explicit kernel environment, and optional search credential. Nullable and
 disabled values are sent explicitly as `null` or empty collections. Missing,
@@ -75,6 +75,12 @@ stays stable across SDK and outer retries (retry attempts are distinguished by
 `x-stainless-retry-count`), so an inference proxy can deduplicate replayed
 requests. Both header names are reserved and rejected in provider
 configuration.
+
+Model calls also carry a private `X-ACP-Model-Request-ID` correlation header.
+RLM publishes sparse, labeled relationships between those request IDs under
+`ai.prime.acp/semantic-edges-v1`: `subagent_call`, `subagent_return`, and
+`compaction`. ACP consumers can resolve the request IDs onto their own message
+nodes while harnesses that do not understand the extension ignore it.
 
 ## Python SDK
 

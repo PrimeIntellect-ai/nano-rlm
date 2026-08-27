@@ -21,7 +21,7 @@ from rlm.client import (
     model_call_headers,
 )
 from rlm.config import RuntimeConfig
-from rlm.lineage import LineageTracker
+from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import MCPServer, load_mcp_servers, validate_mcp_servers
 from rlm.prompt import build_system_prompt
 from rlm.session import Session
@@ -139,7 +139,7 @@ class RLMEngine:
         runtime_config: RuntimeConfig | None = None,
         supervisor: SessionTreeSupervisor | None = None,
         invocation_id: str | None = None,
-        lineage: LineageTracker | None = None,
+        semantic_edges: SemanticEdgeTracker | None = None,
         parent_session_id: str | None = None,
         spawned_by_request_id: str | None = None,
     ):
@@ -174,13 +174,14 @@ class RLMEngine:
         self._invocation_id = invocation_id or (
             supervisor.root_id if supervisor is not None else uuid.uuid4().hex
         )
-        self._lineage = lineage or (
-            supervisor.lineage if supervisor is not None else LineageTracker()
+        self._semantic_edges = semantic_edges or (
+            supervisor.semantic_edges
+            if supervisor is not None
+            else SemanticEdgeTracker()
         )
-        self._lineage.register_session(
+        self._semantic_edges.register_session(
             self._invocation_id,
             parent_session_id=parent_session_id,
-            depth=self.depth,
             spawned_by_request_id=spawned_by_request_id,
         )
         self._owns_supervisor = False
@@ -260,7 +261,7 @@ class RLMEngine:
             messages_before = list(self._messages)
             self._messages.append({"role": "user", "content": prompt})
         branch_start_before = self._branch_start_turn
-        context_before = self._lineage.active_context(self._invocation_id)
+        semantic_edges_before = self._semantic_edges.checkpoint(self._invocation_id)
         turn_before = self._turn
         usage_before = TokenUsage(
             prompt_tokens=self._total_usage.prompt_tokens,
@@ -291,7 +292,7 @@ class RLMEngine:
             # that really ran and remain part of session accounting.
             self._messages[:] = messages_before
             self._branch_start_turn = branch_start_before
-            self._lineage.restore_context(self._invocation_id, context_before)
+            self._semantic_edges.restore(self._invocation_id, semantic_edges_before)
             self._turn = turn_before
             if isinstance(exc, asyncio.CancelledError):
                 self._metrics.stop_reason = "cancelled"
@@ -335,7 +336,7 @@ class RLMEngine:
                     cwd=self.cwd,
                     mcp_servers=self.mcp_servers,
                     root_invocation_id=self._invocation_id,
-                    lineage=self._lineage,
+                    semantic_edges=self._semantic_edges,
                 )
                 self._owns_supervisor = True
             try:
@@ -399,10 +400,7 @@ class RLMEngine:
         for turn in itertools.count(self._turn):
             self._turn = turn + 1
             # Call LLM
-            request_id = self._lineage.start_request(
-                self._invocation_id,
-                kind="turn",
-            )
+            request_id = self._semantic_edges.start_request(self._invocation_id)
             call_id = request_id
             request_kwargs = {
                 "model": self.model,
@@ -417,12 +415,14 @@ class RLMEngine:
                     self.client.chat.completions.create,
                     **request_kwargs,
                 )
-            except BadRequestError as e:
-                if not _is_request_too_large(e):
-                    raise
-                self._metrics.stop_reason = "request_too_large"
-                final_text = "[request body too large]"
-                break
+            except BaseException as exc:
+                self._semantic_edges.fail_request(request_id)
+                if isinstance(exc, BadRequestError) and _is_request_too_large(exc):
+                    self._metrics.stop_reason = "request_too_large"
+                    final_text = "[request body too large]"
+                    break
+                raise
+            self._semantic_edges.finish_request(request_id)
             usage = extract_usage(response)
             self._total_usage.prompt_tokens += usage.prompt_tokens
             self._total_usage.completion_tokens += usage.completion_tokens
@@ -660,7 +660,6 @@ class RLMEngine:
             self._repl = None
         if self.session is not None:
             if self._has_result:
-                self._lineage.set_session_status(self._invocation_id, "completed")
                 direct_tool_stats = None
                 child_tool_stats = None
                 if self._supervisor is not None and self._invocation_id is not None:
@@ -681,10 +680,6 @@ class RLMEngine:
                     trusted_child_tool_stats=child_tool_stats,
                 )
             else:
-                status = (
-                    "failed" if self._metrics.stop_reason == "error" else "cancelled"
-                )
-                self._lineage.set_session_status(self._invocation_id, status)
                 self.session.close()
 
     def _programmatic_tool_call_stats(
@@ -746,10 +741,9 @@ class RLMEngine:
         if self._repl is not None:
             checkpoint_prompt += REPL_RESTART_NOTE
         messages.append({"role": "user", "content": checkpoint_prompt})
-        compaction = self._lineage.begin_compaction(self._invocation_id)
-        request_id = self._lineage.start_request(
+        compaction = self._semantic_edges.begin_compaction(self._invocation_id)
+        request_id = self._semantic_edges.start_request(
             self._invocation_id,
-            kind="compaction",
             compaction_id=compaction.compaction_id,
         )
         request_kwargs: dict = {
@@ -768,12 +762,14 @@ class RLMEngine:
             usage = extract_usage(response)
             summary_text = response.choices[0].message.content or ""
         except BaseException as exc:
-            self._lineage.finish_compaction(
+            self._semantic_edges.fail_request(request_id)
+            self._semantic_edges.finish_compaction(
                 compaction.compaction_id,
                 "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
             )
             messages.pop()
             raise
+        self._semantic_edges.finish_request(request_id)
         self._total_usage.prompt_tokens += usage.prompt_tokens
         self._total_usage.completion_tokens += usage.completion_tokens
 
@@ -783,7 +779,7 @@ class RLMEngine:
             system_msg,
             {"role": "user", "content": compacted_user_content},
         ]
-        self._lineage.finish_compaction(compaction.compaction_id, "completed")
+        self._semantic_edges.finish_compaction(compaction.compaction_id, "completed")
 
         # Log the compaction for traceability.
         self.session.log(
@@ -857,7 +853,7 @@ class RLMEngine:
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "allow_git": self.runtime_config.policy.allow_git,
             },
-            "lineage": self._lineage.snapshot(),
+            "semantic_edges": self._semantic_edges.snapshot(),
         }
         return snapshot
 

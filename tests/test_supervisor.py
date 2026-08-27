@@ -215,10 +215,10 @@ async def test_cancel_while_awaiting_registry_lock_closes_child_session(
     assert created[0]._msg_file.closed
     assert supervisor._invocations == {}
     assert supervisor._capabilities == {}
-    assert supervisor.lineage.snapshot()["sessions"][1]["status"] == "cancelled"
+    assert supervisor.semantic_edges.snapshot() == {"edges": []}
 
 
-async def test_child_factory_failure_marks_lineage_failed(tmp_path):
+async def test_child_factory_failure_publishes_no_semantic_edge(tmp_path):
     class FailingEngine:
         def __init__(self, **kwargs):
             raise RuntimeError("engine init failed")
@@ -242,7 +242,7 @@ async def test_child_factory_failure_marks_lineage_failed(tmp_path):
         await supervisor.aclose()
         session.close()
 
-    assert supervisor.lineage.snapshot()["sessions"][1]["status"] == "failed"
+    assert supervisor.semantic_edges.snapshot() == {"edges": []}
 
 
 async def test_saturated_nested_calls_do_not_deadlock(tmp_path):

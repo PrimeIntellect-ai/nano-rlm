@@ -22,7 +22,7 @@ from rlm.broker import (
     write_frame,
 )
 from rlm.config import RuntimeConfig
-from rlm.lineage import LineageTracker
+from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import (
     MCPRegistry,
     MCPServer,
@@ -86,7 +86,7 @@ class SessionTreeSupervisor:
         mcp_servers: dict[str, MCPServer] | None = None,
         engine_factory: Callable[..., RLMEngine] | None = None,
         root_invocation_id: str | None = None,
-        lineage: LineageTracker | None = None,
+        semantic_edges: SemanticEdgeTracker | None = None,
     ) -> None:
         self._engine_factory = engine_factory
         self._server: asyncio.AbstractServer | None = None
@@ -141,11 +141,10 @@ class SessionTreeSupervisor:
             mcp_servers=dict(mcp_servers or {}),
         )
         self.root_id = root_id
-        self.lineage = lineage or LineageTracker()
-        self.lineage.register_session(
+        self.semantic_edges = semantic_edges or SemanticEdgeTracker()
+        self.semantic_edges.register_session(
             root_id,
             parent_session_id=None,
-            depth=runtime_config.invocation.depth,
         )
         self._invocations = {root_id: root}
         self._parents = {root_id: None}
@@ -343,10 +342,9 @@ class SessionTreeSupervisor:
                 mcp_servers=parent.mcp_servers,
                 spawned_by_request_id=spawned_by_request_id,
             )
-            self.lineage.register_session(
+            self.semantic_edges.register_session(
                 child_id,
                 parent_session_id=parent_id,
-                depth=child_context.depth,
                 spawned_by_request_id=spawned_by_request_id,
             )
             # Everything from session creation to here is synchronous; the try
@@ -374,14 +372,8 @@ class SessionTreeSupervisor:
                     invocation_id=child.id,
                 )
                 result = await engine.run(prompt)
-                self.lineage.set_session_status(child_id, "completed")
+                self.semantic_edges.finish_subagent(child_id)
                 return result
-            except asyncio.CancelledError:
-                self.lineage.set_session_status(child_id, "cancelled")
-                raise
-            except BaseException:
-                self.lineage.set_session_status(child_id, "failed")
-                raise
             finally:
                 # Close synchronously first: the lock acquisition below can be
                 # interrupted by a second cancellation, but the session handle
