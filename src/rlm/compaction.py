@@ -6,8 +6,6 @@ from typing import Any, cast
 
 from openai import APIError, AsyncOpenAI, BadRequestError
 
-CHECKPOINT_ATTEMPTS = 3
-
 CHECKPOINT_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
 Include:
@@ -110,8 +108,9 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
     return default_threshold(window) if window is not None else None
 
 
-def estimated_tokens(text: str) -> int:
-    return (len(text) + 3) // 4
+def estimated_tokens(chars: str) -> int:
+    """Rough token count at four characters per token."""
+    return (len(chars) + 3) // 4
 
 
 def drop_latest_tool_result(messages: list[dict]) -> bool:
