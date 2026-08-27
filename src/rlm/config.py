@@ -52,6 +52,9 @@ class ExecutionPolicy(_ConfigModel):
     """Resource and context-management policy for one RLM engine."""
 
     max_depth: int = Field(default=1, ge=0)
+    max_turns: int | None = Field(default=None, gt=0)
+    """Per-session turn cap (one turn = one model call + its tool execution). Applies to EVERY
+    engine in the tree, including sub-agents, so a leaf can't loop unbounded. None = uncapped."""
     exec_timeout: int = Field(default=300, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
     summarize_at_tokens: int | None = Field(default=256_000, gt=0)
