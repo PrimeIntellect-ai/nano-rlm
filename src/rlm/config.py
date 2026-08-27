@@ -143,6 +143,9 @@ class ExecutionPolicy(_ConfigModel):
     max_total_tokens: int | None = Field(default=None, gt=0)
     """Tree-total token budget across the whole recursive session tree (all engines, prompt +
     completion). Once reached, no further sub-agents are spawned. None = unbounded."""
+    max_tool_output_chars: int | None = Field(default=None, gt=0)
+    """Cap on a single tool result's size (chars) before it enters the conversation; oversized
+    output is truncated keeping a head + tail window. None = no cap."""
     max_compactions: int | None = Field(default=None, gt=0)
     max_concurrent_subagents: int = Field(default=4, gt=0)
     max_subagent_calls: int = Field(default=64, gt=0)
@@ -233,6 +236,9 @@ class RuntimeConfig(_ConfigModel):
                 ),
                 max_total_tokens=_optional_positive_int(
                     env.get("RLM_MAX_TOTAL_TOKENS"), "RLM_MAX_TOTAL_TOKENS"
+                ),
+                max_tool_output_chars=_optional_positive_int(
+                    env.get("RLM_MAX_TOOL_OUTPUT_CHARS"), "RLM_MAX_TOOL_OUTPUT_CHARS"
                 ),
                 max_compactions=_optional_positive_int(
                     env.get("RLM_MAX_COMPACTIONS"), "RLM_MAX_COMPACTIONS"

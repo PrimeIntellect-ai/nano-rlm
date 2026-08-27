@@ -107,7 +107,6 @@ versioned contract described above.
 | `RLM_MAX_CONCURRENT_SUBAGENTS` | `max(4, RLM_MAX_DEPTH)` | Maximum live recursive agents in a session tree. Capacity is reserved per depth to prevent nested-call deadlocks. |
 | `RLM_MAX_SUBAGENT_CALLS` | `64` | Maximum accepted recursive calls across the complete session tree. |
 | `RLM_EXEC_TIMEOUT` | `300` | Seconds per IPython execution |
-| `RLM_MAX_OUTPUT` | `-1` | Max chars returned from a tool call (`-1` disables truncation; `0` is invalid) |
 | `RLM_MAX_TOOL_OUTPUT_CHARS` | — | Preserve only a head/tail window of this many characters from raw IPython output before it enters the conversation. |
 | `RLM_SUMMARIZE_AT_TOKENS` | — | Auto-compaction threshold (context budget) for the **root**: when a turn's prompt tokens reach this value, the conversation is compacted into a summary. Unset disables auto-compaction. |
 | `RLM_SUBAGENT_SUMMARIZE_AT_TOKENS` | — | Context budget for **sub-agents** (depth ≥ 1); falls back to `RLM_SUMMARIZE_AT_TOKENS` when unset. Lets the root run a large context (e.g. 100k) while sub-agents stay lean (e.g. 50k). |

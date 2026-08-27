@@ -171,6 +171,7 @@ class RLMEngine:
         self.skills = list(config.skills)
         self.kernel_env = dict(config.kernel_env)
         self.max_tokens = config.policy.max_tokens
+        self.max_tool_output_chars = config.policy.max_tool_output_chars
 
         self._owns_client = client is None
         self.client = client or make_client(config.provider)
@@ -572,7 +573,7 @@ class RLMEngine:
             for event in tool_result.metric_events:
                 self._metrics.record(event)
 
-            result = tool_result.content
+            result = self._truncate_tool_output(tool_result.content)
 
             self.session.log_tool_result(turn, tool_name, result, duration)
             messages.append(
@@ -870,6 +871,20 @@ class RLMEngine:
             "lineage": self._lineage.snapshot(),
         }
         return snapshot
+
+    def _truncate_tool_output(self, text: str) -> str:
+        """Cap an oversized tool result, keeping a head + tail window so both the start
+        (context) and end (often the error/result) survive."""
+        cap = self.max_tool_output_chars
+        if cap is None or not isinstance(text, str) or len(text) <= cap:
+            return text
+        head = cap * 2 // 3
+        tail = cap - head
+        dropped = len(text) - head - tail
+        return (
+            f"{text[:head]}\n\n... [tool output truncated: {dropped} chars omitted] ...\n\n"
+            f"{text[-tail:]}"
+        )
 
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         if self.system_prompt_path:
