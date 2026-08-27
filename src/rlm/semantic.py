@@ -25,6 +25,13 @@ class _PendingEdge:
     type: str
 
 
+@dataclass(frozen=True)
+class _Checkpoint:
+    pending_edges: tuple[_PendingEdge, ...]
+    last_request_id: str | None
+    spawn_claimed: bool
+
+
 @dataclass
 class _Session:
     parent_session_id: str | None
@@ -72,13 +79,21 @@ class SemanticEdgeTracker:
             spawned_by_request_id=spawned_by_request_id,
         )
 
-    def checkpoint(self, session_id: str) -> tuple[_PendingEdge, ...]:
-        """Capture unpublished inbound edges before a resumable prompt."""
-        return tuple(self._sessions[session_id].pending_edges)
+    def checkpoint(self, session_id: str) -> _Checkpoint:
+        """Capture the semantic continuation point before a resumable prompt."""
+        session = self._sessions[session_id]
+        return _Checkpoint(
+            pending_edges=tuple(session.pending_edges),
+            last_request_id=session.last_request_id,
+            spawn_claimed=session.spawn_claimed,
+        )
 
-    def restore(self, session_id: str, checkpoint: tuple[_PendingEdge, ...]) -> None:
-        """Discard unpublished transitions created by a rolled-back prompt."""
-        self._sessions[session_id].pending_edges = list(checkpoint)
+    def restore(self, session_id: str, checkpoint: _Checkpoint) -> None:
+        """Restore the semantic continuation point after a rolled-back prompt."""
+        session = self._sessions[session_id]
+        session.pending_edges = list(checkpoint.pending_edges)
+        session.last_request_id = checkpoint.last_request_id
+        session.spawn_claimed = checkpoint.spawn_claimed
 
     def start_request(
         self,
@@ -92,6 +107,10 @@ class SemanticEdgeTracker:
         if not session.spawn_claimed and session.spawned_by_request_id is not None:
             inbound.append(_PendingEdge(session.spawned_by_request_id, "subagent_call"))
             session.spawn_claimed = True
+        if session.last_request_id is not None and not any(
+            edge.source_request_id == session.last_request_id for edge in inbound
+        ):
+            inbound.append(_PendingEdge(session.last_request_id, "continuation"))
 
         request_id = uuid.uuid4().hex
         self._requests[request_id] = _Request(session_id, inbound)

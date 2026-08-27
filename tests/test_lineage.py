@@ -43,6 +43,11 @@ def test_subagent_call_and_return_are_request_edges():
                 "target_request_id": resumed_request,
                 "type": "subagent_return",
             },
+            {
+                "source_request_id": parent_request,
+                "target_request_id": resumed_request,
+                "type": "continuation",
+            },
         ]
     }
 
@@ -74,7 +79,7 @@ def test_concurrent_subagent_returns_share_the_consuming_request():
 def test_completed_compaction_links_summary_to_resumed_request():
     lineage = SemanticEdgeTracker()
     lineage.register_session("root", parent_session_id=None)
-    _finish(lineage, "root")
+    preceding_request = _finish(lineage, "root")
     compaction = lineage.begin_compaction("root")
     summary_request = lineage.start_request(
         "root", compaction_id=compaction.compaction_id
@@ -85,10 +90,15 @@ def test_completed_compaction_links_summary_to_resumed_request():
 
     assert lineage.snapshot()["edges"] == [
         {
+            "source_request_id": preceding_request,
+            "target_request_id": summary_request,
+            "type": "continuation",
+        },
+        {
             "source_request_id": summary_request,
             "target_request_id": resumed_request,
             "type": "compaction",
-        }
+        },
     ]
 
 
@@ -124,6 +134,30 @@ def test_prompt_rollback_discards_unconsumed_compaction_transition():
     assert lineage.snapshot() == {"edges": []}
 
 
+def test_prompt_rollback_restores_previous_continuation_point():
+    lineage = SemanticEdgeTracker()
+    lineage.register_session("root", parent_session_id=None)
+    previous = _finish(lineage, "root")
+    before = lineage.checkpoint("root")
+
+    abandoned = _finish(lineage, "root")
+    lineage.restore("root", before)
+    retried = _finish(lineage, "root")
+
+    assert lineage.snapshot()["edges"] == [
+        {
+            "source_request_id": previous,
+            "target_request_id": abandoned,
+            "type": "continuation",
+        },
+        {
+            "source_request_id": previous,
+            "target_request_id": retried,
+            "type": "continuation",
+        },
+    ]
+
+
 async def test_concurrent_requests_receive_unique_stable_ids():
     lineage = SemanticEdgeTracker()
     lineage.register_session("root", parent_session_id=None)
@@ -141,4 +175,6 @@ async def test_concurrent_requests_receive_unique_stable_ids():
     assert all(
         item["Idempotency-Key"] == item["X-ACP-Model-Request-ID"] for item in headers
     )
-    assert lineage.snapshot() == {"edges": []}
+    continuations = lineage.snapshot()["edges"]
+    assert len(continuations) == 63
+    assert all(edge["type"] == "continuation" for edge in continuations)

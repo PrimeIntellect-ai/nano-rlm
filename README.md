@@ -78,9 +78,11 @@ configuration.
 
 Model calls also carry a private `X-ACP-Model-Request-ID` correlation header.
 RLM publishes sparse, labeled relationships between those request IDs under
-`ai.prime.acp/semantic-edges-v1`: `subagent_call`, `subagent_return`, and
-`compaction`. ACP consumers can resolve the request IDs onto their own message
-nodes while harnesses that do not understand the extension ignore it.
+`ai.prime.acp/semantic-edges-v1`: `continuation`, `subagent_call`,
+`subagent_return`, and `compaction`. `continuation` preserves same-agent causal
+order even when a consumer's physical token-prefix graph splits. ACP consumers
+can resolve the request IDs onto their own message nodes while harnesses that do
+not understand the extension ignore it.
 
 ## Python SDK
 

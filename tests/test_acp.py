@@ -342,10 +342,15 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
     semantic_edges = engine.execution_snapshot()["semantic_edges"]
     assert semantic_edges["edges"] == [
         {
+            "source_request_id": turn["X-ACP-Model-Request-ID"],
+            "target_request_id": compaction["X-ACP-Model-Request-ID"],
+            "type": "continuation",
+        },
+        {
             "source_request_id": compaction["X-ACP-Model-Request-ID"],
             "target_request_id": resumed["X-ACP-Model-Request-ID"],
             "type": "compaction",
-        }
+        },
     ]
 
 
@@ -482,10 +487,15 @@ async def test_failed_prompt_restores_pre_compaction_context(session):
     assert len({initial, summary, compacted, retried}) == 4
     assert semantic_edges["edges"] == [
         {
+            "source_request_id": initial,
+            "target_request_id": summary,
+            "type": "continuation",
+        },
+        {
             "source_request_id": summary,
             "target_request_id": compacted,
             "type": "compaction",
-        }
+        },
     ]
 
 
@@ -798,6 +808,15 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
         semantic_edges = response.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY]
         assert semantic_edges["edges"] == [
             {
+                "source_request_id": client.calls[0]["extra_headers"][
+                    "X-ACP-Model-Request-ID"
+                ],
+                "target_request_id": client.calls[1]["extra_headers"][
+                    "X-ACP-Model-Request-ID"
+                ],
+                "type": "continuation",
+            },
+            {
                 "source_request_id": client.calls[1]["extra_headers"][
                     "X-ACP-Model-Request-ID"
                 ],
@@ -805,7 +824,7 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
                     "X-ACP-Model-Request-ID"
                 ],
                 "type": "compaction",
-            }
+            },
         ]
     finally:
         await agent.close_session(created.session_id)
