@@ -22,6 +22,7 @@ from rlm.broker import (
     write_frame,
 )
 from rlm.config import RuntimeConfig
+from rlm.lineage import LineageTracker
 from rlm.mcp import (
     MCPRegistry,
     MCPServer,
@@ -49,12 +50,14 @@ class _Invocation:
     runtime_config: RuntimeConfig
     cwd: str
     mcp_servers: dict[str, MCPServer]
+    spawned_by_request_id: str | None = None
 
 
 @dataclass
 class _Scope:
     invocation_id: str
     tasks: set[asyncio.Task[Any]]
+    request_id: str | None = None
 
 
 def depth_capacities(max_depth: int, limit: int, root_depth: int = 0) -> dict[int, int]:
@@ -83,6 +86,7 @@ class SessionTreeSupervisor:
         mcp_servers: dict[str, MCPServer] | None = None,
         engine_factory: Callable[..., RLMEngine] | None = None,
         root_invocation_id: str | None = None,
+        lineage: LineageTracker | None = None,
     ) -> None:
         self._engine_factory = engine_factory
         self._server: asyncio.AbstractServer | None = None
@@ -137,6 +141,12 @@ class SessionTreeSupervisor:
             mcp_servers=dict(mcp_servers or {}),
         )
         self.root_id = root_id
+        self.lineage = lineage or LineageTracker()
+        self.lineage.register_session(
+            root_id,
+            parent_session_id=None,
+            depth=runtime_config.invocation.depth,
+        )
         self._invocations = {root_id: root}
         self._parents = {root_id: None}
         self._tool_stats: dict[str, ProgrammaticToolCallStats] = {}
@@ -222,12 +232,14 @@ class SessionTreeSupervisor:
         invocation = self._invocations[invocation_id]
         return BrokerEndpoint(self._socket_path, invocation.capability)
 
-    async def open_scope(self, invocation_id: str) -> str:
+    async def open_scope(
+        self, invocation_id: str, request_id: str | None = None
+    ) -> str:
         async with self._lock:
             if self._closed or invocation_id not in self._invocations:
                 raise RuntimeError("recursive invocation is no longer active")
             scope_id = secrets.token_urlsafe(24)
-            self._scopes[scope_id] = _Scope(invocation_id, set())
+            self._scopes[scope_id] = _Scope(invocation_id, set(), request_id)
             return scope_id
 
     async def close_scope(self, scope_id: str) -> None:
@@ -258,7 +270,9 @@ class SessionTreeSupervisor:
                     self._limit_result(parent, "recursive call limit reached")
                 )
             self._total_calls += 1
-            task = asyncio.create_task(self._run_child(parent_id, prompt))
+            task = asyncio.create_task(
+                self._run_child(parent_id, prompt, scope.request_id)
+            )
             self._tasks.add(task)
             self._child_tasks.add(task)
             scope.tasks.add(task)
@@ -308,6 +322,7 @@ class SessionTreeSupervisor:
         self,
         parent_id: str,
         prompt: str,
+        spawned_by_request_id: str | None,
     ) -> RLMResult:
         parent = self._invocations[parent_id]
         child_context = parent.runtime_config.invocation.child()
@@ -326,12 +341,19 @@ class SessionTreeSupervisor:
                 runtime_config=child_config,
                 cwd=parent.cwd,
                 mcp_servers=parent.mcp_servers,
+                spawned_by_request_id=spawned_by_request_id,
             )
-            parent.session.log_sub_spawn(child_session.dir.name, "(brokered rlm())")
+            self.lineage.register_session(
+                child_id,
+                parent_session_id=parent_id,
+                depth=child_context.depth,
+                spawned_by_request_id=spawned_by_request_id,
+            )
             # Everything from session creation to here is synchronous; the try
             # must start before the first await so a cancellation while waiting
             # for the lock still closes the session and clears the registry.
             try:
+                parent.session.log_sub_spawn(child_session.dir.name, "(brokered rlm())")
                 async with self._lock:
                     if self._closed:
                         raise asyncio.CancelledError
@@ -351,7 +373,15 @@ class SessionTreeSupervisor:
                     supervisor=self,
                     invocation_id=child.id,
                 )
-                return await engine.run(prompt)
+                result = await engine.run(prompt)
+                self.lineage.set_session_status(child_id, "completed")
+                return result
+            except asyncio.CancelledError:
+                self.lineage.set_session_status(child_id, "cancelled")
+                raise
+            except BaseException:
+                self.lineage.set_session_status(child_id, "failed")
+                raise
             finally:
                 # Close synchronously first: the lock acquisition below can be
                 # interrupted by a second cancellation, but the session handle

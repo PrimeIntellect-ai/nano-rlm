@@ -15,6 +15,18 @@ from openai import (
 from pydantic import ValidationError
 
 from rlm.config import ProviderConfig
+from rlm.lineage import (
+    COMPACTION_ID_HEADER,
+    CONTEXT_ID_HEADER,
+    DEPTH_HEADER,
+    LINEAGE_HEADER_NAMES,
+    PARENT_SESSION_ID_HEADER,
+    PREVIOUS_CONTEXT_ID_HEADER,
+    REQUEST_ID_HEADER,
+    SESSION_ID_HEADER,
+    TRANSITION_HEADER,
+    RequestProvenance,
+)
 from rlm.types import TokenUsage
 
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
@@ -63,7 +75,12 @@ def make_client(provider: ProviderConfig | None = None) -> AsyncOpenAI:
     reserved = sorted(
         name
         for name in provider.headers
-        if name.lower() in {IDEMPOTENCY_KEY_HEADER.lower(), RETRY_COUNT_HEADER}
+        if name.lower()
+        in {
+            IDEMPOTENCY_KEY_HEADER.lower(),
+            RETRY_COUNT_HEADER,
+            *(header.lower() for header in LINEAGE_HEADER_NAMES),
+        }
     )
     if reserved:
         raise ValueError(f"provider headers contain reserved names: {reserved}")
@@ -75,9 +92,25 @@ def make_client(provider: ProviderConfig | None = None) -> AsyncOpenAI:
     )
 
 
-def model_call_headers(call_id: str) -> dict[str, str]:
-    """Build transport headers for one idempotent model call."""
-    return {IDEMPOTENCY_KEY_HEADER: call_id}
+def model_call_headers(provenance: RequestProvenance | str) -> dict[str, str]:
+    """Build transport headers for one idempotent, attributable model call."""
+    if isinstance(provenance, str):
+        return {IDEMPOTENCY_KEY_HEADER: provenance}
+    headers = {
+        IDEMPOTENCY_KEY_HEADER: provenance.request_id,
+        REQUEST_ID_HEADER: provenance.request_id,
+        SESSION_ID_HEADER: provenance.session_id,
+        CONTEXT_ID_HEADER: provenance.context_id,
+        TRANSITION_HEADER: provenance.transition,
+        DEPTH_HEADER: str(provenance.depth),
+    }
+    if provenance.parent_session_id is not None:
+        headers[PARENT_SESSION_ID_HEADER] = provenance.parent_session_id
+    if provenance.previous_context_id is not None:
+        headers[PREVIOUS_CONTEXT_ID_HEADER] = provenance.previous_context_id
+    if provenance.compaction_id is not None:
+        headers[COMPACTION_ID_HEADER] = provenance.compaction_id
+    return headers
 
 
 async def call_with_retries(
