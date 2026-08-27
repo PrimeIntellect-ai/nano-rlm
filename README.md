@@ -110,7 +110,9 @@ versioned contract described above.
 | `RLM_MAX_TOOL_OUTPUT_CHARS` | — | Preserve only a head/tail window of this many characters from raw IPython output before it enters the conversation. |
 | `RLM_SUMMARIZE_AT_TOKENS` | — | Auto-compaction threshold: when a turn's prompt tokens reach this value, the conversation is compacted into a summary. Unset disables auto-compaction. |
 | `RLM_MAX_TOKENS` | `0` | Optional completion-token budget (`0` disables) |
-| `RLM_APPEND_TO_SYSTEM_PROMPT` | — | Extra instructions appended to the generated system prompt |
+| `RLM_APPEND_TO_SYSTEM_PROMPT` | — | Extra instructions appended to the generated system prompt. Used by the **root** (depth 0), and the fallback for every tier below. |
+| `RLM_SUBAGENT_APPEND_TO_SYSTEM_PROMPT` | — | Append for **sub-agents** (depth ≥ 1) that can still recurse (nodes). Falls back to `RLM_APPEND_TO_SYSTEM_PROMPT` when unset. |
+| `RLM_LEAF_APPEND_TO_SYSTEM_PROMPT` | — | Append for **leaf** sub-agents that cannot recurse (`depth == RLM_MAX_DEPTH`). Falls back to `RLM_SUBAGENT_APPEND_TO_SYSTEM_PROMPT`, then `RLM_APPEND_TO_SYSTEM_PROMPT`. Lets the root be told to delegate, nodes that they may delegate further, and leaves to just do the work and return. |
 | `RLM_SYSTEM_PROMPT_PATH` | — | Path to a file whose contents fully replace the generated system prompt |
 | `RLM_ALLOW_GIT` | — | Set to `1` to disable the restricted git-history guard. When unset, shell-capable prompts tell agents not to use task-specific online hints or solutions from other git history, and broad-history `git log` options such as `--all` are refused. |
 | `RLM_SDK_MAX_RETRIES` | `5` | Per-request retry count passed to the OpenAI SDK (in addition to the call-site retry wrapper that rides out longer outages). |
