@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from importlib.metadata import version
+import uuid
+
 from typing import Annotated, Any, Literal
 
 from acp import (
@@ -209,6 +211,10 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
     """
     if not isinstance(meta_kwargs, dict):
         raise RequestError.invalid_params({"reason": "ACP _meta must be an object"})
+    if meta_kwargs.get(RUNTIME_METADATA_KEY) is None:
+        # Legacy clients (verifiers <= 0.3.x) configure the runtime through
+        # environment variables and send session/new without runtime metadata.
+        return RuntimeConfig.from_env(), uuid.uuid4().hex
     try:
         payload = _RuntimeMetadata.model_validate(
             meta_kwargs.get(RUNTIME_METADATA_KEY),

@@ -709,14 +709,21 @@ async def test_acp_failed_session_creation_closes_session(monkeypatch, tmp_path)
     assert agent._sessions == {}
 
 
-async def test_acp_requires_runtime_metadata(tmp_path):
+async def test_acp_without_runtime_metadata_falls_back_to_env(monkeypatch, tmp_path):
+    """Legacy clients (verifiers <= 0.3.x) send session/new with no runtime
+    metadata and configure the runtime via environment variables."""
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setenv("RLM_MODEL", "legacy-model")
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
     agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
 
     await _initialize(agent)
-    with pytest.raises(RequestError):
-        await agent.new_session(str(tmp_path))
+    response = await agent.new_session(str(tmp_path))
 
-    assert agent._sessions == {}
+    assert response.session_id
+    assert len(agent._sessions) == 1
 
 
 async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
