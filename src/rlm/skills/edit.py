@@ -26,7 +26,12 @@ async def run(path: str, old_str: str, new_str: str) -> str:
         filepath = Path.cwd() / filepath
     if not filepath.exists():
         raise FileNotFoundError(f"{path} not found")
-    content = filepath.read_text()
+    try:
+        content = filepath.read_text()
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"{path} is not valid UTF-8 text; edit refuses binary or non-UTF-8 files"
+        ) from exc
     count = content.count(old_str)
     if count != 1:
         raise ValueError(f"old_str must appear exactly once in {path} (found {count})")

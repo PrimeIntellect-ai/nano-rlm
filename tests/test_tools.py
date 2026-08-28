@@ -230,3 +230,16 @@ def test_truncate_tool_output_caps_and_reports():
     assert out.startswith("Warning: truncated output")
     assert "bytes truncated" in out
     assert "Total output lines: 10001" in out
+
+
+def test_edit_tool_refuses_non_utf8_file(tmp_path):
+    from rlm.tools.bash import EditTool
+
+    target = tmp_path / "bin.dat"
+    target.write_bytes(b"hello \xff world")
+    out = EditTool().execute(
+        {"path": str(target), "old_str": "hello", "new_str": "bye"},
+        _tool_ctx(),
+    )
+    assert "not valid UTF-8" in out.content
+    assert target.read_bytes() == b"hello \xff world"

@@ -120,6 +120,11 @@ class EditTool:
             text = open(path, encoding="utf-8").read()
         except OSError as e:
             return ToolOutcome(content=f"Error: cannot read {path}: {e}")
+        except UnicodeDecodeError:
+            return ToolOutcome(
+                content=f"Error: {path} is not valid UTF-8 text; edit refuses "
+                "binary or non-UTF-8 files"
+            )
         count = text.count(old)
         if count == 0:
             return ToolOutcome(content=f"Error: old_str not found in {path}")
