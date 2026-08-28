@@ -103,14 +103,14 @@ class _LimitsSnapshot(_ContractModel):
     allow_git: bool
 
 
-class _RequestSemanticEdgeSnapshot(_ContractModel):
+class _SemanticEdge(_ContractModel):
     source_request_id: str = Field(min_length=1)
     target_request_id: str = Field(min_length=1)
     type: str = Field(min_length=1)
 
 
-class _SemanticEdgeManifest(_ContractModel):
-    edges: list[_RequestSemanticEdgeSnapshot]
+class _SemanticEdgeSet(_ContractModel):
+    edges: list[_SemanticEdge]
 
 
 class _SessionSnapshot(_ContractModel):
@@ -156,9 +156,7 @@ def _session_metadata(state: _SessionState) -> dict[str, Any]:
         "last_stop_reason": state.last_stop_reason,
         **state.engine.execution_snapshot(),
     }
-    semantic_edges = _SemanticEdgeManifest.model_validate(
-        snapshot.pop("semantic_edges")
-    )
+    semantic_edges = _SemanticEdgeSet.model_validate(snapshot.pop("semantic_edges"))
     validated = _SessionSnapshot.model_validate(snapshot)
     return {
         SESSION_METADATA_KEY: validated.model_dump(mode="json", exclude_none=True),
