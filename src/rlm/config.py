@@ -157,6 +157,7 @@ class RuntimeConfig(_ConfigModel):
     provider: ProviderConfig
     invocation: InvocationContext
     policy: ExecutionPolicy
+    system_prompt: str | None = None
     system_prompt_path: str | None = None
     append_to_system_prompt: str | None = None
     skills: tuple[str, ...] = ()
@@ -204,6 +205,7 @@ class RuntimeConfig(_ConfigModel):
                 ),
                 allow_git=env.get("RLM_ALLOW_GIT") == "1",
             ),
+            system_prompt=env.get("RLM_SYSTEM_PROMPT"),
             system_prompt_path=env.get("RLM_SYSTEM_PROMPT_PATH"),
             append_to_system_prompt=env.get("RLM_APPEND_TO_SYSTEM_PROMPT"),
             skills=(

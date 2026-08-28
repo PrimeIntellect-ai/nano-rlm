@@ -175,6 +175,7 @@ class RLMEngine:
         self.exec_timeout = config.policy.exec_timeout
         self.summarize_at_tokens = config.policy.summarize_at_tokens
         self.max_compactions = config.policy.max_compactions
+        self.system_prompt = config.system_prompt
         self.system_prompt_path = config.system_prompt_path
         self.append_to_system_prompt = config.append_to_system_prompt
         self.max_depth = config.policy.max_depth
@@ -887,6 +888,8 @@ class RLMEngine:
         return snapshot
 
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
+        if self.system_prompt:
+            return self.system_prompt
         if self.system_prompt_path:
             return Path(self.system_prompt_path).read_text()
         system_prompt = build_system_prompt(
