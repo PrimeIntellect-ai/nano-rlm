@@ -15,7 +15,7 @@ from conftest import (
     DummyToolCall,
     DummyUsage,
 )
-from rlm.compaction import DROPPED_TOOL_RESULT, context_error
+from rlm.compaction import is_context_overflow
 from rlm.config import (
     ExecutionPolicy,
     InvocationContext,
@@ -57,7 +57,7 @@ def _overflow() -> BadRequestError:
     )
 
 
-def test_threshold_is_learned_from_provider_error():
+def test_overflow_detection_is_status_gated():
     response = httpx.Response(
         400,
         request=httpx.Request("POST", "http://interceptor/v1/chat/completions"),
@@ -68,7 +68,7 @@ def test_threshold_is_learned_from_provider_error():
         body={"error": {"message": "maximum context length is 32,768 tokens"}},
     )
 
-    assert context_error(error) == (True, 16_384)
+    assert is_context_overflow(error)
 
 
 class _ScriptedClient(DummyClient):
@@ -131,7 +131,8 @@ async def test_tool_result_overflow_compacts_and_retries(session):
             _overflow(),
             _response(DummyMessage(content="summary")),
             _response(DummyMessage(content="done")),
-        ]
+        ],
+        max_model_len=32_768,
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
@@ -146,11 +147,11 @@ async def test_tool_result_overflow_compacts_and_retries(session):
 
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 1
-    checkpoint_messages = client.calls[3]["messages"]
-    assert any(
-        message.get("content") == DROPPED_TOOL_RESULT for message in checkpoint_messages
-    )
     assert client.calls[3]["tool_choice"] == "none"
+    # The retried work call runs on the rebuilt branch: system + framed summary.
+    retry_messages = client.calls[4]["messages"]
+    assert len(retry_messages) == 2
+    assert "summary" in retry_messages[1]["content"]
 
 
 async def test_context_overflow_propagates_when_compaction_is_disabled(session):
@@ -215,10 +216,16 @@ async def test_subagent_recovers_from_context_overflow(tmp_path):
     def engine_factory(**kwargs: Any) -> RLMEngine:
         client = _ScriptedClient(
             [
+                _response(
+                    DummyMessage(
+                        tool_calls=[DummyToolCall("ipython", {"code": "print('hi')"})]
+                    )
+                ),
                 _overflow(),
                 _response(DummyMessage(content="summary")),
                 _response(DummyMessage(content="child done")),
-            ]
+            ],
+            max_model_len=32_768,
         )
         engine = RLMEngine(client=client, **kwargs)  # type: ignore[arg-type]
         clients.append(client)
@@ -249,4 +256,4 @@ async def test_subagent_recovers_from_context_overflow(tmp_path):
     assert result.answer == "child done"
     assert engines[0].depth == 1
     assert engines[0]._metrics.num_compactions == 1
-    assert len(clients[0].calls) == 3
+    assert len(clients[0].calls) == 4

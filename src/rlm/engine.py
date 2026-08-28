@@ -22,13 +22,15 @@ from rlm.client import (
     model_call_headers,
 )
 from rlm.compaction import (
+    COMPACTION_ATTEMPTS,
     CHECKPOINT_PROMPT,
+    CompactionFailed,
     REPL_NOTE,
     SUMMARY_FRAMING,
-    context_error,
+    compactable,
     discover_threshold,
-    drop_latest_tool_result,
     estimated_tokens,
+    is_context_overflow,
     truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
@@ -150,6 +152,9 @@ class RLMEngine:
         self._owns_supervisor = False
         self._total_usage = TokenUsage()
         self._last_prompt_tokens = 0
+        self._last_good = 0
+        """Message count of the newest state that passed a threshold check - by
+        definition a state with a full reserve of room, so a checkpoint over it fits."""
         self._last_call_id: str | None = None
 
         # Metrics
@@ -366,7 +371,14 @@ class RLMEngine:
 
         for turn in itertools.count(self._turn):
             self._turn = turn + 1
-            response, usage = await self._complete(messages, turn)
+            try:
+                response, usage = await self._complete(messages, turn)
+            except CompactionFailed:
+                # The context is exhausted and could not be summarized: end the run
+                # cleanly with what the conversation holds - still a trainable sample.
+                self._metrics.stop_reason = "compaction_failed"
+                final_text = "[context exhausted: compaction failed]"
+                break
             call_id = self._last_call_id
 
             self._metrics.turns_since_last_compaction = (
@@ -515,14 +527,12 @@ class RLMEngine:
                 }
             )
 
-            if self._should_compact(usage, content):
+            if self._should_compact(messages, usage, content):
                 try:
                     await self._compact_branch(messages, turn)
-                except APIStatusError as e:
-                    if not context_error(e)[0]:
-                        raise
-                    self._metrics.stop_reason = "request_too_large"
-                    final_text = "[request body too large]"
+                except CompactionFailed:
+                    self._metrics.stop_reason = "compaction_failed"
+                    final_text = "[context exhausted: compaction failed]"
                     break
 
         result = RLMResult(
@@ -640,11 +650,18 @@ class RLMEngine:
             or self._metrics.num_compactions < self.max_compactions
         )
 
-    def _should_compact(self, usage: TokenUsage, extra_text: str = "") -> bool:
+    def _should_compact(
+        self, messages: list[dict], usage: TokenUsage, extra_text: str = ""
+    ) -> bool:
         if self.summarize_at_tokens is None or not self._can_compact():
             return False
+        if not compactable(messages):
+            return False
         tokens = usage.total + estimated_tokens(extra_text)
-        return tokens >= self.summarize_at_tokens
+        if tokens < self.summarize_at_tokens:
+            self._last_good = len(messages)
+            return False
+        return True
 
     async def _call_model(
         self,
@@ -689,14 +706,18 @@ class RLMEngine:
         try:
             response, usage = await self._call_model(messages)
         except APIStatusError as error:
-            overflow, threshold = context_error(error)
-            if not self._can_compact() or not overflow:
+            if (
+                self.summarize_at_tokens is None
+                or not self._can_compact()
+                or not is_context_overflow(error)
+                or not compactable(messages)
+            ):
                 raise
-            if threshold is not None:
-                self.summarize_at_tokens = threshold
         else:
             choice = response.choices[0]
-            if choice.finish_reason != "length" or not self._should_compact(usage):
+            if choice.finish_reason != "length" or not self._should_compact(
+                messages, usage
+            ):
                 return response, usage
 
         await self._compact_branch(messages, turn)
@@ -731,9 +752,14 @@ class RLMEngine:
             checkpoint_prompt += REPL_NOTE
         compaction = self._lineage.begin_compaction(self._invocation_id)
         try:
-            while True:
+            # A rejected checkpoint falls back to the last good snapshot (which has a
+            # full reserve of room, so it fits); an empty or tool-calling reply is
+            # resampled. Reasoning is never part of the summary.
+            base = messages
+            summary_text = ""
+            for _ in range(COMPACTION_ATTEMPTS):
                 checkpoint = [
-                    *messages,
+                    *base,
                     {"role": "user", "content": checkpoint_prompt},
                 ]
                 try:
@@ -742,10 +768,19 @@ class RLMEngine:
                         checkpoint=True,
                         compaction_id=compaction.compaction_id,
                     )
-                    break
                 except APIStatusError as e:
-                    if not context_error(e)[0] or not drop_latest_tool_result(messages):
+                    if not is_context_overflow(e):
                         raise
+                    base = messages[: self._last_good]
+                    continue
+                message = response.choices[0].message
+                if not message.tool_calls and (message.content or "").strip():
+                    summary_text = message.content
+                    break
+            if not summary_text:
+                raise CompactionFailed(
+                    f"no usable summary after {COMPACTION_ATTEMPTS} attempts"
+                )
         except BaseException as exc:
             self._lineage.finish_compaction(
                 compaction.compaction_id,
@@ -753,14 +788,13 @@ class RLMEngine:
             )
             raise
 
-        summary_text = response.choices[0].message.content or ""
-
         system_msg = messages[0]
         compacted_user_content = SUMMARY_FRAMING + "\n\n" + summary_text
         messages[:] = [
             system_msg,
             {"role": "user", "content": compacted_user_content},
         ]
+        self._last_good = len(messages)
         self._lineage.finish_compaction(compaction.compaction_id, "completed")
 
         # Log the compaction for traceability.
