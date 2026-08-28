@@ -12,6 +12,7 @@ from conftest import (
     DummyClient,
     DummyMessage,
     DummyToolCall,
+    make_runtime_config,
     show_tool_result,
     tool_result,
 )
@@ -29,7 +30,9 @@ async def test_valid_tool(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     result = await engine.run(prompt)
 
@@ -53,7 +56,9 @@ async def test_multiple_tool_calls(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     await engine.run(prompt)
 
@@ -67,7 +72,9 @@ async def test_tool_raises(session):
     messages = [DummyMessage(tool_calls=[DummyToolCall("boom", {})])]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     with pytest.raises(RuntimeError, match="boom"):
         await engine.run(prompt)
