@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -83,12 +84,21 @@ class _ScriptedClient(DummyClient):
         self.max_model_len = max_model_len
         self.base_url = f"http://scripted-{id(self)}"
 
-    async def get(self, path: str, **kwargs: Any) -> dict:
-        assert path == "/models"
-        card = {"id": "test-model"}
-        if self.max_model_len is not None:
-            card["max_model_len"] = self.max_model_len
-        return {"data": [card]}
+    @property
+    def models(self):
+        outer = self
+
+        class _Models:
+            async def list(self):
+                extra = (
+                    {"max_model_len": outer.max_model_len}
+                    if outer.max_model_len is not None
+                    else {}
+                )
+                card = SimpleNamespace(id="test-model", model_extra=extra)
+                return SimpleNamespace(data=[card])
+
+        return _Models()
 
     async def create(self, **kwargs: Any) -> DummyResponse:
         self.calls.append(deepcopy(kwargs))

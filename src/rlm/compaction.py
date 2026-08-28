@@ -1,7 +1,7 @@
 """Context checkpoint helpers."""
 
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any
 
 from openai import APIError, APIStatusError, AsyncOpenAI
 
@@ -112,8 +112,14 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
     key = (str(client.base_url), model)
     if key not in _window_cache:
         try:
-            # The SDK needs a parameterized mapping type to parse into (bare `dict` fails).
-            payload = await client.get("/models", cast_to=cast(Any, dict[str, Any]))
+            # `models.list()` keeps provider extensions in each card's `model_extra`;
+            # a raw `cast_to` parse breaks on one Python version or another.
+            page = await client.models.list()
+            payload = {
+                "data": [
+                    {"id": card.id, **(card.model_extra or {})} for card in page.data
+                ]
+            }
             _window_cache[key] = _model_context_window(payload, model)
         except (APIError, AttributeError):
             _window_cache[key] = None
