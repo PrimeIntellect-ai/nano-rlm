@@ -9,7 +9,7 @@ from typing import Mapping
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
-from rlm.lineage import LINEAGE_HEADER_NAMES
+from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
 from rlm.tools.registry import preset_skills
 
 
@@ -37,8 +37,11 @@ def _positive_int(value: str | int, name: str) -> int:
 
 
 def _summarize_at_tokens(value: str | int | None) -> int | None:
+    """Unset, "" or "0" -> no explicit threshold; else a positive threshold."""
+    if value in (None, "", "0", 0):
+        return None
     parsed = _optional_positive_int(value, "summarize_at_tokens")
-    if value not in (None, "") and parsed is None:
+    if parsed is None:
         raise ValueError(f"summarize_at_tokens must be positive (got {value})")
     return parsed
 
@@ -72,7 +75,7 @@ class ProviderConfig(_ConfigModel):
         reserved_names = {
             "idempotency-key",
             "x-stainless-retry-count",
-            *(header.lower() for header in LINEAGE_HEADER_NAMES),
+            *(header.lower() for header in ACP_EXTENSION_HEADER_NAMES),
         }
         reserved = sorted(name for name in headers if name.lower() in reserved_names)
         if reserved:
@@ -129,7 +132,7 @@ class InvocationContext(_ConfigModel):
 class ExecutionPolicy(_ConfigModel):
     """Resource and context-management policy for one RLM engine."""
 
-    max_depth: int = Field(default=0, ge=0)
+    max_depth: int = Field(default=1, ge=0)
     exec_timeout: int = Field(default=300, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
     compaction: bool = False
@@ -169,7 +172,7 @@ class RuntimeConfig(_ConfigModel):
         raw_skills = env.get("RLM_SKILLS")
         summarize_at_tokens = _summarize_at_tokens(env.get("RLM_SUMMARIZE_AT_TOKENS"))
         compaction = env.get("RLM_COMPACTION") == "1" or summarize_at_tokens is not None
-        max_depth = int(env.get("RLM_MAX_DEPTH", "0"))
+        max_depth = int(env.get("RLM_MAX_DEPTH", "1"))
         default_concurrency = max(4, max_depth)
         max_concurrent_subagents = _positive_int(
             env.get("RLM_MAX_CONCURRENT_SUBAGENTS", str(default_concurrency)),

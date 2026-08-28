@@ -72,6 +72,7 @@ def run_bash(
             ["bash", "-c", command],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             cwd=cwd or None,
         )

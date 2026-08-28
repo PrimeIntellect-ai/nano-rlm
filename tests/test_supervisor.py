@@ -215,10 +215,10 @@ async def test_cancel_while_awaiting_registry_lock_closes_child_session(
     assert created[0]._msg_file.closed
     assert supervisor._invocations == {}
     assert supervisor._capabilities == {}
-    assert supervisor.lineage.snapshot()["sessions"][1]["status"] == "cancelled"
+    assert supervisor.semantic_edges.snapshot() == {"edges": []}
 
 
-async def test_child_factory_failure_marks_lineage_failed(tmp_path):
+async def test_child_factory_failure_publishes_no_semantic_edge(tmp_path):
     class FailingEngine:
         def __init__(self, **kwargs):
             raise RuntimeError("engine init failed")
@@ -242,7 +242,52 @@ async def test_child_factory_failure_marks_lineage_failed(tmp_path):
         await supervisor.aclose()
         session.close()
 
-    assert supervisor.lineage.snapshot()["sessions"][1]["status"] == "failed"
+    assert supervisor.semantic_edges.snapshot() == {"edges": []}
+
+
+async def test_failed_child_returns_last_committed_request_to_parent(tmp_path):
+    class PartiallyFailingEngine:
+        def __init__(self, *, supervisor, invocation_id, **kwargs):
+            self.semantic_edges = supervisor.semantic_edges
+            self.invocation_id = invocation_id
+
+        async def run(self, prompt: str) -> RLMResult:
+            request_id = self.semantic_edges.start_request(self.invocation_id)
+            self.semantic_edges.finish_request(request_id)
+            raise RuntimeError("child failed")
+
+    session = Session(tmp_path / "root")
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=_config(max_depth=1),
+        cwd=str(tmp_path),
+        engine_factory=PartiallyFailingEngine,
+    )
+    await supervisor.start()
+    parent_request = supervisor.semantic_edges.start_request(supervisor.root_id)
+    supervisor.semantic_edges.finish_request(parent_request)
+    scope = await supervisor.open_scope(supervisor.root_id, parent_request)
+    endpoint = supervisor.endpoint_for(supervisor.root_id)
+    try:
+        task = await supervisor._start_child(endpoint.capability, scope, "x")
+        with pytest.raises(RuntimeError, match="child failed"):
+            await task
+        resumed_request = supervisor.semantic_edges.start_request(supervisor.root_id)
+        supervisor.semantic_edges.finish_request(resumed_request)
+    finally:
+        await supervisor.close_scope(scope)
+        await supervisor.aclose()
+        session.close()
+
+    edges = supervisor.semantic_edges.snapshot()["edges"]
+    child_request = next(
+        edge["target_request_id"] for edge in edges if edge["type"] == "subagent_call"
+    )
+    assert {
+        "source_request_id": child_request,
+        "target_request_id": resumed_request,
+        "type": "subagent_return",
+    } in edges
 
 
 async def test_saturated_nested_calls_do_not_deadlock(tmp_path):

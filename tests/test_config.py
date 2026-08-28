@@ -71,3 +71,16 @@ def test_runtime_config_rejects_unsafe_recursive_and_environment_values():
     provider.headers["Idempotency-Key"] = "forged-after-construction"
     with pytest.raises(ValueError, match="reserved names"):
         make_client(provider)
+
+
+def test_default_policy_enables_recursion_but_not_compaction():
+    config = RuntimeConfig.from_env(environ={})
+    assert config.policy.compaction is False
+    assert config.policy.summarize_at_tokens is None
+    assert config.policy.max_depth == 1
+
+
+def test_summarize_at_tokens_disabled_by_zero_or_empty():
+    for raw in ("", "0"):
+        config = RuntimeConfig.from_env(environ={"RLM_SUMMARIZE_AT_TOKENS": raw})
+        assert config.policy.summarize_at_tokens is None
