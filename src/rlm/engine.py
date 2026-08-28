@@ -772,8 +772,14 @@ class RLMEngine:
                     base = messages[: self._last_good]
                     continue
                 message = response.choices[0].message
-                if not message.tool_calls and (message.content or "").strip():
-                    summary_text = message.content
+                # A reasoning-parsed model can put the whole reply in the reasoning
+                # channel; the checkpoint asked for a summary, so accept it from
+                # there when content is empty.
+                text = (message.content or "").strip() or (
+                    getattr(message, "reasoning_content", None) or ""
+                ).strip()
+                if not message.tool_calls and text:
+                    summary_text = text
                     break
             if not summary_text:
                 raise CompactionFailed(
