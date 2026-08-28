@@ -203,6 +203,7 @@ class RLMEngine:
         self.skills = list(config.skills)
         self.kernel_env = dict(config.kernel_env)
         self.max_tokens = config.policy.max_tokens
+        self.max_output_tokens = config.policy.max_output_tokens
         self.max_tool_output_chars = config.policy.max_tool_output_chars
 
         self._owns_client = client is None
@@ -452,6 +453,8 @@ class RLMEngine:
                 "messages": messages,
                 "extra_headers": model_call_headers(request_id),
             }
+            if self.max_output_tokens is not None:
+                request_kwargs["max_completion_tokens"] = self.max_output_tokens
             if self._active_tool_schemas:
                 request_kwargs["tools"] = self._active_tool_schemas
                 request_kwargs["parallel_tool_calls"] = False

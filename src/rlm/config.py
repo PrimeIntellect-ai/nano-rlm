@@ -57,6 +57,9 @@ class ExecutionPolicy(_ConfigModel):
     engine in the tree, including sub-agents, so a leaf can't loop unbounded. None = uncapped."""
     exec_timeout: int = Field(default=300, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
+    max_output_tokens: int | None = Field(default=None, gt=0)
+    """Per-CALL completion-token cap (sent as max_completion_tokens). Bounds a single generation so
+    one call can't emit tens of thousands of tokens (the latency tail). None = model default."""
     summarize_at_tokens: int | None = Field(default=256_000, gt=0)
     """Context budget for the ROOT (depth 0): auto-compact when a turn's prompt tokens reach this."""
     subagent_summarize_at_tokens: int | None = Field(default=None, gt=0)
