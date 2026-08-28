@@ -657,10 +657,7 @@ class RLMEngine:
         if not compactable(messages):
             return False
         tokens = usage.total + estimated_tokens(extra_text)
-        if tokens < self.summarize_at_tokens:
-            self._last_good = len(messages)
-            return False
-        return True
+        return tokens >= self.summarize_at_tokens
 
     async def _call_model(
         self,
@@ -716,6 +713,13 @@ class RLMEngine:
                 raise
         else:
             choice = response.choices[0]
+            if (
+                self.summarize_at_tokens is not None
+                and usage.total < self.summarize_at_tokens
+            ):
+                # Usage-verified: this exact prompt was accepted with a full
+                # reserve of room, so it is a safe checkpoint fallback.
+                self._last_good = len(messages)
             if choice.finish_reason != "length" or not self._should_compact(
                 messages, usage
             ):
