@@ -66,50 +66,6 @@ def _process_exists(pid: int) -> bool:
     return True
 
 
-def test_load_mcp_servers(monkeypatch):
-    monkeypatch.delenv(mcp.MCP_CONFIG_ENV, raising=False)
-    assert mcp.load_mcp_servers() == {}
-
-    monkeypatch.setenv(
-        mcp.MCP_CONFIG_ENV,
-        '{"mcpServers": {"tools": {"url": "http://h/mcp"}, "web": {"url": "http://h/web", "headers": {"Authorization": "secret"}}, "local": {"command": "/bin/server", "args": ["--stdio"], "env": {"TOKEN": "secret"}}}}',
-    )
-    servers = mcp.load_mcp_servers()
-    assert servers == {
-        "tools": mcp.MCPHTTPServer(url="http://h/mcp"),
-        "web": mcp.MCPHTTPServer(
-            url="http://h/web",
-            headers={"Authorization": "secret"},
-        ),
-        "local": mcp.MCPStdioServer(
-            command="/bin/server",
-            args=["--stdio"],
-            env={"TOKEN": "secret"},
-        ),
-    }
-    assert json.loads(mcp.dump_mcp_servers(servers)) == {
-        "mcpServers": {
-            "tools": {"url": "http://h/mcp"},
-            "web": {
-                "url": "http://h/web",
-                "headers": {"Authorization": "secret"},
-            },
-            "local": {
-                "command": "/bin/server",
-                "args": ["--stdio"],
-                "env": {"TOKEN": "secret"},
-            },
-        }
-    }
-
-    monkeypatch.setenv(
-        mcp.MCP_CONFIG_ENV,
-        '{"mcpServers":{"bad":{"url":123,"command":"also-bad"}}}',
-    )
-    with pytest.raises(ValueError):
-        mcp.load_mcp_servers()
-
-
 def test_build_signature():
     params = mcp.build_signature(SCHEMA).parameters
     assert list(params) == ["day", "count"]
@@ -120,12 +76,11 @@ def test_build_signature():
     assert params["count"].annotation is int
 
 
-async def test_real_kernel_uses_mcp_without_transport_secrets(monkeypatch, tmp_path):
+async def test_real_kernel_uses_mcp_without_transport_secrets(tmp_path):
     server_cwd = tmp_path / "server"
     server_cwd.mkdir()
     session = Session(tmp_path / "session")
     servers = {"local": _stdio_server("stdio-secret")}
-    monkeypatch.setenv(mcp.MCP_CONFIG_ENV, mcp.dump_mcp_servers(servers))
     client = DummyClient(
         [
             DummyMessage(
@@ -151,6 +106,7 @@ print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
         client=client,  # type: ignore[arg-type]
         session=session,
         runtime_config=_config(),
+        mcp_servers=servers,
         cwd=str(server_cwd),
     )
 
