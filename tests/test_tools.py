@@ -216,3 +216,17 @@ def test_kernel_receives_policy_env(session):
     finally:
         repl.shutdown()
     assert out.strip() == "42 1"
+
+
+def test_truncate_tool_output_caps_and_reports():
+    from rlm.engine import TOOL_OUTPUT_MAX_BYTES, truncate_tool_output
+
+    small = "x" * 100
+    assert truncate_tool_output(small) == small
+
+    big = "line\n" * 10_000
+    out = truncate_tool_output(big)
+    assert len(out.encode()) < TOOL_OUTPUT_MAX_BYTES + 500
+    assert out.startswith("Warning: truncated output")
+    assert "bytes truncated" in out
+    assert "Total output lines: 10001" in out
