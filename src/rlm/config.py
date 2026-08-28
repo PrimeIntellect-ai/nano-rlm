@@ -9,7 +9,7 @@ from typing import Mapping
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
-from rlm.lineage import LINEAGE_HEADER_NAMES
+from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
 from rlm.tools.registry import preset_skills
 
 
@@ -77,7 +77,7 @@ class ProviderConfig(_ConfigModel):
         reserved_names = {
             "idempotency-key",
             "x-stainless-retry-count",
-            *(header.lower() for header in LINEAGE_HEADER_NAMES),
+            *(header.lower() for header in ACP_EXTENSION_HEADER_NAMES),
         }
         reserved = sorted(name for name in headers if name.lower() in reserved_names)
         if reserved:

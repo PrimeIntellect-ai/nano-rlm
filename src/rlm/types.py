@@ -140,8 +140,9 @@ class RLMMetrics:
 
     Only metrics with no native verifiers-v1 equivalent live here. Per-branch,
     terminal, and sub-agent token accounting is deliberately absent: verifiers
-    reconstructs branches (compaction + subagents) from the message graph and
-    reports their token counts natively, so tracking it here would double-count.
+    reconstructs physical branches from the message graph, relates them through ACP
+    semantic edges, and reports token counts natively, so tracking them here would
+    double-count.
     What remains is rlm-internal behaviour verifiers can't see: compaction
     volume, ipython input size, and programmatic tool calls made from inside the
     REPL (which never hit the API proxy).
