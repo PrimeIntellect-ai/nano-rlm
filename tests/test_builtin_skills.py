@@ -199,3 +199,22 @@ def test_enable_bash_skill_writes_stub(tmp_path):
 async def test_bash_survives_binary_output():
     out = await bash("printf 'head\\xff\\xfetail'")
     assert "head" in out and "tail" in out
+
+
+def test_enable_fetch_skill_writes_stub(tmp_path):
+    enabled = enable_builtin_skills(["fetch"], tmp_path)
+    assert enabled == ["fetch"]
+    stub = (tmp_path / "fetch.py").read_text()
+    assert "from rlm.skills.fetch import run" in stub
+
+
+def test_fetch_html_to_text_strips_markup():
+    from rlm.skills.fetch import html_to_text
+
+    html = (
+        "<html><head><style>x{}</style></head><body><h1>T</h1>"
+        "<p>Hello &amp; world</p><script>bad()</script><p>Line2</p></body></html>"
+    )
+    out = html_to_text(html)
+    assert "Hello & world" in out and "Line2" in out
+    assert "bad()" not in out and "<" not in out
