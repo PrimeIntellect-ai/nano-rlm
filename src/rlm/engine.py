@@ -775,7 +775,7 @@ class RLMEngine:
                 # A reasoning-parsed model can put the whole reply in the reasoning
                 # channel ("reasoning_content" or vLLM's "reasoning"); the checkpoint
                 # asked for a summary, so accept it from there when content is empty.
-                extra = message.model_extra or {}
+                extra = getattr(message, "model_extra", None) or {}
                 text = (
                     (message.content or "").strip()
                     or str(extra.get("reasoning_content") or "").strip()
