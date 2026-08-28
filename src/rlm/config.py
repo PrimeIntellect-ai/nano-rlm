@@ -1,62 +1,16 @@
-"""Validated runtime configuration for RLM engines."""
+"""Validated runtime configuration for RLM engines.
+
+Configuration enters an rlm process exactly once, through the versioned ACP
+runtime contract (``ai.prime.rlm/runtime-v1``); recursive children inherit it
+in-memory via ``model_copy``. There is no environment-variable resolution.
+"""
 
 from __future__ import annotations
-
-import json
-import os
-from typing import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
 from rlm.lineage import LINEAGE_HEADER_NAMES
-from rlm.tools.registry import preset_skills
-
-
-PI_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1"
-KERNEL_ENV_CONFIG_ENV = "RLM_KERNEL_ENV"
-
-
-def _optional_positive_int(value: str | int | None, name: str) -> int | None:
-    if value is None or value == "":
-        return None
-    if isinstance(value, bool):
-        raise ValueError(f"{name} must be an int")
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be an int (got {value!r})") from exc
-    return parsed if parsed > 0 else None
-
-
-def _positive_int(value: str | int, name: str) -> int:
-    parsed = _optional_positive_int(value, name)
-    if parsed is None:
-        raise ValueError(f"{name} must be positive")
-    return parsed
-
-
-def _summarize_at_tokens(value: str | int | None) -> int | None:
-    """Unset -> the 256k default; "" or "0" -> disabled; else a positive threshold."""
-    if value is None:
-        return 256_000
-    if value in ("", "0", 0):
-        return None
-    parsed = _optional_positive_int(value, "summarize_at_tokens")
-    if parsed is None:
-        raise ValueError(f"summarize_at_tokens must be positive (got {value})")
-    return parsed
-
-
-def _kernel_env(value: str | None) -> tuple[tuple[str, str], ...]:
-    if not value:
-        return ()
-    parsed = json.loads(value)
-    if not isinstance(parsed, dict) or not all(
-        isinstance(key, str) and isinstance(item, str) for key, item in parsed.items()
-    ):
-        raise ValueError(f"{KERNEL_ENV_CONFIG_ENV} must be a JSON object of strings")
-    return tuple(parsed.items())
 
 
 class _ConfigModel(BaseModel):
@@ -84,48 +38,11 @@ class ProviderConfig(_ConfigModel):
             raise ValueError(f"provider headers contain reserved names: {reserved}")
         return headers
 
-    @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> ProviderConfig:
-        env = os.environ if environ is None else environ
-        max_retries = int(env.get("RLM_SDK_MAX_RETRIES", "5"))
-        if api_key := env.get("RLM_API_KEY"):
-            return cls(
-                base_url=env.get("RLM_BASE_URL"),
-                api_key=api_key,
-                max_retries=max_retries,
-            )
-        if api_key := env.get("PRIME_API_KEY"):
-            headers = {}
-            if team_id := env.get("PRIME_TEAM_ID"):
-                headers["X-Prime-Team-ID"] = team_id
-            return cls(
-                base_url=PI_INFERENCE_BASE_URL,
-                api_key=api_key,
-                headers=headers,
-                max_retries=max_retries,
-            )
-        if env.get("OPENAI_API_KEY"):
-            return cls(
-                base_url=env.get("OPENAI_BASE_URL"),
-                api_key=env["OPENAI_API_KEY"],
-                max_retries=max_retries,
-            )
-        return cls(
-            base_url=PI_INFERENCE_BASE_URL,
-            api_key="EMPTY",
-            max_retries=max_retries,
-        )
-
 
 class InvocationContext(_ConfigModel):
     """Trusted identity of one engine within a recursive session tree."""
 
     depth: int = Field(default=0, ge=0)
-
-    @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> InvocationContext:
-        env = os.environ if environ is None else environ
-        return cls(depth=int(env.get("RLM_DEPTH", "0")))
 
     def child(self) -> InvocationContext:
         return InvocationContext(depth=self.depth + 1)
@@ -162,55 +79,3 @@ class RuntimeConfig(_ConfigModel):
     skills: tuple[str, ...] = ()
     kernel_env: tuple[tuple[str, str], ...] = Field(default=(), repr=False)
     search_api_key: str | None = Field(default=None, repr=False)
-
-    @classmethod
-    def from_env(
-        cls,
-        *,
-        environ: Mapping[str, str] | None = None,
-    ) -> RuntimeConfig:
-        env = os.environ if environ is None else environ
-        raw_skills = env.get("RLM_SKILLS")
-        max_depth = int(env.get("RLM_MAX_DEPTH", "1"))
-        default_concurrency = max(4, max_depth)
-        max_concurrent_subagents = _positive_int(
-            env.get("RLM_MAX_CONCURRENT_SUBAGENTS", str(default_concurrency)),
-            "RLM_MAX_CONCURRENT_SUBAGENTS",
-        )
-        if max_depth > max_concurrent_subagents:
-            raise ValueError(
-                "RLM_MAX_CONCURRENT_SUBAGENTS must be at least RLM_MAX_DEPTH"
-            )
-        return cls(
-            model=env.get("RLM_MODEL", "openai/gpt-5-mini"),
-            provider=ProviderConfig.from_env(env),
-            invocation=InvocationContext.from_env(env),
-            policy=ExecutionPolicy(
-                max_depth=max_depth,
-                exec_timeout=int(env.get("RLM_EXEC_TIMEOUT", "300")),
-                max_tokens=_optional_positive_int(
-                    env.get("RLM_MAX_TOKENS"), "RLM_MAX_TOKENS"
-                ),
-                summarize_at_tokens=_summarize_at_tokens(
-                    env.get("RLM_SUMMARIZE_AT_TOKENS")
-                ),
-                max_compactions=_optional_positive_int(
-                    env.get("RLM_MAX_COMPACTIONS"), "RLM_MAX_COMPACTIONS"
-                ),
-                max_concurrent_subagents=max_concurrent_subagents,
-                max_subagent_calls=_positive_int(
-                    env.get("RLM_MAX_SUBAGENT_CALLS", "64"),
-                    "RLM_MAX_SUBAGENT_CALLS",
-                ),
-                allow_git=env.get("RLM_ALLOW_GIT") == "1",
-            ),
-            system_prompt_path=env.get("RLM_SYSTEM_PROMPT_PATH"),
-            append_to_system_prompt=env.get("RLM_APPEND_TO_SYSTEM_PROMPT"),
-            skills=(
-                tuple(s.strip() for s in raw_skills.split(",") if s.strip())
-                if raw_skills is not None
-                else preset_skills()
-            ),
-            kernel_env=_kernel_env(env.get(KERNEL_ENV_CONFIG_ENV)),
-            search_api_key=env.get("SERPER_API_KEY"),
-        )

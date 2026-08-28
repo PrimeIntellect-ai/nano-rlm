@@ -23,6 +23,7 @@ from conftest import (
     DummyClient,
     DummyMessage,
     DummyToolCall,
+    make_runtime_config,
     show_tool_result,
     tool_result,
 )
@@ -42,7 +43,9 @@ async def test_python_skill_valid(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     result = await engine.run(prompt)
 
@@ -75,7 +78,9 @@ async def test_bash_skill_valid(session, monkeypatch, tmp_path):
         ),
     )
     monkeypatch.setattr(sys, "argv", [str(launcher_dir / "rlm")])
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     result = await engine.run(prompt)
 
@@ -102,7 +107,9 @@ async def test_python_skill_invalid_args(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     result = await engine.run(prompt)
 
@@ -122,7 +129,9 @@ async def test_bash_skill_invalid_args(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     result = await engine.run(prompt)
 
@@ -146,7 +155,9 @@ async def test_python_skill_raises(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     result = await engine.run(prompt)
 
@@ -166,7 +177,9 @@ async def test_bash_skill_raises(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     result = await engine.run(prompt)
 
@@ -187,7 +200,9 @@ async def test_python_skill_halt_on_raise(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     await engine.run("try boom then say")
 
@@ -206,7 +221,9 @@ async def test_bash_skill_halt_on_raise(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     await engine.run("try boom then say")
 
@@ -225,7 +242,9 @@ async def test_valid_python_skill_metrics(session):
         DummyMessage(content="ok"),
     ]
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     await engine.run("say hi")
 
@@ -240,7 +259,9 @@ async def test_valid_bash_skill_metrics(session):
         DummyMessage(content="ok"),
     ]
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     await engine.run("say hi")
 
@@ -270,7 +291,9 @@ async def test_skill_introspection(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     await engine.run("introspect say")
 

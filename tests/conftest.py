@@ -13,6 +13,12 @@ import pytest
 from fixtures.tools.add import AddTool
 from fixtures.tools.boom import BoomTool
 
+from rlm.config import (
+    ExecutionPolicy,
+    InvocationContext,
+    ProviderConfig,
+    RuntimeConfig,
+)
 from rlm.session import Session
 from rlm.tools import registry as tool_registry
 
@@ -129,6 +135,18 @@ def tool_result(client: DummyClient, turn: int = 0) -> str:
 def show_tool_result(output: str) -> None:
     """Pretty-print a tool result for ``pytest -s`` inspection."""
     print(f"\n── tool result ──\n{output.rstrip()}\n─────────────────")
+
+
+def make_runtime_config(**overrides) -> RuntimeConfig:
+    """A minimal explicit RuntimeConfig for engine tests (no environment resolution)."""
+    defaults = dict(
+        model="dummy-model",
+        provider=ProviderConfig(base_url=None, api_key="EMPTY"),
+        invocation=InvocationContext(),
+        policy=ExecutionPolicy(),
+    )
+    defaults.update(overrides)
+    return RuntimeConfig(**defaults)
 
 
 # --- Fixtures ------------------------------------------------------------

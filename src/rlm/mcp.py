@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 import json
 import keyword
-import os
 import re
 import secrets
 from collections.abc import AsyncIterator, Iterable
@@ -19,7 +18,6 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
-MCP_CONFIG_ENV = "RLM_MCP_CONFIG"
 MAX_MCP_TOOLS = 128
 MAX_MCP_SKILL_NAME_CHARS = 96
 MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
@@ -58,12 +56,6 @@ class MCPStdioServer(_MCPConfigModel):
 
 MCPServer = MCPHTTPServer | MCPStdioServer
 _MCP_SERVERS_ADAPTER = TypeAdapter(dict[Annotated[str, Field(min_length=1)], MCPServer])
-
-
-class _MCPServersDocument(_MCPConfigModel):
-    mcp_servers: dict[Annotated[str, Field(min_length=1)], MCPServer] = Field(
-        alias="mcpServers"
-    )
 
 
 @dataclass(frozen=True)
@@ -189,14 +181,6 @@ class MCPRegistry:
         return write_skill_modules(descriptors, dest_dir, reserved_names)
 
 
-def load_mcp_servers() -> dict[str, MCPServer]:
-    """Parse ``RLM_MCP_CONFIG`` into validated HTTP or stdio servers."""
-    raw = os.environ.get(MCP_CONFIG_ENV)
-    if not raw:
-        return {}
-    return _MCPServersDocument.model_validate_json(raw).mcp_servers
-
-
 def _skill_name(server: str, tool: str) -> str:
     """Return the normalized Python name for a server tool."""
     ident = re.sub(r"\W", "_", f"{server}_{tool}")
@@ -205,12 +189,6 @@ def _skill_name(server: str, tool: str) -> str:
 
 def validate_mcp_servers(servers: dict[str, Any]) -> dict[str, MCPServer]:
     return _MCP_SERVERS_ADAPTER.validate_python(servers)
-
-
-def dump_mcp_servers(servers: dict[str, MCPServer]) -> str:
-    """Serialize servers as a standard ``mcpServers`` configuration."""
-    document = _MCPServersDocument(mcpServers=validate_mcp_servers(servers))
-    return document.model_dump_json(by_alias=True, exclude_defaults=True)
 
 
 @asynccontextmanager
