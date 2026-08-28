@@ -371,7 +371,14 @@ class SessionTreeSupervisor:
                     supervisor=self,
                     invocation_id=child.id,
                 )
-                result = await engine.run(prompt)
+                try:
+                    result = await engine.run(prompt)
+                except Exception:
+                    # A failed child still returns an outcome to its caller. If it
+                    # committed any model requests before failing, link its last
+                    # request to the parent's request that consumes the error.
+                    self.semantic_edges.finish_subagent(child_id)
+                    raise
                 self.semantic_edges.finish_subagent(child_id)
                 return result
             finally:
