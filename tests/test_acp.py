@@ -176,7 +176,7 @@ async def test_engine_prompt_preserves_conversation(session):
         first = await engine.prompt("one")
         second = await engine.prompt("two")
     finally:
-        engine.close()
+        await engine.aclose()
 
     assert first.answer == "first"
     assert second.answer == "second"
@@ -262,7 +262,7 @@ async def test_engine_prompt_preserves_ipython_kernel(session):
         await engine.prompt("remember a value")
         result = await engine.prompt("use that value")
     finally:
-        engine.close()
+        await engine.aclose()
 
     tool_messages = [
         message for message in client.calls[-1]["messages"] if message["role"] == "tool"
@@ -295,7 +295,7 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
     try:
         result = await engine.prompt("continue")
     finally:
-        engine.close()
+        await engine.aclose()
 
     assert result.answer == "continued"
     assert result.turns == 1
@@ -330,7 +330,7 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
         model="test-model",
         provider=ProviderConfig(base_url=None, api_key="test-key"),
         invocation=InvocationContext(),
-        policy=ExecutionPolicy(summarize_at_tokens=1),
+        policy=ExecutionPolicy(summarize_at_tokens=1, max_depth=0),
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
@@ -341,7 +341,7 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
     try:
         result = await engine.prompt("compact")
     finally:
-        engine.close()
+        await engine.aclose()
 
     assert result.answer == "done"
     assert (
@@ -391,7 +391,7 @@ async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
-    engine.close()
+    await engine.aclose()
 
     meta = json.loads((Path(session.dir) / "meta.json").read_text())
     assert meta["status"] == "running"
@@ -424,7 +424,7 @@ async def test_compaction_counts_seed_prompt(session):
     try:
         await engine._compact_branch(messages, turn=0, active_tools=[])
     finally:
-        engine.close()
+        await engine.aclose()
 
     assert engine._metrics.num_compactions == 1
     assert engine._metrics.compaction_chars_dropped_mean == len("original promptwork")
@@ -445,7 +445,7 @@ async def test_engine_failed_prompt_can_be_retried(session):
     try:
         result = await engine.prompt("continue")
     finally:
-        engine.close()
+        await engine.aclose()
 
     assert result.answer == "continued"
     assert result.turns == 1
@@ -496,7 +496,7 @@ async def test_failed_prompt_restores_pre_compaction_context(session):
     try:
         result = await engine.prompt("continue")
     finally:
-        engine.close()
+        await engine.aclose()
 
     request_ids = [
         call["extra_headers"]["X-ACP-Lineage-Request-ID"] for call in client.calls
@@ -563,7 +563,7 @@ async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
     try:
         result = await engine.prompt("continue")
     finally:
-        engine.close()
+        await engine.aclose()
 
     assert result.answer == "continued"
     assert repl.finished is True
@@ -614,7 +614,7 @@ async def test_engine_cancelled_tool_recovers_kernel(session, tmp_path):
     try:
         result = await engine.prompt("continue")
     finally:
-        engine.close()
+        await engine.aclose()
 
     tool_messages = [
         message for message in client.calls[-1]["messages"] if message["role"] == "tool"

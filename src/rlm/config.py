@@ -37,8 +37,13 @@ def _positive_int(value: str | int, name: str) -> int:
 
 
 def _summarize_at_tokens(value: str | int | None) -> int | None:
+    """Unset -> the 256k default; "" or "0" -> disabled; else a positive threshold."""
+    if value is None:
+        return 256_000
+    if value in ("", "0", 0):
+        return None
     parsed = _optional_positive_int(value, "summarize_at_tokens")
-    if value not in (None, "") and parsed is None:
+    if parsed is None:
         raise ValueError(f"summarize_at_tokens must be positive (got {value})")
     return parsed
 
@@ -129,10 +134,10 @@ class InvocationContext(_ConfigModel):
 class ExecutionPolicy(_ConfigModel):
     """Resource and context-management policy for one RLM engine."""
 
-    max_depth: int = Field(default=0, ge=0)
+    max_depth: int = Field(default=1, ge=0)
     exec_timeout: int = Field(default=300, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
-    summarize_at_tokens: int | None = Field(default=None, gt=0)
+    summarize_at_tokens: int | None = Field(default=256_000, gt=0)
     max_compactions: int | None = Field(default=None, gt=0)
     max_concurrent_subagents: int = Field(default=4, gt=0)
     max_subagent_calls: int = Field(default=64, gt=0)
@@ -166,7 +171,7 @@ class RuntimeConfig(_ConfigModel):
     ) -> RuntimeConfig:
         env = os.environ if environ is None else environ
         raw_skills = env.get("RLM_SKILLS")
-        max_depth = int(env.get("RLM_MAX_DEPTH", "0"))
+        max_depth = int(env.get("RLM_MAX_DEPTH", "1"))
         default_concurrency = max(4, max_depth)
         max_concurrent_subagents = _positive_int(
             env.get("RLM_MAX_CONCURRENT_SUBAGENTS", str(default_concurrency)),
