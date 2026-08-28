@@ -55,6 +55,12 @@ SEARCH_SKILL_PROMPT = (
     "several angles at once, fan out with `asyncio.gather(search(...), search(...))`."
 )
 
+FETCH_SKILL_PROMPT = (
+    "To read a specific webpage, use the pre-imported async `fetch` skill: "
+    '`await fetch(url="...")` returns the webpage as cleaned text. Use it to open URLs '
+    "from `search` results."
+)
+
 
 def build_system_prompt(
     cwd: str,
@@ -137,6 +143,8 @@ def build_system_prompt(
             skill_lines.append(EDIT_SKILL_PROMPT)
         if "search" in installed_skills:
             skill_lines.append(SEARCH_SKILL_PROMPT)
+        if "fetch" in installed_skills:
+            skill_lines.append(FETCH_SKILL_PROMPT)
     if skill_lines:
         parts.extend(["", *skill_lines])
 

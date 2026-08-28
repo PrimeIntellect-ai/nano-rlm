@@ -14,6 +14,7 @@ from pathlib import Path
 _BUILTIN_SKILLS: dict[str, str | None] = {
     "bash": "rlm.skills.bash",
     "edit": "rlm.skills.edit",
+    "fetch": "rlm.skills.fetch",
     "search": None,
 }
 
