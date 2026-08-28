@@ -194,3 +194,8 @@ def test_enable_bash_skill_writes_stub(tmp_path):
     assert enabled == ["bash"]
     stub = (tmp_path / "bash.py").read_text()
     assert "from rlm.skills.bash import run" in stub
+
+
+async def test_bash_survives_binary_output():
+    out = await bash("printf 'head\\xff\\xfetail'")
+    assert "head" in out and "tail" in out
