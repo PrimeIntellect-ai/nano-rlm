@@ -353,6 +353,9 @@ class RLMEngine:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ]
+            # The initial conversation is the floor for checkpoint fallbacks: a
+            # first-turn checkpoint must never retry from an empty base.
+            self._last_good = len(self._messages)
             self._started = True
         except BaseException:
             self._repl.shutdown()
