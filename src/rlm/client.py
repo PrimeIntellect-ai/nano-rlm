@@ -15,6 +15,10 @@ from openai import (
 from pydantic import ValidationError
 
 from rlm.config import ProviderConfig
+from rlm.lineage import (
+    LINEAGE_HEADER_NAMES,
+    REQUEST_ID_HEADER,
+)
 from rlm.types import TokenUsage
 
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
@@ -63,7 +67,12 @@ def make_client(provider: ProviderConfig | None = None) -> AsyncOpenAI:
     reserved = sorted(
         name
         for name in provider.headers
-        if name.lower() in {IDEMPOTENCY_KEY_HEADER.lower(), RETRY_COUNT_HEADER}
+        if name.lower()
+        in {
+            IDEMPOTENCY_KEY_HEADER.lower(),
+            RETRY_COUNT_HEADER,
+            *(header.lower() for header in LINEAGE_HEADER_NAMES),
+        }
     )
     if reserved:
         raise ValueError(f"provider headers contain reserved names: {reserved}")
@@ -75,9 +84,12 @@ def make_client(provider: ProviderConfig | None = None) -> AsyncOpenAI:
     )
 
 
-def model_call_headers(call_id: str) -> dict[str, str]:
-    """Build transport headers for one idempotent model call."""
-    return {IDEMPOTENCY_KEY_HEADER: call_id}
+def model_call_headers(request_id: str) -> dict[str, str]:
+    """Build transport headers for one idempotent, attributable model call."""
+    return {
+        IDEMPOTENCY_KEY_HEADER: request_id,
+        REQUEST_ID_HEADER: request_id,
+    }
 
 
 async def call_with_retries(

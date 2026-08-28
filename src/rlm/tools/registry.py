@@ -1,9 +1,9 @@
 """Builtin tool registry.
 
-rlm's default tool set is native ``bash`` and ``edit`` tools plus the persistent
-IPython REPL. Shell and edits are ALSO available as REPL skills (``await bash(...)``,
-``await edit(...)``) for mixing with Python in one cell. ``RLM_BUILTIN_TOOLS``
-(comma-separated) overrides the set, e.g. ``ipython`` for a REPL-only agent.
+rlm's default is the ``skills`` preset: the persistent IPython REPL as the sole
+tool, with shell and edits as pre-imported REPL skills (``await bash(...)``,
+``await edit(...)``). ``RLM_TOOLING`` selects ``tools`` or ``dual`` presets;
+``RLM_BUILTIN_TOOLS`` (comma-separated) overrides the tool set directly.
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ _TOOLING_PRESETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 
 
 def tooling_preset() -> str:
-    """The RLM_TOOLING preset name: dual (default), tools, or skills."""
-    preset = os.environ.get("RLM_TOOLING", "dual").strip() or "dual"
+    """The RLM_TOOLING preset name: skills (default), tools, or dual."""
+    preset = os.environ.get("RLM_TOOLING", "skills").strip() or "skills"
     if preset not in _TOOLING_PRESETS:
         raise ValueError(
             f"RLM_TOOLING must be one of {sorted(_TOOLING_PRESETS)}, got {preset!r}"

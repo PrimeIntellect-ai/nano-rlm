@@ -16,6 +16,7 @@ import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall
 from rlm.acp import (
+    ACP_LINEAGE_METADATA_KEY,
     CONTRACT_METADATA_KEY,
     RUNTIME_METADATA_KEY,
     SESSION_METADATA_KEY,
@@ -85,11 +86,13 @@ class _Engine:
         session,
         mcp_servers: dict[str, Any],
         runtime_config=None,
+        invocation_id: str,
     ) -> None:
         self.cwd = cwd
         self.session = session
         self.mcp_servers = mcp_servers
         self.runtime_config = runtime_config
+        self.invocation_id = invocation_id
         self.prompts: list[str] = []
         self.prompt_started = asyncio.Event()
         self.closed = False
@@ -140,6 +143,25 @@ class _Engine:
                 "summarize_at_tokens": None,
                 "max_compactions": None,
                 "allow_git": False,
+            },
+            "lineage": {
+                "sessions": [
+                    {
+                        "session_id": self.invocation_id,
+                        "depth": 0,
+                        "initial_context_id": "test-context",
+                        "status": "completed" if self.closed else "running",
+                    }
+                ],
+                "contexts": [
+                    {
+                        "context_id": "test-context",
+                        "session_id": self.invocation_id,
+                        "transition": "root",
+                    }
+                ],
+                "compactions": [],
+                "requests": [],
             },
         }
 
@@ -331,6 +353,25 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
     assert (
         len({header["Idempotency-Key"] for header in (turn, compaction, resumed)}) == 3
     )
+    assert all(
+        header["Idempotency-Key"] == header["X-ACP-Lineage-Request-ID"]
+        for header in (turn, compaction, resumed)
+    )
+    lineage = engine.execution_snapshot()["lineage"]
+    requests = {request["request_id"]: request for request in lineage["requests"]}
+    contexts = {context["context_id"]: context for context in lineage["contexts"]}
+    turn_request, compaction_request, resumed_request = [
+        requests[headers["X-ACP-Lineage-Request-ID"]]
+        for headers in (turn, compaction, resumed)
+    ]
+    assert turn_request["session_id"] == engine._invocation_id
+    assert turn_request["context_id"] == compaction_request["context_id"]
+    assert compaction_request["kind"] == "compaction"
+    assert resumed_request["context_id"] != turn_request["context_id"]
+    resumed_context = contexts[resumed_request["context_id"]]
+    assert resumed_context["previous_context_id"] == turn_request["context_id"]
+    assert resumed_context["transition"] == "compact"
+    assert resumed_request["compaction_id"] == compaction_request["compaction_id"]
 
 
 async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
@@ -426,6 +467,49 @@ async def test_engine_failed_prompt_can_be_retried(session):
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
     ]
+
+
+async def test_failed_prompt_restores_pre_compaction_context(session):
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
+            DummyMessage(content="summary"),
+            DummyMessage(tool_calls=[DummyToolCall("boom", {})]),
+            DummyMessage(content="continued"),
+        ]
+    )
+    config = RuntimeConfig(
+        model="test-model",
+        provider=ProviderConfig(base_url=None, api_key="test-key"),
+        invocation=InvocationContext(),
+        policy=ExecutionPolicy(summarize_at_tokens=1),
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await engine.prompt("fail after compacting")
+
+    try:
+        result = await engine.prompt("continue")
+    finally:
+        engine.close()
+
+    request_ids = [
+        call["extra_headers"]["X-ACP-Lineage-Request-ID"] for call in client.calls
+    ]
+    lineage = engine.execution_snapshot()["lineage"]
+    requests = {request["request_id"]: request for request in lineage["requests"]}
+    contexts = {context["context_id"]: context for context in lineage["contexts"]}
+    initial, summary, compacted, retried = [requests[item] for item in request_ids]
+    assert result.answer == "continued"
+    assert summary["context_id"] == initial["context_id"]
+    assert compacted["context_id"] != initial["context_id"]
+    assert retried["context_id"] == initial["context_id"]
+    assert contexts[retried["context_id"]]["transition"] == "root"
 
 
 async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
@@ -589,6 +673,23 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
     assert repls[1].stopped is True
 
 
+async def test_engine_failed_start_marks_lineage_failed(monkeypatch, session):
+    engine = RLMEngine(
+        client=DummyClient([]),  # type: ignore[arg-type]
+        session=session,
+    )
+
+    async def fail_start(prompt: str) -> None:
+        raise RuntimeError(f"cannot start: {prompt}")
+
+    monkeypatch.setattr(engine, "_start", fail_start)
+
+    with pytest.raises(RuntimeError, match="cannot start"):
+        await engine.run("first")
+
+    assert engine.execution_snapshot()["lineage"]["sessions"][0]["status"] == "failed"
+
+
 async def test_acp_failed_session_creation_closes_session(monkeypatch, tmp_path):
     session = Session(tmp_path / "session")
 
@@ -683,14 +784,58 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert second_snapshot["turns"] == 2
     assert second_snapshot["usage"]["total_tokens"] == 10
     assert second_snapshot["last_stop_reason"] == "done"
+    assert first.field_meta[ACP_LINEAGE_METADATA_KEY]["sessions"] == [
+        {
+            "session_id": "test-session",
+            "depth": 0,
+            "initial_context_id": "test-context",
+            "status": "running",
+        }
+    ]
 
     closed = await agent.close_session(created.session_id)
     closed_snapshot = closed.field_meta[SESSION_METADATA_KEY]
     assert closed_snapshot["session_id"] == "test-session"
     assert closed_snapshot["turns"] == 2
     assert closed_snapshot["last_stop_reason"] == "done"
+    assert "lineage" not in closed_snapshot
+    assert closed.field_meta[ACP_LINEAGE_METADATA_KEY]["sessions"][0]["status"] == (
+        "completed"
+    )
     assert "test-secret" not in closed.model_dump_json(by_alias=True)
     assert engine.closed is True
+
+
+async def test_acp_prompt_snapshot_records_resumed_request_compaction(
+    monkeypatch, tmp_path
+):
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
+            DummyMessage(content="summary"),
+            DummyMessage(content="done"),
+        ]
+    )
+
+    def make_engine(**kwargs):
+        return RLMEngine(client=client, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("rlm.acp.RLMEngine", make_engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    runtime_metadata = _runtime_metadata()
+    runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["summarize_at_tokens"] = 1
+    created = await agent.new_session(str(tmp_path), **runtime_metadata)
+
+    try:
+        response = await agent.prompt(created.session_id, [text_block("compact")])
+        lineage = response.field_meta[ACP_LINEAGE_METADATA_KEY]
+        compaction_id = lineage["compactions"][0]["compaction_id"]
+
+        assert lineage["requests"][-1]["kind"] == "turn"
+        assert lineage["requests"][-1]["compaction_id"] == compaction_id
+    finally:
+        await agent.close_session(created.session_id)
 
 
 async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
@@ -710,7 +855,8 @@ async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
 
     cancelled = await pending
     assert cancelled.stop_reason == "cancelled"
-    assert cancelled.field_meta is None
+    assert SESSION_METADATA_KEY in cancelled.field_meta
+    assert ACP_LINEAGE_METADATA_KEY in cancelled.field_meta
     assert engine.closed is False
     resumed = await agent.prompt(created.session_id, [text_block("after")])
     assert resumed.stop_reason == "end_turn"
