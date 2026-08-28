@@ -722,7 +722,15 @@ class RLMEngine:
                 return response, usage
 
         await self._compact_branch(messages, turn)
-        return await self._call_model(messages)
+        try:
+            return await self._call_model(messages)
+        except APIStatusError as error:
+            # The rebuilt conversation is sized to fit, so this is out of moves.
+            if is_context_overflow(error):
+                raise CompactionFailed(
+                    "the rebuilt conversation still overflows"
+                ) from error
+            raise
 
     async def _compact_branch(
         self,
