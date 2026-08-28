@@ -781,6 +781,9 @@ class RLMEngine:
                 if not message.tool_calls and text:
                     summary_text = text
                     break
+                # An unusable reply finished its request without failing it, so the
+                # compaction still holds the claim - release it for the resample.
+                self._semantic_edges.release_summary_request(compaction.compaction_id)
             if not summary_text:
                 raise CompactionFailed(
                     f"no usable summary after {COMPACTION_ATTEMPTS} attempts"

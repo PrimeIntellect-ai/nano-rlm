@@ -146,6 +146,12 @@ class SemanticEdgeTracker:
             if compaction is not None and compaction.summary_request_id == request_id:
                 compaction.summary_request_id = None
 
+    def release_summary_request(self, compaction_id: str) -> None:
+        """Unbind a compaction's summary request so a resampled attempt can claim it."""
+        compaction = self._compactions.get(compaction_id)
+        if compaction is not None:
+            compaction.summary_request_id = None
+
     def begin_compaction(self, session_id: str) -> Compaction:
         compaction_id = uuid.uuid4().hex
         self._compactions[compaction_id] = _Compaction(session_id=session_id)
