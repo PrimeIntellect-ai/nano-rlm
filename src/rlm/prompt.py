@@ -96,7 +96,6 @@ def build_system_prompt(
         f"Working directory: {cwd}",
         "Conversation log: $RLM_SESSION_DIR/messages.jsonl",
         f"Pre-installed Python packages: {', '.join(BASE_TOOLKIT)}.",
-        "Install additional packages with `uv pip install <pkg>` (this is a uv-managed venv with no pip module).",
     ]
 
     skill_lines: list[str] = []
