@@ -48,31 +48,6 @@ from rlm.types import (
 
 logger = logging.getLogger(__name__)
 
-# Hard cap for a single tool result entering the conversation (the session log
-# keeps the full output). Head+tail with a warning naming the original size —
-# Codex's output policy, matching verifiers' bash-harness truncation.
-TOOL_OUTPUT_MAX_BYTES = 10_000
-
-
-def estimated_tokens(chars: str) -> int:
-    """Rough token count at four characters per token."""
-    return (len(chars) + 3) // 4
-
-
-def truncate_tool_output(text: str) -> str:
-    """Keep the head and tail of an oversized tool result and say what was cut."""
-    data = text.encode("utf-8")
-    if len(data) <= TOOL_OUTPUT_MAX_BYTES:
-        return text
-    keep = TOOL_OUTPUT_MAX_BYTES // 2
-    head = data[:keep].decode("utf-8", errors="ignore")
-    tail = data[-keep:].decode("utf-8", errors="ignore")
-    return (
-        f"Warning: truncated output (original token count: {estimated_tokens(text)})\n"
-        f"Total output lines: {text.count(chr(10)) + 1}\n\n"
-        f"{head}\n[... {len(data) - 2 * keep} bytes truncated ...]\n{tail}"
-    )
-
 
 # Injected as a user message when the branch's context size reaches the
 # compaction threshold. The model's next reply is expected to be a
@@ -595,7 +570,7 @@ class RLMEngine:
                 {
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": truncate_tool_output(result),
+                    "content": result,
                 }
             )
 
