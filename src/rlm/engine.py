@@ -117,9 +117,15 @@ POST_COMPACTION_FRAMING = (
 
 
 def _is_request_too_large(e: BadRequestError) -> bool:
-    """True if a 400 matches the proxy's "Request Entity Too Large" body."""
+    """True if a 400 says the request outgrew the serving limit, so the session can end
+    with its graceful hard-ceiling stop instead of erroring. Matches the proxy's
+    "Request Entity Too Large" body and vLLM's context-length phrasing
+    ("This model's maximum context length is ..." / "Prompt length ... exceeds the
+    maximum context length")."""
     haystack = f"{e} {getattr(e, 'body', '') or ''}".lower()
-    return "request entity too large" in haystack
+    return (
+        "request entity too large" in haystack or "maximum context length" in haystack
+    )
 
 
 def _parse_tool_call_args(raw: str) -> tuple[dict | None, dict | None]:
