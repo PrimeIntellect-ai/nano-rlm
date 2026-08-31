@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from importlib.metadata import version
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from acp import (
     PROTOCOL_VERSION,
@@ -54,7 +54,7 @@ from rlm.session import Session
 CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
-ACP_LINEAGE_METADATA_KEY = "ai.prime.acp/lineage-v1"
+ACP_SEMANTIC_EDGES_METADATA_KEY = "ai.prime.acp/semantic-edges-v1"
 
 
 class _ContractModel(BaseModel):
@@ -93,59 +93,32 @@ class _ProgrammaticToolCallSnapshot(_ContractModel):
 class _SupervisorSnapshot(_ContractModel):
     subagent_calls: int = Field(ge=0)
     active_subagent_calls: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
 
 
 class _LimitsSnapshot(_ContractModel):
     max_depth: int = Field(ge=0)
     max_concurrent_subagents: int = Field(gt=0)
     max_subagent_calls: int = Field(gt=0)
+    max_turns: int | None = Field(default=None, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
+    max_output_tokens: int | None = Field(default=None, gt=0)
     summarize_at_tokens: int | None = Field(default=None, gt=0)
+    subagent_summarize_at_tokens: int | None = Field(default=None, gt=0)
+    max_total_tokens: int | None = Field(default=None, gt=0)
+    max_tool_output_chars: int | None = Field(default=None, gt=0)
     max_compactions: int | None = Field(default=None, gt=0)
     allow_git: bool
 
 
-class _LineageSessionSnapshot(_ContractModel):
-    session_id: str = Field(min_length=1)
-    parent_session_id: str | None = None
-    depth: int = Field(ge=0)
-    initial_context_id: str = Field(min_length=1)
-    spawned_by_request_id: str | None = None
-    status: Literal["running", "completed", "failed", "cancelled"]
+class _SemanticEdge(_ContractModel):
+    source_request_id: str = Field(min_length=1)
+    target_request_id: str = Field(min_length=1)
+    type: str = Field(min_length=1)
 
 
-class _LineageContextSnapshot(_ContractModel):
-    context_id: str = Field(min_length=1)
-    session_id: str = Field(min_length=1)
-    previous_context_id: str | None = None
-    transition: Literal["root", "spawn", "compact"]
-    compaction_id: str | None = None
-
-
-class _LineageCompactionSnapshot(_ContractModel):
-    """One attempt; a completed compaction alone publishes its target context."""
-
-    compaction_id: str = Field(min_length=1)
-    session_id: str = Field(min_length=1)
-    source_context_id: str = Field(min_length=1)
-    target_context_id: str | None = Field(default=None, min_length=1)
-    summary_request_id: str = Field(min_length=1)
-    status: Literal["in_progress", "completed", "failed", "cancelled"]
-
-
-class _LineageRequestSnapshot(_ContractModel):
-    request_id: str = Field(min_length=1)
-    session_id: str = Field(min_length=1)
-    context_id: str = Field(min_length=1)
-    kind: Literal["turn", "compaction"]
-    compaction_id: str | None = None
-
-
-class _LineageSnapshot(_ContractModel):
-    sessions: list[_LineageSessionSnapshot]
-    contexts: list[_LineageContextSnapshot]
-    compactions: list[_LineageCompactionSnapshot]
-    requests: list[_LineageRequestSnapshot]
+class _SemanticEdgeSet(_ContractModel):
+    edges: list[_SemanticEdge]
 
 
 class _SessionSnapshot(_ContractModel):
@@ -191,11 +164,13 @@ def _session_metadata(state: _SessionState) -> dict[str, Any]:
         "last_stop_reason": state.last_stop_reason,
         **state.engine.execution_snapshot(),
     }
-    lineage = _LineageSnapshot.model_validate(snapshot.pop("lineage"))
+    semantic_edges = _SemanticEdgeSet.model_validate(snapshot.pop("semantic_edges"))
     validated = _SessionSnapshot.model_validate(snapshot)
     return {
         SESSION_METADATA_KEY: validated.model_dump(mode="json", exclude_none=True),
-        ACP_LINEAGE_METADATA_KEY: lineage.model_dump(mode="json", exclude_none=True),
+        ACP_SEMANTIC_EDGES_METADATA_KEY: semantic_edges.model_dump(
+            mode="json", exclude_none=True
+        ),
     }
 
 
@@ -386,7 +361,7 @@ class RLMACPAgent(Agent):
 
             stop_reason = (
                 "max_tokens"
-                if state.engine.stop_reason == "token_budget"
+                if state.engine.stop_reason in {"token_budget", "total_token_budget"}
                 else "end_turn"
             )
             state.last_stop_reason = state.engine.stop_reason or stop_reason

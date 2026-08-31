@@ -15,9 +15,9 @@ from openai import (
 from pydantic import ValidationError
 
 from rlm.config import ProviderConfig
-from rlm.lineage import (
-    LINEAGE_HEADER_NAMES,
-    REQUEST_ID_HEADER,
+from rlm.semantic import (
+    ACP_EXTENSION_HEADER_NAMES,
+    MODEL_REQUEST_ID_HEADER,
 )
 from rlm.types import TokenUsage
 
@@ -48,7 +48,7 @@ def make_client(provider: ProviderConfig) -> AsyncOpenAI:
         in {
             IDEMPOTENCY_KEY_HEADER.lower(),
             RETRY_COUNT_HEADER,
-            *(header.lower() for header in LINEAGE_HEADER_NAMES),
+            *(header.lower() for header in ACP_EXTENSION_HEADER_NAMES),
         }
     )
     if reserved:
@@ -65,7 +65,7 @@ def model_call_headers(request_id: str) -> dict[str, str]:
     """Build transport headers for one idempotent, attributable model call."""
     return {
         IDEMPOTENCY_KEY_HEADER: request_id,
-        REQUEST_ID_HEADER: request_id,
+        MODEL_REQUEST_ID_HEADER: request_id,
     }
 
 

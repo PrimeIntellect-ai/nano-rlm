@@ -10,7 +10,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
-from rlm.lineage import LINEAGE_HEADER_NAMES
+from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
 
 
 class _ConfigModel(BaseModel):
@@ -31,7 +31,7 @@ class ProviderConfig(_ConfigModel):
         reserved_names = {
             "idempotency-key",
             "x-stainless-retry-count",
-            *(header.lower() for header in LINEAGE_HEADER_NAMES),
+            *(header.lower() for header in ACP_EXTENSION_HEADER_NAMES),
         }
         reserved = sorted(name for name in headers if name.lower() in reserved_names)
         if reserved:
@@ -67,7 +67,8 @@ class ExecutionPolicy(_ConfigModel):
     Lets the root run a large context (e.g. 100k) while sub-agents stay lean (e.g. 50k)."""
     max_total_tokens: int | None = Field(default=None, gt=0)
     """Tree-total token budget across the whole recursive session tree (all engines, prompt +
-    completion). Once reached, no further sub-agents are spawned. None = unbounded."""
+    completion). Once reached, every engine stops before its next model call. Concurrent calls may
+    overshoot by their in-flight usage. None = unbounded."""
     max_tool_output_chars: int | None = Field(default=None, gt=0)
     """Cap on a single tool result's size (chars) before it enters the conversation; oversized
     output is truncated keeping a head + tail window. None = no cap."""

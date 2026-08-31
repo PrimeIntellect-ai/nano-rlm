@@ -46,7 +46,7 @@ alive for the lifetime of a session.
 RLM's ACP surface is a versioned training contract. `initialize` advertises the exact
 `ai.prime.rlm/contract-v1` marker in its response `_meta`; clients must require
 it, then provide one complete `ai.prime.rlm/runtime-v1` object in
-`session/new._meta`. The runtime object contains the lineage session ID, model,
+`session/new._meta`. The runtime object contains the ACP session ID, model,
 provider, execution policy, prompt configuration, enabled built-in skills,
 explicit kernel environment, and optional search credential. Nullable and
 disabled values are sent explicitly as `null` or empty collections. Missing,
@@ -63,6 +63,14 @@ stays stable across SDK and outer retries (retry attempts are distinguished by
 `x-stainless-retry-count`), so an inference proxy can deduplicate replayed
 requests. Both header names are reserved and rejected in provider
 configuration.
+
+Model calls also carry a private `X-ACP-Model-Request-ID` correlation header.
+RLM publishes sparse, labeled relationships between those request IDs under
+`ai.prime.acp/semantic-edges-v1`: `continuation`, `subagent_call`,
+`subagent_return`, and `compaction`. `continuation` preserves same-agent causal
+order even when a consumer's physical token-prefix graph splits. ACP consumers
+can resolve the request IDs onto their own message nodes while harnesses that do
+not understand the extension ignore it.
 
 ## Python API (inside a session)
 
@@ -106,6 +114,11 @@ results = await asyncio.gather(
 ```
 
 Recursive calls are created by a session-local supervisor rather than by the IPython kernel. The supervisor assigns depth and session ancestry, enforces the concurrency and total-call limits, and cancels descendants when their parent cell or session closes. When recursion is disabled by depth, the system prompt does not advertise these APIs and child runs beyond the depth limit fail immediately.
+
+When `max_total_tokens` is set, prompt and completion usage from root, child,
+and compaction calls is charged to one tree-wide soft budget. Once reached,
+every engine stops before another model call; already in-flight concurrent calls
+may overshoot the limit by their final usage.
 
 ## Compaction
 
@@ -250,4 +263,3 @@ Install dev dependencies and run the suite:
 uv sync --group dev
 uv run pytest tests/
 ```
-

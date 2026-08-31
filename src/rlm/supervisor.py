@@ -22,7 +22,7 @@ from rlm.broker import (
     write_frame,
 )
 from rlm.config import RuntimeConfig
-from rlm.lineage import LineageTracker
+from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import (
     MCPRegistry,
     MCPServer,
@@ -31,7 +31,7 @@ from rlm.mcp import (
 )
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
-from rlm.types import ProgrammaticToolCallStats, RLMResult
+from rlm.types import ProgrammaticToolCallStats, RLMResult, TokenUsage
 
 if TYPE_CHECKING:
     from rlm.engine import RLMEngine
@@ -86,7 +86,7 @@ class SessionTreeSupervisor:
         mcp_servers: dict[str, MCPServer] | None = None,
         engine_factory: Callable[..., RLMEngine] | None = None,
         root_invocation_id: str | None = None,
-        lineage: LineageTracker | None = None,
+        semantic_edges: SemanticEdgeTracker | None = None,
     ) -> None:
         self._engine_factory = engine_factory
         self._server: asyncio.AbstractServer | None = None
@@ -96,7 +96,7 @@ class SessionTreeSupervisor:
         self._close_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._total_calls = 0
-        # cumulative prompt+completion tokens of completed sub-agents
+        # Cumulative prompt+completion tokens across every engine in the tree.
         self._total_tokens = 0
         self._tasks: set[asyncio.Task[Any]] = set()
         self._child_tasks: set[asyncio.Task[RLMResult]] = set()
@@ -143,11 +143,10 @@ class SessionTreeSupervisor:
             mcp_servers=dict(mcp_servers or {}),
         )
         self.root_id = root_id
-        self.lineage = lineage or LineageTracker()
-        self.lineage.register_session(
+        self.semantic_edges = semantic_edges or SemanticEdgeTracker()
+        self.semantic_edges.register_session(
             root_id,
             parent_session_id=None,
-            depth=runtime_config.invocation.depth,
         )
         self._invocations = {root_id: root}
         self._parents = {root_id: None}
@@ -169,6 +168,24 @@ class SessionTreeSupervisor:
     @property
     def active_calls(self) -> int:
         return len(self._child_tasks)
+
+    @property
+    def total_tokens(self) -> int:
+        return self._total_tokens
+
+    @property
+    def token_budget_reached(self) -> bool:
+        limit = self._root_config.policy.max_total_tokens
+        return limit is not None and self._total_tokens >= limit
+
+    def record_usage(self, usage: TokenUsage) -> bool:
+        """Charge one completed model call to the shared tree budget.
+
+        Concurrent calls may overshoot the soft limit by their in-flight usage;
+        every engine stops before starting another call once the limit is reached.
+        """
+        self._total_tokens += usage.total
+        return self.token_budget_reached
 
     async def start(self) -> None:
         if self._server is not None:
@@ -271,8 +288,7 @@ class SessionTreeSupervisor:
                 return asyncio.create_task(
                     self._limit_result(parent, "recursive call limit reached")
                 )
-            token_budget = parent.runtime_config.policy.max_total_tokens
-            if token_budget is not None and self._total_tokens >= token_budget:
+            if self.token_budget_reached:
                 return asyncio.create_task(
                     self._limit_result(parent, "token budget reached")
                 )
@@ -350,10 +366,9 @@ class SessionTreeSupervisor:
                 mcp_servers=parent.mcp_servers,
                 spawned_by_request_id=spawned_by_request_id,
             )
-            self.lineage.register_session(
+            self.semantic_edges.register_session(
                 child_id,
                 parent_session_id=parent_id,
-                depth=child_context.depth,
                 spawned_by_request_id=spawned_by_request_id,
             )
             # Everything from session creation to here is synchronous; the try
@@ -380,18 +395,16 @@ class SessionTreeSupervisor:
                     supervisor=self,
                     invocation_id=child.id,
                 )
-                result = await engine.run(prompt)
-                usage = getattr(result, "usage", None)
-                if usage is not None:
-                    self._total_tokens += usage.prompt_tokens + usage.completion_tokens
-                self.lineage.set_session_status(child_id, "completed")
+                try:
+                    result = await engine.run(prompt)
+                except Exception:
+                    # A failed child still returns an outcome to its caller. If it
+                    # committed any model requests before failing, link its last
+                    # request to the parent's request that consumes the error.
+                    self.semantic_edges.finish_subagent(child_id)
+                    raise
+                self.semantic_edges.finish_subagent(child_id)
                 return result
-            except asyncio.CancelledError:
-                self.lineage.set_session_status(child_id, "cancelled")
-                raise
-            except BaseException:
-                self.lineage.set_session_status(child_id, "failed")
-                raise
             finally:
                 # Close synchronously first: the lock acquisition below can be
                 # interrupted by a second cancellation, but the session handle
