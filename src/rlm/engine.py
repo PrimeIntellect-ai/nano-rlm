@@ -237,6 +237,7 @@ class RLMEngine:
             # a fallback must never drop the newest user instruction.
             self._last_good = len(self._messages)
         branch_start_before = self._branch_start_turn
+        compacted_before = self._compacted
         semantic_edges_before = self._semantic_edges.checkpoint(self._invocation_id)
         turn_before = self._turn
         usage_before = TokenUsage(
@@ -268,6 +269,7 @@ class RLMEngine:
             # that really ran and remain part of session accounting.
             self._messages[:] = messages_before
             self._last_good = last_good_before
+            self._compacted = compacted_before
             self._branch_start_turn = branch_start_before
             self._semantic_edges.restore(self._invocation_id, semantic_edges_before)
             self._turn = turn_before
