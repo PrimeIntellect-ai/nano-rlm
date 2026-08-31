@@ -227,9 +227,14 @@ class RLMEngine:
                 )
                 raise
             messages_before = self._messages[:1]
+            last_good_before = len(messages_before)
         else:
             messages_before = list(self._messages)
+            last_good_before = self._last_good
             self._messages.append({"role": "user", "content": prompt})
+            # This turn's opening state is the floor for checkpoint fallbacks:
+            # a fallback must never drop the newest user instruction.
+            self._last_good = len(self._messages)
         branch_start_before = self._branch_start_turn
         semantic_edges_before = self._semantic_edges.checkpoint(self._invocation_id)
         turn_before = self._turn
@@ -261,6 +266,7 @@ class RLMEngine:
             # kernel/tool side effects, and the append-only audit log describe work
             # that really ran and remain part of session accounting.
             self._messages[:] = messages_before
+            self._last_good = last_good_before
             self._branch_start_turn = branch_start_before
             self._semantic_edges.restore(self._invocation_id, semantic_edges_before)
             self._turn = turn_before

@@ -122,9 +122,11 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
                     {"id": card.id, **(card.model_extra or {})} for card in page.data
                 ]
             }
-            _window_cache[key] = _model_context_window(payload, model)
         except (APIError, AttributeError):
-            _window_cache[key] = None
+            # A transient listing failure must not disable compaction for the
+            # rest of the process - leave the cache empty so the next engine retries.
+            return None
+        _window_cache[key] = _model_context_window(payload, model)
     window = _window_cache[key]
     return default_threshold(window) if window is not None else None
 
