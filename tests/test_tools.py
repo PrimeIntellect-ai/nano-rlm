@@ -226,7 +226,7 @@ def test_kernel_receives_policy_env(session):
 
 
 def test_truncate_tool_output_caps_and_reports():
-    from rlm.engine import TOOL_OUTPUT_MAX_BYTES, truncate_tool_output
+    from rlm.compaction import TOOL_OUTPUT_MAX_BYTES, truncate_tool_output
 
     small = "x" * 100
     assert truncate_tool_output(small) == small

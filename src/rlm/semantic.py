@@ -46,6 +46,7 @@ class _Session:
 class _Request:
     session_id: str
     inbound_edges: list[_PendingEdge]
+    compaction_id: str | None = None
 
 
 @dataclass
@@ -113,7 +114,7 @@ class SemanticEdgeTracker:
             inbound.append(_PendingEdge(session.last_request_id, "continuation"))
 
         request_id = uuid.uuid4().hex
-        self._requests[request_id] = _Request(session_id, inbound)
+        self._requests[request_id] = _Request(session_id, inbound, compaction_id)
         if compaction_id is not None:
             compaction = self._compactions[compaction_id]
             if compaction.session_id != session_id:
@@ -139,6 +140,17 @@ class SemanticEdgeTracker:
         request = self._requests.pop(request_id)
         session = self._sessions[request.session_id]
         session.pending_edges = request.inbound_edges + session.pending_edges
+        # A failed summary attempt releases its compaction, so a retry can claim it.
+        if request.compaction_id is not None:
+            compaction = self._compactions.get(request.compaction_id)
+            if compaction is not None and compaction.summary_request_id == request_id:
+                compaction.summary_request_id = None
+
+    def release_summary_request(self, compaction_id: str) -> None:
+        """Unbind a compaction's summary request so a resampled attempt can claim it."""
+        compaction = self._compactions.get(compaction_id)
+        if compaction is not None:
+            compaction.summary_request_id = None
 
     def begin_compaction(self, session_id: str) -> Compaction:
         compaction_id = uuid.uuid4().hex

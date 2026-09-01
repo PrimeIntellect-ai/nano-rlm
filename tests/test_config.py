@@ -18,6 +18,7 @@ def test_runtime_config_redacts_secrets():
             max_depth=4,
             exec_timeout=30,
             max_tokens=500,
+            compaction=True,
             summarize_at_tokens=2048,
             max_compactions=3,
             allow_git=True,
@@ -27,7 +28,23 @@ def test_runtime_config_redacts_secrets():
         search_api_key="search-secret",
     )
 
+    assert config.model == "override"
+    assert config.invocation == InvocationContext(depth=2)
     assert config.invocation.child() == InvocationContext(depth=3)
+    assert config.policy == ExecutionPolicy(
+        max_depth=4,
+        exec_timeout=30,
+        max_tokens=500,
+        compaction=True,
+        summarize_at_tokens=2048,
+        max_compactions=3,
+        max_concurrent_subagents=4,
+        max_subagent_calls=64,
+        allow_git=True,
+    )
+    assert config.skills == ("search", "edit")
+    assert config.kernel_env == (("TASK_TOKEN", "task-secret"),)
+    assert config.search_api_key == "search-secret"
     assert "task-secret" not in repr(config)
     assert "search-secret" not in repr(config)
     assert "test-key" not in repr(config.provider)
@@ -45,7 +62,8 @@ def test_policy_rejects_unsafe_recursive_values_and_reserved_headers():
         make_client(provider)
 
 
-def test_default_policy_enables_compaction_and_recursion():
+def test_default_policy_enables_recursion_but_not_compaction():
     policy = ExecutionPolicy()
-    assert policy.summarize_at_tokens == 256_000
+    assert policy.compaction is False
+    assert policy.summarize_at_tokens is None
     assert policy.max_depth == 1

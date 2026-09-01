@@ -6,7 +6,7 @@ The model gets a single built-in tool, `ipython`: a persistent IPython kernel fo
 
 For convenience, rlm ships built-in *skills* that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via `RLM_BUILTIN_TOOLS`).
 
-Context is reclaimed automatically: when a turn's prompt token count crosses the policy's `summarize_at_tokens`, the engine compacts the conversation into a summary and continues on a fresh branch. The IPython kernel keeps running across the compaction, so REPL state survives (see [Compaction](#compaction)).
+Context compaction is optional. When enabled, the engine compacts when 16k tokens remain below an advertised model context window. The policy can set an explicit `summarize_at_tokens` threshold. The IPython kernel keeps running across compaction, so REPL state survives (see [Compaction](#compaction)).
 
 Inside the IPython session, a callable `rlm` is pre-injected into the namespace. When recursion is allowed, the model can call `await rlm(...)` to spawn sub-agents. Skills supplied by the host environment (see [Skills](#skills)) are importable directly by name, e.g. `import websearch`.
 
@@ -114,9 +114,11 @@ Recursive calls are created by a session-local supervisor rather than by the IPy
 
 ## Compaction
 
-There is no model-driven compaction tool. Compaction is automatic: set the policy's `summarize_at_tokens` and, once a turn's prompt token count reaches that threshold, the engine asks the model for a handoff summary and resumes the task on a fresh branch seeded with that summary. The original task prompt is dropped — the summary carries the goal forward.
+There is no model-driven compaction tool. Set the policy's `compaction` field to enable compaction. The engine reads the model context window from the provider's `/models` response and compacts when 16k tokens remain below it; small windows keep at least half. Set `summarize_at_tokens` to pin the threshold explicitly. Without a known window or explicit threshold, compaction stays off and an overflow propagates. A tool result larger than 20KB is truncated to its head and tail before it enters the conversation, with a warning naming the original size.
 
-The IPython kernel keeps running across the compaction, so all variables, imports, and in-memory data are preserved; the model is told to mention important variable names in its summary so the resumed branch knows what's available. With `summarize_at_tokens` unset, no auto-compaction occurs.
+The engine asks the model for a plain-text handoff summary and resumes the task on a fresh branch seeded with that summary; reasoning is never part of it. A provider overflow (a 400 or 413 naming a context limit) triggers the same compaction reactively from the current state. A rejected checkpoint request falls back to the last state that passed a threshold check - by definition a state with a full reserve of room - and an empty or tool-calling reply is resampled; after three failed attempts the run ends cleanly with what the conversation holds. An overflow with no history beyond the task propagates: the task alone approaches the window and there is nothing to reclaim.
+
+The IPython kernel keeps running across the compaction, so all variables, imports, and in-memory data are preserved. The model is told to mention important variable names in its summary so the resumed branch knows what is available. The same policy applies to the main agent and all recursive agents.
 
 ## Session Directory
 
@@ -255,4 +257,3 @@ Install dev dependencies and run the suite:
 uv sync --group dev
 uv run pytest tests/
 ```
-

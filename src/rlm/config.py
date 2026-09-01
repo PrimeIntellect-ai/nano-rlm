@@ -54,7 +54,8 @@ class ExecutionPolicy(_ConfigModel):
     max_depth: int = Field(default=1, ge=0)
     exec_timeout: int = Field(default=300, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
-    summarize_at_tokens: int | None = Field(default=256_000, gt=0)
+    compaction: bool = False
+    summarize_at_tokens: int | None = Field(default=None, gt=0)
     max_compactions: int | None = Field(default=None, gt=0)
     max_concurrent_subagents: int = Field(default=4, gt=0)
     max_subagent_calls: int = Field(default=64, gt=0)

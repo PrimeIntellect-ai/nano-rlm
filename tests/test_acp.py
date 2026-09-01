@@ -23,7 +23,12 @@ from rlm.acp import (
     RLMACPAgent,
 )
 from rlm.engine import RLMEngine
-from rlm.config import ExecutionPolicy, InvocationContext, ProviderConfig, RuntimeConfig
+from rlm.config import (
+    ExecutionPolicy,
+    InvocationContext,
+    ProviderConfig,
+    RuntimeConfig,
+)
 from rlm.mcp import MCPHTTPServer, MCPStdioServer
 from rlm.session import Session
 from rlm.types import RLMResult, TokenUsage
@@ -43,6 +48,7 @@ def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
             "max_depth": 0,
             "exec_timeout": 300,
             "max_tokens": None,
+            "compaction": False,
             "summarize_at_tokens": None,
             "max_compactions": None,
             "max_concurrent_subagents": 4,
@@ -140,6 +146,7 @@ class _Engine:
                 "max_concurrent_subagents": 4,
                 "max_subagent_calls": 64,
                 "max_tokens": None,
+                "compaction": False,
                 "summarize_at_tokens": None,
                 "max_compactions": None,
                 "allow_git": False,
@@ -318,7 +325,7 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
         model="test-model",
         provider=ProviderConfig(base_url=None, api_key="test-key"),
         invocation=InvocationContext(),
-        policy=ExecutionPolicy(summarize_at_tokens=1, max_depth=0),
+        policy=ExecutionPolicy(compaction=True, summarize_at_tokens=1, max_depth=0),
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
@@ -417,7 +424,7 @@ async def test_compaction_counts_seed_prompt(session):
     ]
 
     try:
-        await engine._compact_branch(messages, turn=0, active_tools=[])
+        await engine._compact_branch(messages, turn=0)
     finally:
         await engine.aclose()
 
@@ -479,7 +486,7 @@ async def test_failed_prompt_restores_pre_compaction_context(session):
         model="test-model",
         provider=ProviderConfig(base_url=None, api_key="test-key"),
         invocation=InvocationContext(),
-        policy=ExecutionPolicy(summarize_at_tokens=1),
+        policy=ExecutionPolicy(compaction=True, summarize_at_tokens=1),
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
@@ -822,6 +829,7 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
     agent = RLMACPAgent()
     agent.on_connect(_Client())  # type: ignore[arg-type]
     runtime_metadata = _runtime_metadata()
+    runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["compaction"] = True
     runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["summarize_at_tokens"] = 1
     created = await agent.new_session(str(tmp_path), **runtime_metadata)
 
