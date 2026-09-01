@@ -258,3 +258,75 @@ def test_fetch_tool_validates_args():
     assert tool.schema()["function"]["name"] == "fetch"
     assert tool.execute({}, None).content == "Error: url is required"
     assert "max_chars" in tool.execute({"url": "x.org", "max_chars": 0}, None).content
+
+
+def test_truncate_tool_output_budget_override():
+    """The policy byte budget drives the same mechanism as the built-in default."""
+    from rlm.compaction import truncate_tool_output
+
+    big = "line\n" * 10_000
+    tight = truncate_tool_output(big, max_bytes=1_000)
+    assert len(tight.encode()) < 1_500
+    assert "bytes truncated" in tight
+
+
+def test_new_tokens_excludes_cached_prompt():
+    from types import SimpleNamespace
+
+    from rlm.engine import _new_tokens
+    from rlm.types import TokenUsage
+
+    usage = TokenUsage(prompt_tokens=1000, completion_tokens=50)
+    cached = SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens_details=SimpleNamespace(cached_tokens=900))
+    )
+    assert _new_tokens(cached, usage) == 150
+    assert _new_tokens(SimpleNamespace(usage=None), usage) == 1050
+
+
+async def test_tree_token_budget_stops_engine(session):
+    """Once the live tree total crosses max_total_tokens, the next turn stops gracefully."""
+    from rlm.config import ExecutionPolicy
+
+    messages = [
+        DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
+        DummyMessage(content="never reached"),
+    ]
+    client = DummyClient(messages)
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=make_runtime_config(policy=ExecutionPolicy(max_total_tokens=1)),
+    )  # type: ignore
+
+    result = await engine.run("count things")
+
+    assert engine.stop_reason == "max_total_tokens"
+    assert len(client.calls) == 1
+    assert result.answer == "[token budget reached]"
+    assert result.turns == 1
+
+
+async def test_tree_turn_budget_stops_engine(session):
+    """Once the tree has spent max_total_turns work-loop calls, engines stop gracefully.
+    max_depth=0 means no supervisor exists: the engine-local counters must enforce it."""
+    from rlm.config import ExecutionPolicy
+
+    messages = [
+        DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
+        DummyMessage(content="never reached"),
+    ]
+    client = DummyClient(messages)
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=make_runtime_config(
+            policy=ExecutionPolicy(max_depth=0, max_total_turns=1)
+        ),
+    )  # type: ignore
+
+    result = await engine.run("count things")
+
+    assert engine.stop_reason == "max_total_turns"
+    assert len(client.calls) == 1
+    assert result.answer == "[turn budget reached]"

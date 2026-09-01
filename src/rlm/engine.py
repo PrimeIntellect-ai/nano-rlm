@@ -24,6 +24,7 @@ from rlm.client import (
 from rlm.compaction import (
     COMPACTION_ATTEMPTS,
     CHECKPOINT_PROMPT,
+    TOOL_OUTPUT_MAX_BYTES,
     CompactionFailed,
     REPL_NOTE,
     SUMMARY_FRAMING,
@@ -93,6 +94,23 @@ def _parse_tool_call_args(raw: str) -> tuple[dict | None, dict | None]:
     return args, None
 
 
+def _new_tokens(response, usage: TokenUsage) -> int:
+    """One call's contribution to the tree budget: completion + uncached prompt tokens.
+    The cached context prefix re-billed on every call is not new work; a provider that
+    reports no cache detail counts the full prompt (conservative)."""
+    details = getattr(getattr(response, "usage", None), "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", 0) or 0
+    return max(usage.prompt_tokens - cached, 0) + usage.completion_tokens
+
+
+def _last_assistant_text(messages: list[dict]) -> str:
+    """The most recent non-empty assistant content, for a graceful capped stop."""
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant" and msg.get("content"):
+            return msg["content"]
+    return ""
+
+
 class RLMEngine:
     def __init__(
         self,
@@ -119,6 +137,8 @@ class RLMEngine:
         self.model = config.model
         self.cwd = cwd or os.getcwd()
         self.exec_timeout = config.policy.exec_timeout
+        self.max_total_turns = config.policy.max_total_turns
+        self.max_tool_output_bytes = config.policy.max_tool_output_bytes
         self.compaction = config.policy.compaction
         self.summarize_at_tokens = config.policy.summarize_at_tokens
         self.max_compactions = config.policy.max_compactions
@@ -156,6 +176,12 @@ class RLMEngine:
         )
         self._owns_supervisor = False
         self._total_usage = TokenUsage()
+        # Engine-local tree-cap accounting. No supervisor exists when nothing needs
+        # brokering (max_depth=0, no MCP, no search); that session is a one-engine
+        # tree, so its own counters are the tree totals.
+        self._own_turns = 0
+        self._own_new_tokens = 0
+        self._last_handoff_summary: str | None = None
         self._last_prompt_tokens = 0
         self._last_good = 0
         """Message count of the newest state that passed a threshold check - by
@@ -385,8 +411,28 @@ class RLMEngine:
             raise RuntimeError("RLM engine is not started")
 
         final_text = ""
+        # Cap-stop salvage looks only at messages produced by THIS prompt, so a later
+        # prompt on an already-capped session can't replay a stale prior answer.
+        salvage_from = len(messages)
+        self._last_handoff_summary = None
 
         for turn in itertools.count(self._turn):
+            # Cap checks run before the turn is counted, so a capped stop reports the
+            # true number of model calls; the final answer falls back to this prompt's
+            # last assistant text, then a compaction handoff summary, then a marker —
+            # a capped sub-agent still hands its parent something.
+            if capped := self._spent_tree_cap():
+                self._metrics.stop_reason = capped
+                final_text = (
+                    _last_assistant_text(messages[salvage_from:])
+                    or self._last_handoff_summary
+                    or (
+                        "[turn budget reached]"
+                        if capped == "max_total_turns"
+                        else "[token budget reached]"
+                    )
+                )
+                break
             self._turn = turn + 1
             try:
                 response, usage = await self._complete(messages, turn)
@@ -535,7 +581,9 @@ class RLMEngine:
             result = tool_result.content
 
             self.session.log_tool_result(turn, tool_name, result, duration)
-            content = truncate_tool_output(result)
+            content = truncate_tool_output(
+                result, self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
+            )
             messages.append(
                 {
                     "role": "tool",
@@ -662,10 +710,31 @@ class RLMEngine:
             or self._metrics.num_compactions < self.max_compactions
         )
 
+    def _spent_tree_cap(self) -> str | None:
+        """The stop_reason of a spent tree budget, or None. Live supervisor totals
+        cover the whole tree; without a supervisor this engine is the whole tree."""
+        if self._supervisor is not None:
+            turns = self._supervisor.total_turns
+            tokens = self._supervisor.total_tokens
+        else:
+            turns = self._own_turns
+            tokens = self._own_new_tokens
+        if self.max_total_turns is not None and turns >= self.max_total_turns:
+            return "max_total_turns"
+        budget = self.runtime_config.policy.max_total_tokens
+        if budget is not None and tokens >= budget:
+            return "max_total_tokens"
+        return None
+
     def _should_compact(
         self, messages: list[dict], usage: TokenUsage, extra_text: str = ""
     ) -> bool:
         if self.summarize_at_tokens is None or not self._can_compact():
+            return False
+        # A spent tree cap stops the session next iteration: don't burn a model
+        # call summarizing a conversation that is about to end. (The reactive
+        # overflow path stays available - that call was already permitted.)
+        if self._spent_tree_cap() is not None:
             return False
         if not compactable(messages):
             return False
@@ -705,6 +774,15 @@ class RLMEngine:
         usage = extract_usage(response)
         self._total_usage.prompt_tokens += usage.prompt_tokens
         self._total_usage.completion_tokens += usage.completion_tokens
+        new_tokens = _new_tokens(response, usage)
+        self._own_new_tokens += new_tokens
+        if not checkpoint:
+            self._own_turns += 1
+        if self._supervisor is not None:
+            if checkpoint:
+                self._supervisor.record_usage(new_tokens)
+            else:
+                self._supervisor.record_call(new_tokens)
         if not checkpoint:
             self._last_prompt_tokens = usage.prompt_tokens
             self._last_call_id = request_id
@@ -829,6 +907,7 @@ class RLMEngine:
             raise
 
         system_msg = messages[0]
+        self._last_handoff_summary = summary_text
         compacted_user_content = SUMMARY_FRAMING + "\n\n" + summary_text
         messages[:] = [
             system_msg,

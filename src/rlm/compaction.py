@@ -131,12 +131,12 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
     return default_threshold(window) if window is not None else None
 
 
-def truncate_tool_output(text: str) -> str:
+def truncate_tool_output(text: str, max_bytes: int = TOOL_OUTPUT_MAX_BYTES) -> str:
     """Keep the head and tail of an oversized tool result and say what was cut."""
     data = text.encode("utf-8")
-    if len(data) <= TOOL_OUTPUT_MAX_BYTES:
+    if len(data) <= max_bytes:
         return text
-    keep = TOOL_OUTPUT_MAX_BYTES // 2
+    keep = max_bytes // 2
     head = data[:keep].decode("utf-8", errors="ignore")
     tail = data[-keep:].decode("utf-8", errors="ignore")
     return (
