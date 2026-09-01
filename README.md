@@ -4,7 +4,7 @@ A minimal CLI coding agent with a persistent IPython execution environment and o
 
 The model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, shell commands via `!command`, and multi-line shell scripts via `%%bash`. The tool set is not configurable. File edits, shell work, and orchestration all go through it.
 
-For convenience, rlm ships built-in *skills* that can be enabled per run via `RLM_SKILLS` (comma-separated, off by default): `edit` (single-occurrence string replacement) and `search` (web search via Serper, needs `SERPER_API_KEY`). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)` or `await search(query=...)`.
+For convenience, rlm ships built-in *skills* that can be enabled per run via `RLM_SKILLS` (comma-separated, off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via `RLM_BUILTIN_TOOLS`).
 
 Context is reclaimed automatically: when a turn's prompt token count crosses `RLM_SUMMARIZE_AT_TOKENS`, the engine compacts the conversation into a summary and continues on a fresh branch. The IPython kernel keeps running across the compaction, so REPL state survives (see [Compaction](#compaction)).
 
@@ -107,7 +107,7 @@ versioned contract described above.
 | `SERPER_API_KEY` | — | API key for the built-in `search` skill (Serper backend). Resolved by the supervisor and not copied into the kernel. |
 | `PRIME_API_KEY` | — | PI Inference pair: targets `https://api.pinference.ai/api/v1` and forwards `PRIME_TEAM_ID` as `X-Prime-Team-ID` when set. |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` | resolved at startup | OpenAI pair (covers OpenAI direct and verifiers' rollout tunnel). Provider precedence: explicit → PI → OpenAI. Keys are scoped to their own base URL so an `OPENAI_API_KEY` lying around can't leak to PI Inference. |
-| `RLM_SKILLS` | — | Comma-separated built-in skills to enable (`edit`, `search`); pre-imported into the kernel. Unknown names raise. See [Skills](#skills). |
+| `RLM_SKILLS` | — | Comma-separated built-in skills to enable (`edit`, `search`, `fetch`); pre-imported into the kernel. Unknown names raise. See [Skills](#skills). |
 | `RLM_MCP_CONFIG` | — | Standard `mcpServers` config (streamable HTTP or stdio); each server's tools become pre-imported IPython skills (`<server>_<tool>`). See [MCP tools as skills](#mcp-tools-as-skills). |
 | `RLM_KERNEL_ENV` | `{}` | JSON object of task variables explicitly passed to IPython and its subprocesses. Supervisor, provider, MCP, and broker configuration names are reserved. |
 | `RLM_MAX_DEPTH` | `0` | Max recursion depth (`0` means no sub-agents) |
