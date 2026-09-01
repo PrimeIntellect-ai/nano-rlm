@@ -170,6 +170,22 @@ def build_system_prompt(
     if active_tools:
         parts.extend(["", "Call at most one built-in tool per turn."])
 
+    active_tool_names = {tool.name for tool in active_tools}
+    if "bash" in active_tool_names:
+        parts.extend(
+            [
+                "",
+                "When you are confident the task is complete and verified, signal the"
+                " end of the rollout by issuing exactly one `bash` tool call with the"
+                " command:",
+                "",
+                '    echo "TASK_FINISHED"',
+                "",
+                "Emit no further tool calls or text after this. You cannot continue"
+                " working on this task after submitting.",
+            ]
+        )
+
     return "\n".join(parts)
 
 
