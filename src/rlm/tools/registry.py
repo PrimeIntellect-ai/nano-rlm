@@ -23,9 +23,11 @@ _TOOLS_BY_NAME: dict[str, BuiltinTool] = {
     "fetch": FetchTool(),
     "ipython": IpythonTool(),
 }
-# Stock tools: activated only via a preset or RLM_BUILTIN_TOOLS. Entries added at
-# runtime beyond these (test fixtures/extensions) auto-join the active set. `fetch`
-# is deliberately in no preset — a network-capable tool stays opt-in.
+# NOT an activation list — activation comes from the RLM_TOOLING preset or
+# RLM_BUILTIN_TOOLS. _STOCK only marks the shipped tools so they are excluded from
+# the extras rule below, which auto-activates entries registered at runtime (test
+# fixtures/extensions). A stock tool outside every preset (`fetch` — network-capable)
+# therefore runs only when RLM_BUILTIN_TOOLS names it.
 _STOCK = ("bash", "edit", "fetch", "ipython")
 
 
