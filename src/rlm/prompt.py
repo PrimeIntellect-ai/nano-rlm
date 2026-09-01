@@ -67,8 +67,8 @@ SEARCH_SKILL_PROMPT = (
 )
 FETCH_SKILL_PROMPT = (
     "To read a specific webpage, use the pre-imported async `fetch` skill: "
-    '`await fetch(url="...")` returns the webpage as cleaned text. Use it to open URLs '
-    "from `search` results."
+    '`await fetch(url="...")` returns the webpage as cleaned text. It can be used '
+    "to open URLs from `search` results."
 )
 
 # One curated line per built-in skill, appended generically for whatever is enabled.
