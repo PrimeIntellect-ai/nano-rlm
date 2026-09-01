@@ -193,12 +193,12 @@ class RLMEngine:
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
 
-        # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
-        # parse RLM_MCP_CONFIG (a standard mcpServers config).
+        # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
 
-        # Built-in skills (rlm.skills) to enable for this run, from RLM_SKILLS (comma-separated).
+        # Built-in skills and tool set for this run, from the runtime contract.
         self.skills = list(config.skills)
+        self.builtin_tools = config.builtin_tools
         self.kernel_env = dict(config.kernel_env)
         self.max_tokens = config.policy.max_tokens
 
@@ -407,7 +407,9 @@ class RLMEngine:
         try:
             self._repl.start()
 
-            self._active_tools = get_active_builtin_tools(self.exec_timeout)
+            self._active_tools = get_active_builtin_tools(
+                self.exec_timeout, self.builtin_tools
+            )
             self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
             system_prompt = self._load_system_prompt(self._active_tools)
 
@@ -530,7 +532,7 @@ class RLMEngine:
             tool_name = tc.function.name
             tool_args = parsed_args[0]
             t0 = time.time()
-            tool = get_builtin_tool(tool_name)
+            tool = get_builtin_tool(tool_name, self.builtin_tools)
             if tool is None:
                 tool_result = ToolOutcome(content=f"Error: unknown tool '{tool_name}'")
             else:

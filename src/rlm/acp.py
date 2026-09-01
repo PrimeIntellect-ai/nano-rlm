@@ -71,6 +71,7 @@ class _RuntimeMetadata(_ContractModel):
     system_prompt_path: str | None
     append_to_system_prompt: str | None
     skills: list[Annotated[str, Field(min_length=1)]]
+    builtin_tools: list[Annotated[str, Field(min_length=1)]] | None = None
     kernel_env: dict[str, str]
     search_api_key: str | None
 
@@ -201,6 +202,11 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
             system_prompt_path=payload.system_prompt_path,
             append_to_system_prompt=payload.append_to_system_prompt,
             skills=tuple(payload.skills),
+            builtin_tools=(
+                tuple(payload.builtin_tools)
+                if payload.builtin_tools is not None
+                else None
+            ),
             kernel_env=tuple(payload.kernel_env.items()),
             search_api_key=payload.search_api_key,
         ),

@@ -100,28 +100,20 @@ def test_ipython_kernel_does_not_inherit_parent_stdio(session, capfd):
     assert result.strip() == "4 14"
 
 
-def test_tooling_presets(monkeypatch):
-    from rlm.tools.registry import preset_skills, preset_tools
-
-    monkeypatch.delenv("RLM_TOOLING", raising=False)
-    assert preset_tools() == ("ipython",)
-    assert preset_skills() == ("bash", "edit")
-
-    monkeypatch.setenv("RLM_TOOLING", "dual")
-    assert preset_tools() == ("bash", "edit", "ipython")
-    assert preset_skills() == ("bash", "edit")
-
-    monkeypatch.setenv("RLM_TOOLING", "tools")
-    assert preset_skills() == ()
-
-    monkeypatch.setenv("RLM_TOOLING", "skills")
-    assert preset_tools() == ("ipython",)
-
-    monkeypatch.setenv("RLM_TOOLING", "bogus")
+def test_builtin_tools_selection():
     import pytest
 
-    with pytest.raises(ValueError):
-        preset_tools()
+    from rlm.tools.registry import get_active_builtin_tools
+
+    active = [tool.name for tool in get_active_builtin_tools(names=None)]
+    assert "ipython" in active
+    assert "bash" not in active  # stock tools activate only when named
+
+    names = ["bash", "edit", "ipython"]
+    assert [t.name for t in get_active_builtin_tools(names=names)] == names
+
+    with pytest.raises(ValueError, match="unknown tool"):
+        get_active_builtin_tools(names=["bogus"])
 
 
 def test_real_kernel_and_subprocess_receive_only_explicit_environment(
@@ -239,16 +231,13 @@ def test_truncate_tool_output_caps_and_reports():
     assert "Total output lines: 10001" in out
 
 
-def test_fetch_tool_is_opt_in(monkeypatch):
+def test_fetch_tool_is_opt_in():
     """fetch is registered but joins the active set only when named explicitly."""
     from rlm.tools.registry import get_active_builtin_tools
 
-    monkeypatch.delenv("RLM_BUILTIN_TOOLS", raising=False)
-    monkeypatch.delenv("RLM_TOOLING", raising=False)
     assert "fetch" not in [tool.name for tool in get_active_builtin_tools()]
-
-    monkeypatch.setenv("RLM_BUILTIN_TOOLS", "ipython,fetch")
-    assert [tool.name for tool in get_active_builtin_tools()] == ["ipython", "fetch"]
+    active = [t.name for t in get_active_builtin_tools(names=["ipython", "fetch"])]
+    assert active == ["ipython", "fetch"]
 
 
 def test_fetch_tool_validates_args():
