@@ -12,16 +12,21 @@ import os
 
 from rlm.tools.base import BuiltinTool
 from rlm.tools.bash import BashTool, EditTool
+from rlm.tools.fetch import FetchTool
 from rlm.tools.ipython import IpythonTool
 
 # All registered tools by name. Tests (and extensions) may add entries; names
-# listed in RLM_BUILTIN_TOOLS or the default set become active.
+# listed in RLM_BUILTIN_TOOLS or the active preset become active.
 _TOOLS_BY_NAME: dict[str, BuiltinTool] = {
     "bash": BashTool(),
     "edit": EditTool(),
+    "fetch": FetchTool(),
     "ipython": IpythonTool(),
 }
-_DEFAULT = ("bash", "edit", "ipython")
+# Stock tools: activated only via a preset or RLM_BUILTIN_TOOLS. Entries added at
+# runtime beyond these (test fixtures/extensions) auto-join the active set. `fetch`
+# is deliberately in no preset — a network-capable tool stays opt-in.
+_STOCK = ("bash", "edit", "fetch", "ipython")
 
 
 _TOOLING_PRESETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
@@ -64,7 +69,7 @@ def _selected() -> tuple[BuiltinTool, ...]:
     # default: the RLM_TOOLING preset's tools plus any extra registered tools
     # (fixtures/extensions).
     preset = preset_tools()
-    extras = [n for n in _TOOLS_BY_NAME if n not in _DEFAULT]
+    extras = [n for n in _TOOLS_BY_NAME if n not in _STOCK]
     return tuple(_TOOLS_BY_NAME[n] for n in [*preset, *extras])
 
 

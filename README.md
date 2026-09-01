@@ -4,7 +4,7 @@ A minimal CLI coding agent with a persistent IPython execution environment and o
 
 The model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, shell commands via `!command`, and multi-line shell scripts via `%%bash`. The tool set is not configurable. File edits, shell work, and orchestration all go through it.
 
-For convenience, rlm ships built-in *skills* that can be enabled per run via `RLM_SKILLS` (comma-separated, off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`.
+For convenience, rlm ships built-in *skills* that can be enabled per run via `RLM_SKILLS` (comma-separated, off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via `RLM_BUILTIN_TOOLS`).
 
 Context is reclaimed automatically: when a turn's prompt token count crosses `RLM_SUMMARIZE_AT_TOKENS`, the engine compacts the conversation into a summary and continues on a fresh branch. The IPython kernel keeps running across the compaction, so REPL state survives (see [Compaction](#compaction)).
 

@@ -230,3 +230,24 @@ def test_truncate_tool_output_caps_and_reports():
     assert out.startswith("Warning: truncated output")
     assert "bytes truncated" in out
     assert "Total output lines: 10001" in out
+
+
+def test_fetch_tool_is_opt_in(monkeypatch):
+    """fetch is registered but joins the active set only when named explicitly."""
+    from rlm.tools.registry import get_active_builtin_tools
+
+    monkeypatch.delenv("RLM_BUILTIN_TOOLS", raising=False)
+    monkeypatch.delenv("RLM_TOOLING", raising=False)
+    assert "fetch" not in [tool.name for tool in get_active_builtin_tools()]
+
+    monkeypatch.setenv("RLM_BUILTIN_TOOLS", "ipython,fetch")
+    assert [tool.name for tool in get_active_builtin_tools()] == ["ipython", "fetch"]
+
+
+def test_fetch_tool_validates_args():
+    from rlm.tools.fetch import FetchTool
+
+    tool = FetchTool()
+    assert tool.schema()["function"]["name"] == "fetch"
+    assert tool.execute({}, None).content == "Error: url is required"
+    assert "max_chars" in tool.execute({"url": "x.org", "max_chars": 0}, None).content
