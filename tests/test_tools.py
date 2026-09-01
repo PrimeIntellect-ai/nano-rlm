@@ -12,6 +12,7 @@ from conftest import (
     DummyClient,
     DummyMessage,
     DummyToolCall,
+    make_runtime_config,
     show_tool_result,
     tool_result,
 )
@@ -29,7 +30,9 @@ async def test_valid_tool(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     result = await engine.run(prompt)
 
@@ -53,7 +56,9 @@ async def test_multiple_tool_calls(session):
     ]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     await engine.run(prompt)
 
@@ -67,7 +72,9 @@ async def test_tool_raises(session):
     messages = [DummyMessage(tool_calls=[DummyToolCall("boom", {})])]
 
     client = DummyClient(messages)
-    engine = RLMEngine(client=client, session=session)  # type: ignore
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
 
     with pytest.raises(RuntimeError, match="boom"):
         await engine.run(prompt)
@@ -230,3 +237,24 @@ def test_truncate_tool_output_caps_and_reports():
     assert out.startswith("Warning: truncated output")
     assert "bytes truncated" in out
     assert "Total output lines: 10001" in out
+
+
+def test_fetch_tool_is_opt_in(monkeypatch):
+    """fetch is registered but joins the active set only when named explicitly."""
+    from rlm.tools.registry import get_active_builtin_tools
+
+    monkeypatch.delenv("RLM_BUILTIN_TOOLS", raising=False)
+    monkeypatch.delenv("RLM_TOOLING", raising=False)
+    assert "fetch" not in [tool.name for tool in get_active_builtin_tools()]
+
+    monkeypatch.setenv("RLM_BUILTIN_TOOLS", "ipython,fetch")
+    assert [tool.name for tool in get_active_builtin_tools()] == ["ipython", "fetch"]
+
+
+def test_fetch_tool_validates_args():
+    from rlm.tools.fetch import FetchTool
+
+    tool = FetchTool()
+    assert tool.schema()["function"]["name"] == "fetch"
+    assert tool.execute({}, None).content == "Error: url is required"
+    assert "max_chars" in tool.execute({"url": "x.org", "max_chars": 0}, None).content

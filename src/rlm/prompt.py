@@ -43,6 +43,17 @@ IPYTHON_CONTROL_PROMPT = (
     "Run shell commands with `%%bash` as the very first line of a code cell "
     "(no comments, imports, or statements before it). " + PROJECT_ENV_PROMPT
 )
+BASH_SKILL_PROMPT = (
+    "Run shell with `out = await bash('''command here''')` — always "
+    "triple-quote the command so shell quotes and multi-line scripts never "
+    "need escaping. It returns the output as a string; no need for "
+    "`subprocess` or `%%bash`. Chain related commands with && in one call."
+)
+BASH_SKILL_WITH_TOOL_PROMPT = (
+    "Inside ipython you can also run shell with `await bash(command=...)` — "
+    "it returns the output as a string, useful when mixing shell and Python "
+    "in one cell or avoiding shell quoting."
+)
 EDIT_SKILL_PROMPT = (
     "Inside ipython you can also edit files with the pre-imported async `edit` "
     'skill: `await edit(path="pkg/file.py", old_str=..., new_str=...)` — handy '
@@ -54,6 +65,19 @@ SEARCH_SKILL_PROMPT = (
     "assign the result to a variable so you can revisit it. To cover "
     "several angles at once, fan out with `asyncio.gather(search(...), search(...))`."
 )
+FETCH_SKILL_PROMPT = (
+    "To read a specific webpage, use the pre-imported async `fetch` skill: "
+    '`await fetch(url="...")` returns the webpage as cleaned text. It can be used '
+    "to open URLs from `search` results."
+)
+
+# One curated line per built-in skill, appended generically for whatever is enabled.
+BUILTIN_SKILL_PROMPTS: dict[str, str] = {
+    "bash": BASH_SKILL_PROMPT,
+    "edit": EDIT_SKILL_PROMPT,
+    "search": SEARCH_SKILL_PROMPT,
+    "fetch": FETCH_SKILL_PROMPT,
+}
 
 
 def build_system_prompt(
@@ -120,23 +144,9 @@ def build_system_prompt(
             )
         else:
             skill_lines.append("The listed skills are IPython-only.")
-        if "bash" in installed_skills and _has_tool(active_tools, "bash"):
-            skill_lines.append(
-                "Inside ipython you can also run shell with `await bash(command=...)` — "
-                "it returns the output as a string, useful when mixing shell and Python "
-                "in one cell or avoiding shell quoting."
-            )
-        elif "bash" in installed_skills:
-            skill_lines.append(
-                "Run shell with `out = await bash('''command here''')` — always "
-                "triple-quote the command so shell quotes and multi-line scripts never "
-                "need escaping. It returns the output as a string; no need for "
-                "`subprocess` or `%%bash`. Chain related commands with && in one call."
-            )
-        if "edit" in installed_skills:
-            skill_lines.append(EDIT_SKILL_PROMPT)
-        if "search" in installed_skills:
-            skill_lines.append(SEARCH_SKILL_PROMPT)
+        for name in installed_skills:
+            if prompt := _builtin_skill_prompt(name, active_tools):
+                skill_lines.append(prompt)
     if skill_lines:
         parts.extend(["", *skill_lines])
 
@@ -169,6 +179,15 @@ def _should_include_git_history_guard(
     if allow_git:
         return False
     return any(tool.name in SHELL_TOOL_NAMES for tool in active_tools)
+
+
+def _builtin_skill_prompt(name: str, active_tools: list["BuiltinTool"]) -> str | None:
+    """The curated line for one enabled built-in skill (None for uploaded skills).
+    `bash` swaps its guidance when the native bash tool is also active — the skill
+    is then the secondary shell path."""
+    if name == "bash" and _has_tool(active_tools, "bash"):
+        return BASH_SKILL_WITH_TOOL_PROMPT
+    return BUILTIN_SKILL_PROMPTS.get(name)
 
 
 def _has_tool(active_tools: list["BuiltinTool"], name: str) -> bool:

@@ -14,7 +14,7 @@ from acp import PROTOCOL_VERSION, RequestError, spawn_agent_process, text_block
 from acp.schema import EnvVariable, HttpHeader, HttpMcpServer, McpServerStdio
 import pytest
 
-from conftest import DummyClient, DummyMessage, DummyToolCall
+from conftest import DummyClient, DummyMessage, DummyToolCall, make_runtime_config
 from rlm.acp import (
     ACP_SEMANTIC_EDGES_METADATA_KEY,
     CONTRACT_METADATA_KEY,
@@ -159,7 +159,9 @@ async def test_engine_prompt_preserves_conversation(session):
     client = DummyClient(
         [DummyMessage(content="first"), DummyMessage(content="second")]
     )
-    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore[arg-type]
 
     try:
         first = await engine.prompt("one")
@@ -245,7 +247,9 @@ async def test_engine_prompt_preserves_ipython_kernel(session):
             DummyMessage(content="done"),
         ]
     )
-    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore[arg-type]
 
     try:
         await engine.prompt("remember a value")
@@ -273,7 +277,9 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
         return await create(**kwargs)
 
     client.create = block_first_prompt
-    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore[arg-type]
 
     pending = asyncio.create_task(engine.prompt("cancel me"))
     await prompt_started.wait()
@@ -363,7 +369,9 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
 
 async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
     client = DummyClient([DummyMessage(content="first")])
-    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore[arg-type]
     await engine.prompt("one")
 
     prompt_started = asyncio.Event()
@@ -385,11 +393,16 @@ async def test_latest_cancelled_prompt_does_not_finalize_prior_result(session):
     assert "answer_preview" not in meta
 
 
-async def test_depth_limit_is_a_completed_result(monkeypatch, session):
-    monkeypatch.setenv("RLM_DEPTH", "1")
-    monkeypatch.setenv("RLM_MAX_DEPTH", "0")
+async def test_depth_limit_is_a_completed_result(session):
     client = DummyClient([])
-    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=make_runtime_config(
+            invocation=InvocationContext(depth=1),
+            policy=ExecutionPolicy(max_depth=0),
+        ),
+    )  # type: ignore[arg-type]
 
     result = await engine.run("too deep")
 
@@ -401,7 +414,9 @@ async def test_depth_limit_is_a_completed_result(monkeypatch, session):
 
 async def test_compaction_counts_seed_prompt(session):
     client = DummyClient([DummyMessage(content="summary")])
-    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore[arg-type]
     messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "original prompt"},
@@ -424,7 +439,9 @@ async def test_engine_failed_prompt_can_be_retried(session):
             DummyMessage(content="continued"),
         ]
     )
-    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore[arg-type]
 
     with pytest.raises(RuntimeError, match="boom"):
         await engine.prompt("fail")
@@ -537,7 +554,9 @@ async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
             DummyMessage(content="continued"),
         ]
     )
-    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore[arg-type]
     repl = FakeREPL()
     engine._started = True
     engine._messages = [{"role": "system", "content": "system"}]
@@ -592,7 +611,9 @@ async def test_engine_cancelled_tool_recovers_kernel(session, tmp_path):
             DummyMessage(content="continued"),
         ]
     )
-    engine = RLMEngine(client=client, session=session)  # type: ignore[arg-type]
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore[arg-type]
 
     pending = asyncio.create_task(engine.prompt("cancel the tool"))
     for _ in range(100):
@@ -671,6 +692,7 @@ async def test_engine_failed_start_publishes_no_semantic_edge(monkeypatch, sessi
     engine = RLMEngine(
         client=DummyClient([]),  # type: ignore[arg-type]
         session=session,
+        runtime_config=make_runtime_config(),
     )
 
     async def fail_start(prompt: str) -> None:

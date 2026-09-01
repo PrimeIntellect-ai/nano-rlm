@@ -4,9 +4,9 @@ A minimal CLI coding agent with a persistent IPython execution environment and o
 
 The model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, shell commands via `!command`, and multi-line shell scripts via `%%bash`. The tool set is not configurable. File edits, shell work, and orchestration all go through it.
 
-For convenience, rlm ships built-in *skills* that can be enabled per run via `RLM_SKILLS` (comma-separated, off by default): `edit` (single-occurrence string replacement) and `search` (web search via Serper, needs `SERPER_API_KEY`). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)` or `await search(query=...)`.
+For convenience, rlm ships built-in *skills* that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via `RLM_BUILTIN_TOOLS`).
 
-Context compaction is optional. When enabled, the engine compacts when 16k tokens remain below the model context window when the provider advertises it. `RLM_SUMMARIZE_AT_TOKENS` sets an explicit threshold. The IPython kernel keeps running across compaction, so REPL state survives (see [Compaction](#compaction)).
+Context compaction is optional. When enabled, the engine compacts when 16k tokens remain below an advertised model context window. The policy can set an explicit `summarize_at_tokens` threshold. The IPython kernel keeps running across compaction, so REPL state survives (see [Compaction](#compaction)).
 
 Inside the IPython session, a callable `rlm` is pre-injected into the namespace. When recursion is allowed, the model can call `await rlm(...)` to spawn sub-agents. Skills supplied by the host environment (see [Skills](#skills)) are importable directly by name, e.g. `import websearch`.
 
@@ -21,29 +21,18 @@ source .venv/bin/activate
 
 ## CLI
 
-```bash
-rlm "fix the auth bug in login.py"
-
-# Override model
-RLM_MODEL=openai/gpt-5-mini rlm "refactor the parser"
-
-# Append extra instructions to the generated system prompt
-RLM_APPEND_TO_SYSTEM_PROMPT="Always run tests before finishing." rlm "solve the task"
-
-# Replace the generated system prompt from a file
-RLM_SYSTEM_PROMPT_PATH=/tmp/system.txt rlm "solve the task"
-```
-
-Skill CLIs provided by the host environment are on `$PATH` and invoked the same way (e.g. `websearch --queries "latest jupyter_client release"` when the `websearch` skill is installed).
-
-## Agent Client Protocol
-
-RLM can run as an [Agent Client Protocol](https://agentclientprotocol.com/)
-agent over stdio:
+rlm runs exclusively as an [Agent Client Protocol](https://agentclientprotocol.com/) agent:
 
 ```bash
 rlm --acp
 ```
+
+There is no standalone prompt mode: every session is created by an ACP client that
+supplies the full runtime configuration (see below). Skill CLIs provided by the host
+environment are on `$PATH` inside the kernel (e.g. `websearch --queries "..."` when
+the `websearch` skill is installed).
+
+## Agent Client Protocol
 
 Each ACP session owns one persistent RLM engine. Repeated `session/prompt`
 requests retain both the model conversation and the live IPython kernel. The
@@ -54,8 +43,7 @@ not advertise `session/load`: an arbitrary live Python kernel cannot be
 reconstructed after the ACP process exits, so clients must keep the process
 alive for the lifetime of a session.
 
-RLM's ACP surface is a versioned training contract, not a compatibility layer
-over the standalone CLI. `initialize` advertises the exact
+RLM's ACP surface is a versioned training contract. `initialize` advertises the exact
 `ai.prime.rlm/contract-v1` marker in its response `_meta`; clients must require
 it, then provide one complete `ai.prime.rlm/runtime-v1` object in
 `session/new._meta`. The runtime object contains the ACP session ID, model,
@@ -84,45 +72,24 @@ order even when a consumer's physical token-prefix graph splits. ACP consumers
 can resolve the request IDs onto their own message nodes while harnesses that do
 not understand the extension ignore it.
 
-## Python SDK
+## Python API (inside a session)
 
-```python
-import asyncio
-import rlm
+Inside a running session's IPython kernel, `rlm.run("sub-task")` (or the pre-injected
+`rlm(...)` callable) spawns a recursive sub-agent through the session's broker. There is
+no standalone entry point: outside a session the call raises.
 
-result = asyncio.run(rlm.run("fix the bug"))
-```
+## Configuration
 
-## Standalone configuration
+All runtime configuration enters through the `ai.prime.rlm/runtime-v1` contract object
+(model, provider credentials, execution policy, prompt configuration, skills, kernel
+environment, search credential). Recursive children inherit the parent's configuration
+in-memory (`model_copy`); nothing is re-read from the process environment.
 
-The CLI and Python API resolve standalone configuration from environment
-variables. ACP sessions ignore these runtime fields and require the explicit
-versioned contract described above.
+The process environment configures only process infrastructure:
 
 | Variable | Default | Description |
 | ---------- | --------- | ------------- |
 | `RLM_HOME` | `~/.rlm` | Root directory for sessions and data |
-| `RLM_MODEL` | `openai/gpt-5-mini` | Model name (PI Inference slug). Override with `--model` or `RLM_MODEL` for OpenAI/Anthropic direct (e.g. `gpt-4o`, `claude-sonnet-4-5`) |
-| `RLM_API_KEY` / `RLM_BASE_URL` | — / SDK default (`https://api.openai.com/v1`) | Explicit override (highest priority). Independent: setting `RLM_API_KEY` alone targets the SDK default endpoint; set `RLM_BASE_URL` too for a custom endpoint. For PI, use `PRIME_API_KEY` (below) which owns the full pair. |
-| `SERPER_API_KEY` | — | API key for the built-in `search` skill (Serper backend). Resolved by the supervisor and not copied into the kernel. |
-| `PRIME_API_KEY` | — | PI Inference pair: targets `https://api.pinference.ai/api/v1` and forwards `PRIME_TEAM_ID` as `X-Prime-Team-ID` when set. |
-| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | resolved at startup | OpenAI pair (covers OpenAI direct and verifiers' rollout tunnel). Provider precedence: explicit → PI → OpenAI. Keys are scoped to their own base URL so an `OPENAI_API_KEY` lying around can't leak to PI Inference. |
-| `RLM_SKILLS` | — | Comma-separated built-in skills to enable (`edit`, `search`); pre-imported into the kernel. Unknown names raise. See [Skills](#skills). |
-| `RLM_MCP_CONFIG` | — | Standard `mcpServers` config (streamable HTTP or stdio); each server's tools become pre-imported IPython skills (`<server>_<tool>`). See [MCP tools as skills](#mcp-tools-as-skills). |
-| `RLM_KERNEL_ENV` | `{}` | JSON object of task variables explicitly passed to IPython and its subprocesses. Supervisor, provider, MCP, and broker configuration names are reserved. |
-| `RLM_MAX_DEPTH` | `0` | Max recursion depth (`0` means no sub-agents) |
-| `RLM_MAX_CONCURRENT_SUBAGENTS` | `max(4, RLM_MAX_DEPTH)` | Maximum live recursive agents in a session tree. Capacity is reserved per depth to prevent nested-call deadlocks. |
-| `RLM_MAX_SUBAGENT_CALLS` | `64` | Maximum accepted recursive calls across the complete session tree. |
-| `RLM_EXEC_TIMEOUT` | `300` | Seconds per IPython execution |
-| `RLM_COMPACTION` | — | Set to `1` to enable context compaction. |
-| `RLM_SUMMARIZE_AT_TOKENS` | — | Proactive compaction threshold for the current prompt, completion, and pending tool result. Setting it also enables compaction. When unset, enabled compaction uses 90% of an advertised context window. |
-| `RLM_MAX_TOKENS` | `0` | Optional completion-token budget (`0` disables) |
-| `RLM_APPEND_TO_SYSTEM_PROMPT` | — | Extra instructions appended to the generated system prompt |
-| `RLM_SYSTEM_PROMPT_PATH` | — | Path to a file whose contents fully replace the generated system prompt |
-| `RLM_ALLOW_GIT` | — | Set to `1` to disable the restricted git-history guard. When unset, shell-capable prompts tell agents not to use task-specific online hints or solutions from other git history, and broad-history `git log` options such as `--all` are refused. |
-| `RLM_SDK_MAX_RETRIES` | `5` | Per-request retry count passed to the OpenAI SDK (in addition to the call-site retry wrapper that rides out longer outages). |
-
-`RLM_SYSTEM_PROMPT_PATH` takes precedence over `RLM_APPEND_TO_SYSTEM_PROMPT`. CLI flags override env vars: `rlm --model gpt-5-mini --append-to-system-prompt "..." --system-prompt-path /tmp/system.txt "prompt"`.
 
 ## Recursion
 
@@ -147,7 +114,7 @@ Recursive calls are created by a session-local supervisor rather than by the IPy
 
 ## Compaction
 
-There is no model-driven compaction tool. Set `RLM_COMPACTION=1` to enable compaction. The engine reads the model context window from the provider's `/models` response and compacts when 16k tokens remain below it (small windows keep at least half). Set `RLM_SUMMARIZE_AT_TOKENS` to pin the threshold explicitly. Without a known window or explicit threshold, compaction stays off and an overflow propagates. A tool result larger than 20KB is truncated to its head and tail before it enters the conversation, with a warning naming the original size.
+There is no model-driven compaction tool. Set the policy's `compaction` field to enable compaction. The engine reads the model context window from the provider's `/models` response and compacts when 16k tokens remain below it; small windows keep at least half. Set `summarize_at_tokens` to pin the threshold explicitly. Without a known window or explicit threshold, compaction stays off and an overflow propagates. A tool result larger than 20KB is truncated to its head and tail before it enters the conversation, with a warning naming the original size.
 
 The engine asks the model for a plain-text handoff summary and resumes the task on a fresh branch seeded with that summary; reasoning is never part of it. A provider overflow (a 400 or 413 naming a context limit) triggers the same compaction reactively from the current state. A rejected checkpoint request falls back to the last state that passed a threshold check - by definition a state with a full reserve of room - and an empty or tool-calling reply is resampled; after three failed attempts the run ends cleanly with what the conversation holds. An overflow with no history beyond the task propagates: the task alone approaches the window and there is nothing to reclaim.
 
@@ -172,7 +139,7 @@ These artifacts are consumable for debugging, visualization, or training-data ex
 
 ## Skills
 
-`rlm` ships a small set of built-in skills enabled per run via `RLM_SKILLS` (`edit`, `search`; see [MCP tools as skills](#mcp-tools-as-skills) for the related MCP path). `edit` runs in the kernel. Credentialed `search` runs in the supervisor through the capability broker, so `SERPER_API_KEY` is unavailable to IPython and its subprocesses; it returns title/URL/snippet for a single query (`await search(query="...")`). Additional skills are supplied by the host environment: before `install.sh` runs, the environment places skill packages under `/task/rlm-skills/<name>/`, and `install.sh` installs them alongside `rlm` so they're both importable and on `$PATH`.
+`rlm` ships a small set of built-in skills enabled per session via the runtime contract's `skills` list (`edit`, `search`, `fetch`; see [MCP tools as skills](#mcp-tools-as-skills) for the related MCP path). `edit` runs in the kernel. Credentialed `search` runs in the supervisor through the capability broker, so `SERPER_API_KEY` is unavailable to IPython and its subprocesses; it returns title/URL/snippet for a single query (`await search(query="...")`). Additional skills are supplied by the host environment: before `install.sh` runs, the environment places skill packages under `/task/rlm-skills/<name>/`, and `install.sh` installs them alongside `rlm` so they're both importable and on `$PATH`.
 
 From IPython, import a skill and call its async `run(...)` entrypoint:
 
@@ -233,7 +200,7 @@ For running `rlm` against a specific skill set outside of a sandbox-orchestrated
 
 ### MCP tools as skills
 
-A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) tool servers to `rlm` by setting `RLM_MCP_CONFIG` to a standard `mcpServers` config. Streamable HTTP and stdio transports are supported:
+A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) tool servers to `rlm` through the ACP session (a standard `mcpServers` config shape). Streamable HTTP and stdio transports are supported:
 
 ```json
 {
@@ -248,7 +215,7 @@ A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) too
 }
 ```
 
-Programmatically, pass `mcp_servers={"tools": "http://127.0.0.1:8000/mcp"}` to `RLMEngine` / `rlm.run` instead (it takes precedence over `RLM_MCP_CONFIG`). An HTTP server may instead be `{"url": "...", "headers": {"Authorization": "..."}}` when it needs request headers; stdio servers use the same `command` / `args` / `env` shape shown above.
+Programmatically, pass `mcp_servers={"tools": "http://127.0.0.1:8000/mcp"}` to `RLMEngine`. An HTTP server may instead be `{"url": "...", "headers": {"Authorization": "..."}}` when it needs request headers; stdio servers use the same `command` / `args` / `env` shape shown above.
 
 At startup `rlm` connects to each server, lists its tools, and generates one skill per tool (named `<server>_<tool>`, e.g. `tools_add_event`). These join the installed skills — pre-imported into the IPython namespace as async functions the agent calls programmatically, with a signature built from the tool's input schema:
 
@@ -263,7 +230,7 @@ Each call connects using the configured transport, invokes the tool, and returns
 
 The IPython kernel always runs in rlm's own Python (`sys.executable`). `install.sh` puts `rlm` and all discovered skills into the same `uv tool install` environment, so `from rlm import run`, `import edit`, etc. work natively from inside an IPython cell.
 
-The kernel starts from a small platform environment (`PATH`, home/user/shell, locale, temporary-directory, certificate, and virtual-environment variables) plus the explicit `RLM_KERNEL_ENV` mapping. It receives private Jupyter/IPython config directories and does not inherit the rest of the supervisor process environment. This de-ambients credentials; it is not hostile-code containment because the kernel still shares the sandbox user, filesystem, process namespace, and network with the supervisor.
+The kernel starts from a small platform environment (`PATH`, home/user/shell, locale, temporary-directory, certificate, and virtual-environment variables) plus the contract's explicit `kernel_env` mapping. It receives private Jupyter/IPython config directories and does not inherit the rest of the supervisor process environment. This de-ambients credentials; it is not hostile-code containment because the kernel still shares the sandbox user, filesystem, process namespace, and network with the supervisor.
 
 To exercise packages from the target project's `.venv` (e.g. running its test suite), shell out from an IPython cell: `!./.venv/bin/python3 -m pytest`. The kernel itself stays isolated from whatever project venv the agent is working on — no cross-cell state involving sandbox packages.
 
@@ -290,7 +257,3 @@ Install dev dependencies and run the suite:
 uv sync --group dev
 uv run pytest tests/
 ```
-
-## Interactive Mode
-
-Running `rlm` with no prompts enters a placeholder interactive mode. The TUI is not implemented yet.
