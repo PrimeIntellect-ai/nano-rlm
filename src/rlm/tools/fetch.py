@@ -2,8 +2,9 @@
 
 Tool twin of the ``fetch`` skill (``rlm.skills.fetch``): same cleaning, truncation,
 and error semantics, exposed as a native tool call instead of a REPL function.
-Opt-in: registered but in no tooling preset, so it runs only when named in
-``RLM_BUILTIN_TOOLS`` — a network-capable tool stays off by default.
+Opt-in: outside the default tool set, so it runs only when the runtime
+contract's ``builtin_tools`` names it — a network-capable tool stays off by
+default.
 """
 
 from __future__ import annotations

@@ -106,6 +106,9 @@ class RuntimeConfig(_ConfigModel):
     subagent_append_to_system_prompt: str | None = None
     leaf_append_to_system_prompt: str | None = None
     skills: tuple[str, ...] = ()
+    builtin_tools: tuple[str, ...] | None = None
+    """Builtin tool set for every engine in the tree; None = the registry default
+    (`ipython` alone). Validated against the registry when the engine starts."""
     kernel_env: tuple[tuple[str, str], ...] = Field(default=(), repr=False)
     search_api_key: str | None = Field(default=None, repr=False)
 
