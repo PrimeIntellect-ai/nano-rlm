@@ -70,6 +70,8 @@ class _RuntimeMetadata(_ContractModel):
     policy: ExecutionPolicy
     system_prompt_path: str | None
     append_to_system_prompt: str | None
+    subagent_append_to_system_prompt: str | None = None
+    leaf_append_to_system_prompt: str | None = None
     skills: list[Annotated[str, Field(min_length=1)]]
     kernel_env: dict[str, str]
     search_api_key: str | None
@@ -201,6 +203,8 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
             policy=payload.policy,
             system_prompt_path=payload.system_prompt_path,
             append_to_system_prompt=payload.append_to_system_prompt,
+            subagent_append_to_system_prompt=payload.subagent_append_to_system_prompt,
+            leaf_append_to_system_prompt=payload.leaf_append_to_system_prompt,
             skills=tuple(payload.skills),
             kernel_env=tuple(payload.kernel_env.items()),
             search_api_key=payload.search_api_key,

@@ -43,6 +43,11 @@ IPYTHON_CONTROL_PROMPT = (
     "Run shell commands with `%%bash` as the very first line of a code cell "
     "(no comments, imports, or statements before it). " + PROJECT_ENV_PROMPT
 )
+KERNEL_PACKAGES_PROMPT = (
+    "Pre-installed in the kernel venv: " + ", ".join(BASE_TOOLKIT) + ". "
+    "Install extra packages with `!uv pip install <pkg>` in a code cell — that "
+    "targets the kernel venv (a uv-managed venv with no pip module)."
+)
 BASH_SKILL_PROMPT = (
     "Run shell with `out = await bash('''command here''')` — always "
     "triple-quote the command so shell quotes and multi-line scripts never "
@@ -85,6 +90,8 @@ def build_system_prompt(
     skills_dir: str | None,
     installed_skills: list[str],
     *,
+    depth: int = 0,
+    session_dir: str | None = None,
     allow_recursion: bool,
     allow_git: bool,
     active_tools: list[BuiltinTool],
@@ -92,15 +99,22 @@ def build_system_prompt(
 ) -> str:
     """Build the system prompt.
 
-    Layout: role → environment (cwd, log path, skills) → capabilities
-    (recursion) → tool API. Keep it tight: the model also receives the
-    per-tool schemas, so redundant tool guidance here just inflates
+    Layout: role → environment (cwd, log path, skills, kernel venv) →
+    capabilities (recursion) → guards. Keep it tight: the model also receives
+    the per-tool schemas, so redundant tool guidance here just inflates
     every request.
     """
     has_bash = _has_tool(active_tools, "bash")
     has_edit = _has_tool(active_tools, "edit")
     has_ipython = _has_tool(active_tools, "ipython")
-    role = "You are a coding agent."
+    if depth > 0:
+        role = (
+            "You are a coding agent, spawned as a sub-agent: your caller "
+            "delegated a single task to you and sees none of your work. Do "
+            "exactly that task; don't widen the scope."
+        )
+    else:
+        role = "You are a coding agent."
     if has_bash:
         role += " You have access to a bash tool for running shell commands."
     if has_edit:
@@ -113,14 +127,22 @@ def build_system_prompt(
             " You also have an ipython tool: a persistent Python REPL "
             "(variables, imports, and function definitions persist across calls)."
         )
+    if depth > 0:
+        done_line = (
+            "When the task is done, stop calling tools and state your final "
+            "answer. It is the only thing your caller receives, so make it a "
+            "complete, self-contained result — the answer plus the evidence "
+            "needed to trust it (sources, file paths, values)."
+        )
+    else:
+        done_line = "When you are done, stop calling tools and state your final answer."
+    log_dir = session_dir or "$RLM_SESSION_DIR"
     parts: list[str] = [
         role,
-        "When you are done, stop calling tools and state your final answer.",
+        done_line,
         "",
         f"Working directory: {cwd}",
-        "Conversation log: $RLM_SESSION_DIR/messages.jsonl",
-        f"Pre-installed Python packages: {', '.join(BASE_TOOLKIT)}.",
-        "Install additional packages with `uv pip install <pkg>` (this is a uv-managed venv with no pip module).",
+        f"Conversation log: {log_dir}/messages.jsonl",
     ]
 
     skill_lines: list[str] = []
@@ -132,8 +154,8 @@ def build_system_prompt(
         installed = ", ".join(f"`{skill}`" for skill in installed_skills)
         skill_lines.append(f"Installed skills (pre-imported): {installed}.")
         skill_lines.append(
-            "Each skill is an async function by the same name. "
-            "Inspect with `help(<skill>)` or `inspect.signature(<skill>.run)`."
+            "Each skill is an async function by the same name; "
+            "inspect one with `help(<skill>)`."
         )
         shell_skill_set = set(shell_skills or [])
         if shell_skill_set:
@@ -150,6 +172,11 @@ def build_system_prompt(
     if skill_lines:
         parts.extend(["", *skill_lines])
 
+    if has_ipython and not has_bash and "bash" not in (installed_skills or []):
+        parts.extend(["", IPYTHON_CONTROL_PROMPT, KERNEL_PACKAGES_PROMPT])
+    elif has_ipython:
+        parts.extend(["", PROJECT_ENV_PROMPT, KERNEL_PACKAGES_PROMPT])
+
     if allow_recursion:
         parts.extend(
             [
@@ -158,11 +185,6 @@ def build_system_prompt(
                 "For parallel sub-agents, use normal Python async patterns such as `await asyncio.gather(rlm('task1'), rlm('task2'))`.",
             ]
         )
-
-    if has_ipython and not has_bash and "bash" not in (installed_skills or []):
-        parts.extend(["", IPYTHON_CONTROL_PROMPT])
-    elif has_ipython:
-        parts.extend(["", PROJECT_ENV_PROMPT])
 
     if _should_include_git_history_guard(active_tools, allow_git):
         parts.extend(["", GIT_HISTORY_GUARD_PROMPT])

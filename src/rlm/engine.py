@@ -143,7 +143,7 @@ class RLMEngine:
         self.summarize_at_tokens = config.policy.summarize_at_tokens
         self.max_compactions = config.policy.max_compactions
         self.system_prompt_path = config.system_prompt_path
-        self.append_to_system_prompt = config.append_to_system_prompt
+        self.append_to_system_prompt = config.resolved_append_to_system_prompt
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
@@ -1001,6 +1001,8 @@ class RLMEngine:
             self.cwd,
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
+            depth=self.depth,
+            session_dir=str(self.session.dir),
             allow_recursion=self.depth < self.max_depth,
             allow_git=self.allow_git,
             active_tools=active_tools,
