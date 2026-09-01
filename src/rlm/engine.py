@@ -22,7 +22,7 @@ from rlm.client import (
 )
 from rlm.config import RuntimeConfig
 from rlm.semantic import SemanticEdgeTracker
-from rlm.mcp import MCPServer, load_mcp_servers, validate_mcp_servers
+from rlm.mcp import MCPServer, validate_mcp_servers
 from rlm.prompt import build_system_prompt
 from rlm.session import Session
 from rlm.skills import enable_builtin_skills
@@ -174,7 +174,13 @@ class RLMEngine:
         parent_session_id: str | None = None,
         spawned_by_request_id: str | None = None,
     ):
-        self.runtime_config = runtime_config or RuntimeConfig.from_env()
+        if runtime_config is None:
+            raise ValueError(
+                "RLMEngine requires an explicit runtime_config: standalone "
+                "environment configuration was removed (rlm is consumed via "
+                "the ACP runtime contract; children inherit in-memory)."
+            )
+        self.runtime_config = runtime_config
         config = self.runtime_config
         self.model = config.model
         self.cwd = cwd or os.getcwd()
@@ -189,9 +195,7 @@ class RLMEngine:
 
         # Task MCP tool servers to expose as IPython skills; kwarg wins, otherwise
         # parse RLM_MCP_CONFIG (a standard mcpServers config).
-        self.mcp_servers = validate_mcp_servers(
-            mcp_servers if mcp_servers is not None else load_mcp_servers()
-        )
+        self.mcp_servers = validate_mcp_servers(mcp_servers or {})
 
         # Built-in skills (rlm.skills) to enable for this run, from RLM_SKILLS (comma-separated).
         self.skills = list(config.skills)
