@@ -540,7 +540,9 @@ async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
         def shutdown(self):
             self.stopped = True
 
-    monkeypatch.setattr("rlm.engine.get_builtin_tool", lambda name: FailingTool())
+    monkeypatch.setattr(
+        "rlm.engine.get_builtin_tool", lambda name, names=None: FailingTool()
+    )
     client = DummyClient(
         [
             DummyMessage(tool_calls=[DummyToolCall("failing", {})]),

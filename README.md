@@ -2,9 +2,9 @@
 
 A minimal CLI coding agent with a persistent IPython execution environment and optional recursive sub-agents. For a full-fledged coding agent built on the same RLM principles, see [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-The model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, shell commands via `!command`, and multi-line shell scripts via `%%bash`. The tool set is not configurable. File edits, shell work, and orchestration all go through it.
+By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, shell commands via `!command`, and multi-line shell scripts via `%%bash`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
 
-For convenience, rlm ships built-in *skills* that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via `RLM_BUILTIN_TOOLS`).
+For convenience, rlm ships built-in *skills* that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via the contract's `builtin_tools`).
 
 Context is reclaimed automatically: when a turn's prompt token count crosses the policy's `summarize_at_tokens`, the engine compacts the conversation into a summary and continues on a fresh branch. The IPython kernel keeps running across the compaction, so REPL state survives (see [Compaction](#compaction)).
 
@@ -48,6 +48,7 @@ RLM's ACP surface is a versioned training contract. `initialize` advertises the 
 it, then provide one complete `ai.prime.rlm/runtime-v1` object in
 `session/new._meta`. The runtime object contains the ACP session ID, model,
 provider, execution policy, prompt configuration, enabled built-in skills,
+optional builtin tool selection,
 explicit kernel environment, and optional search credential. Nullable and
 disabled values are sent explicitly as `null` or empty collections. Missing,
 partial, unknown, or unsupported contracts are rejected; ACP sessions never
@@ -81,7 +82,7 @@ no standalone entry point: outside a session the call raises.
 ## Configuration
 
 All runtime configuration enters through the `ai.prime.rlm/runtime-v1` contract object
-(model, provider credentials, execution policy, prompt configuration, skills, kernel
+(model, provider credentials, execution policy, prompt configuration, skills, builtin tools, kernel
 environment, search credential). Recursive children inherit the parent's configuration
 in-memory (`model_copy`); nothing is re-read from the process environment.
 

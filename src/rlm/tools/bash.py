@@ -1,7 +1,8 @@
 """Native ``bash`` builtin tool.
 
 Runs one shell command per call in a fresh subshell, like a plain bash agent.
-Enabled by default alongside ipython; override the tool set with ``RLM_BUILTIN_TOOLS``.
+Selected via the runtime contract's ``builtin_tools`` (the default tool set is
+ipython alone).
 """
 
 from __future__ import annotations
