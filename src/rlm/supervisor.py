@@ -96,6 +96,10 @@ class SessionTreeSupervisor:
         self._close_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._total_calls = 0
+        # live tree totals, pushed by every engine per model call: work-loop turns,
+        # and NEW tokens (completion + uncached prompt)
+        self._total_turns = 0
+        self._total_tokens = 0
         self._tasks: set[asyncio.Task[Any]] = set()
         self._child_tasks: set[asyncio.Task[RLMResult]] = set()
         self._connection_tasks: set[asyncio.Task[None]] = set()
@@ -162,6 +166,25 @@ class SessionTreeSupervisor:
     @property
     def total_calls(self) -> int:
         return self._total_calls
+
+    @property
+    def total_turns(self) -> int:
+        """Live tree-total work-loop turns (every engine's model calls)."""
+        return self._total_turns
+
+    @property
+    def total_tokens(self) -> int:
+        """Live tree-total NEW tokens (completion + uncached prompt, every engine)."""
+        return self._total_tokens
+
+    def record_call(self, tokens: int) -> None:
+        """Count one work-loop model call: a tree turn plus its new tokens."""
+        self._total_turns += 1
+        self._total_tokens += tokens
+
+    def record_usage(self, tokens: int) -> None:
+        """Add new tokens without a turn (compaction/checkpoint calls)."""
+        self._total_tokens += tokens
 
     @property
     def active_calls(self) -> int:
@@ -267,6 +290,21 @@ class SessionTreeSupervisor:
             if self._total_calls >= parent.runtime_config.policy.max_subagent_calls:
                 return asyncio.create_task(
                     self._limit_result(parent, "recursive call limit reached")
+                )
+            policy = parent.runtime_config.policy
+            if (
+                policy.max_total_turns is not None
+                and self._total_turns >= policy.max_total_turns
+            ):
+                return asyncio.create_task(
+                    self._limit_result(parent, "turn budget reached")
+                )
+            if (
+                policy.max_total_tokens is not None
+                and self._total_tokens >= policy.max_total_tokens
+            ):
+                return asyncio.create_task(
+                    self._limit_result(parent, "token budget reached")
                 )
             self._total_calls += 1
             task = asyncio.create_task(

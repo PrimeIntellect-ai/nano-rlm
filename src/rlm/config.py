@@ -52,6 +52,20 @@ class ExecutionPolicy(_ConfigModel):
     """Resource and context-management policy for one RLM engine."""
 
     max_depth: int = Field(default=1, ge=0)
+    max_total_turns: int | None = Field(default=None, gt=0)
+    """Tree-total turn budget (one turn = one work-loop model call, any engine; compaction
+    calls don't count). Once reached, every engine stops before its next model call
+    (stop_reason=max_total_turns). None = uncapped."""
+    max_total_tokens: int | None = Field(default=None, gt=0)
+    """Tree-total budget of NEW tokens across the whole recursive session tree, live: each
+    model call contributes its completion plus uncached prompt tokens (the cached context
+    prefix re-billed every call is not new work). Once reached, every engine stops before
+    its next model call (stop_reason=max_total_tokens) and no further sub-agents are
+    spawned. None = unbounded."""
+    max_tool_output_bytes: int | None = Field(default=None, gt=0)
+    """Byte budget for a single tool result entering the conversation (middle truncation,
+    head + tail, with a warning naming the original size). None = the built-in 20KB
+    default; an explicit value overrides it in either direction."""
     exec_timeout: int = Field(default=300, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
     compaction: bool = False
