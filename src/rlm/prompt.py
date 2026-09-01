@@ -181,9 +181,7 @@ def _should_include_git_history_guard(
     return any(tool.name in SHELL_TOOL_NAMES for tool in active_tools)
 
 
-def _builtin_skill_prompt(
-    name: str, active_tools: list["BuiltinTool"]
-) -> str | None:
+def _builtin_skill_prompt(name: str, active_tools: list["BuiltinTool"]) -> str | None:
     """The curated line for one enabled built-in skill (None for uploaded skills).
     `bash` swaps its guidance when the native bash tool is also active — the skill
     is then the secondary shell path."""
