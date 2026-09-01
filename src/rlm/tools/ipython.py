@@ -253,7 +253,7 @@ class IPythonREPL:
         skill_names = discover_skills(self.session.dir if self.session else None)
 
         setup_code = f"""\
-import os, sys, types, json, time, functools, inspect
+import os, sys, asyncio, types, json, time, functools, inspect
 os.chdir({self.cwd!r})
 if {bool(session_dir)!r}:
     sys.path.append({session_dir!r})
