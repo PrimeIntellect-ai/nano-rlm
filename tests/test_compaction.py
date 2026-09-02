@@ -164,6 +164,38 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert "summary" in retry_messages[1]["content"]
 
 
+async def test_overflow_recovers_without_discovered_threshold(session):
+    """Reactive compaction works when the provider advertises no context window."""
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(
+                    tool_calls=[DummyToolCall("ipython", {"code": "print('x' * 4000)"})]
+                )
+            ),
+            _overflow(),
+            _overflow(),
+            _response(DummyMessage(content="summary")),
+            _response(DummyMessage(content="done")),
+        ],
+        max_model_len=None,
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(),
+    )
+
+    try:
+        result = await engine.run("produce a large tool result")
+    finally:
+        engine.close()
+
+    assert engine.summarize_at_tokens is None
+    assert result.answer == "done"
+    assert engine._metrics.num_compactions == 1
+
+
 async def test_context_overflow_propagates_when_compaction_is_disabled(session):
     client = _ScriptedClient([_overflow()])
     engine = RLMEngine(

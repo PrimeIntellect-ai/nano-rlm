@@ -111,12 +111,23 @@ def _model_context_window(payload: Mapping[str, Any], model: str) -> int | None:
 
 
 async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
-    key = (str(client.base_url), model)
+    # getattr: a client without a base_url (or models API, caught below) simply
+    # yields no threshold — compaction then stays overflow-reactive.
+    key = (str(getattr(client, "base_url", None)), model)
     if key not in _window_cache:
         try:
             # `models.list()` keeps provider extensions in each card's `model_extra`;
             # a raw `cast_to` parse breaks on one Python version or another.
-            page = await client.models.list()
+            # One quick attempt only: discovery runs at engine start, so a dead or
+            # slow /models endpoint must not stall the session behind the
+            # transport's retry budget. (Duck-typed clients without `with_options`
+            # are queried as-is.)
+            lister = (
+                client.with_options(max_retries=0, timeout=10.0)
+                if hasattr(client, "with_options")
+                else client
+            )
+            page = await lister.models.list()
             payload = {
                 "data": [
                     {"id": card.id, **(card.model_extra or {})} for card in page.data
