@@ -62,8 +62,10 @@ def test_policy_rejects_unsafe_recursive_values_and_reserved_headers():
         make_client(provider)
 
 
-def test_default_policy_enables_recursion_but_not_compaction():
+def test_default_policy_enables_recursion_and_compaction():
     policy = ExecutionPolicy()
-    assert policy.compaction is False
+    assert policy.compaction is True
     assert policy.summarize_at_tokens is None
+    assert policy.max_compactions is None
+    assert policy.max_total_tokens == 1_000_000
     assert policy.max_depth == 1

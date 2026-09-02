@@ -795,11 +795,10 @@ class RLMEngine:
         try:
             response, usage = await self._call_model(messages)
         except APIStatusError as error:
-            if (
-                self.summarize_at_tokens is None
-                or not self._can_compact()
-                or not is_context_overflow(error)
-            ):
+            # Reactive compaction needs no discovered threshold: the overflow
+            # itself is the signal. The checkpoint fallback chain handles a
+            # summary request that is itself too large.
+            if not self._can_compact() or not is_context_overflow(error):
                 raise
             if not compactable(messages):
                 if self._compacted:
