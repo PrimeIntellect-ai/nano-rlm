@@ -22,7 +22,6 @@ from rlm.client import (
     model_call_headers,
 )
 from rlm.compaction import (
-    COMPACTION_ATTEMPTS,
     CHECKPOINT_PROMPT,
     TOOL_OUTPUT_MAX_BYTES,
     CompactionFailed,
@@ -142,6 +141,7 @@ class RLMEngine:
         self.compaction = config.policy.compaction
         self.summarize_at_tokens = config.policy.summarize_at_tokens
         self.max_compactions = config.policy.max_compactions
+        self.max_compaction_attempts = config.policy.max_compaction_attempts
         self.system_prompt_path = config.system_prompt_path
         self.append_to_system_prompt = config.resolved_append_to_system_prompt
         self.max_depth = config.policy.max_depth
@@ -867,7 +867,7 @@ class RLMEngine:
             # resampled. Reasoning is never part of the summary.
             base = messages
             summary_text = ""
-            for _ in range(COMPACTION_ATTEMPTS):
+            for _ in range(self.max_compaction_attempts):
                 checkpoint = [
                     *base,
                     {"role": "user", "content": checkpoint_prompt},
@@ -896,7 +896,7 @@ class RLMEngine:
                 self._semantic_edges.release_summary_request(compaction.compaction_id)
             if not summary_text:
                 raise CompactionFailed(
-                    f"no usable summary after {COMPACTION_ATTEMPTS} attempts"
+                    f"no usable summary after {self.max_compaction_attempts} attempts"
                 )
         except BaseException as exc:
             self._semantic_edges.finish_compaction(
@@ -987,6 +987,7 @@ class RLMEngine:
                 "compaction": self.compaction,
                 "summarize_at_tokens": self.summarize_at_tokens,
                 "max_compactions": self.runtime_config.policy.max_compactions,
+                "max_compaction_attempts": self.max_compaction_attempts,
                 "allow_git": self.runtime_config.policy.allow_git,
             },
             "semantic_edges": self._semantic_edges.snapshot(),

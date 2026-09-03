@@ -21,6 +21,7 @@ def test_runtime_config_redacts_secrets():
             compaction=True,
             summarize_at_tokens=2048,
             max_compactions=3,
+            max_compaction_attempts=7,
             allow_git=True,
         ),
         skills=("search", "edit"),
@@ -38,6 +39,7 @@ def test_runtime_config_redacts_secrets():
         compaction=True,
         summarize_at_tokens=2048,
         max_compactions=3,
+        max_compaction_attempts=7,
         max_concurrent_subagents=4,
         max_subagent_calls=64,
         allow_git=True,
@@ -67,5 +69,6 @@ def test_default_policy_enables_recursion_and_compaction():
     assert policy.compaction is True
     assert policy.summarize_at_tokens is None
     assert policy.max_compactions is None
+    assert policy.max_compaction_attempts == 5
     assert policy.max_total_tokens == 1_000_000
     assert policy.max_depth == 1
