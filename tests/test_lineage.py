@@ -116,7 +116,7 @@ def test_failed_compaction_publishes_no_transition():
     assert lineage.snapshot() == {"edges": []}
 
 
-def test_prompt_rollback_keeps_and_excludes_unconsumed_compaction_attempt():
+def test_prompt_rollback_keeps_unconsumed_compaction_attempt():
     lineage = SemanticEdgeTracker()
     lineage.register_session("root", parent_session_id=None)
     preceding_request = _finish(lineage, "root")
@@ -146,7 +146,6 @@ def test_prompt_rollback_keeps_and_excludes_unconsumed_compaction_attempt():
             },
         ]
     }
-    assert lineage.exclusions_snapshot() == {"request_ids": [summary_request]}
 
 
 def test_prompt_rollback_restores_previous_continuation_point():

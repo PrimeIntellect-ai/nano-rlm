@@ -16,7 +16,6 @@ import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall, make_runtime_config
 from rlm.acp import (
-    ACP_TRAINING_EXCLUSIONS_METADATA_KEY,
     ACP_SEMANTIC_EDGES_METADATA_KEY,
     CONTRACT_METADATA_KEY,
     RUNTIME_METADATA_KEY,
@@ -155,7 +154,6 @@ class _Engine:
                 "allow_git": False,
             },
             "semantic_edges": {"edges": []},
-            "training_exclusions": {"request_ids": []},
         }
 
 
@@ -805,7 +803,6 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert second_snapshot["usage"]["total_tokens"] == 10
     assert second_snapshot["last_stop_reason"] == "done"
     assert first.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY] == {"edges": []}
-    assert first.field_meta[ACP_TRAINING_EXCLUSIONS_METADATA_KEY] == {"request_ids": []}
 
     closed = await agent.close_session(created.session_id)
     closed_snapshot = closed.field_meta[SESSION_METADATA_KEY]
@@ -814,9 +811,6 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert closed_snapshot["last_stop_reason"] == "done"
     assert "semantic_edges" not in closed_snapshot
     assert closed.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY] == {"edges": []}
-    assert closed.field_meta[ACP_TRAINING_EXCLUSIONS_METADATA_KEY] == {
-        "request_ids": []
-    }
     assert "test-secret" not in closed.model_dump_json(by_alias=True)
     assert engine.closed is True
 
@@ -872,9 +866,6 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
                 "type": "compaction",
             },
         ]
-        assert response.field_meta[ACP_TRAINING_EXCLUSIONS_METADATA_KEY] == {
-            "request_ids": [rejected_tool, rejected_empty]
-        }
     finally:
         await agent.close_session(created.session_id)
 

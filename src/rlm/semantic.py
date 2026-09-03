@@ -64,7 +64,6 @@ class SemanticEdgeTracker:
         self._requests: dict[str, _Request] = {}
         self._compactions: dict[str, _Compaction] = {}
         self._edges: list[dict[str, str]] = []
-        self._excluded_request_ids: list[str] = []
 
     def register_session(
         self,
@@ -94,9 +93,6 @@ class SemanticEdgeTracker:
     def restore(self, session_id: str, checkpoint: _Checkpoint) -> None:
         """Restore the semantic continuation point after a rolled-back prompt."""
         session = self._sessions[session_id]
-        for edge in session.pending_edges:
-            if edge.type == "compaction":
-                self._exclude_request(edge.source_request_id)
         session.pending_edges = list(checkpoint.pending_edges)
         session.last_request_id = checkpoint.last_request_id
         session.spawn_claimed = checkpoint.spawn_claimed
@@ -161,18 +157,12 @@ class SemanticEdgeTracker:
             return
         session.pending_edges = request.inbound_edges + session.pending_edges
 
-    def reject_summary_request(self, compaction_id: str) -> None:
-        """Exclude a committed summary attempt and release the next attempt slot."""
+    def release_summary_request(self, compaction_id: str) -> None:
+        """Release a committed summary attempt so another attempt can start."""
         compaction = self._compactions[compaction_id]
-        request_id = compaction.summary_request_id
-        if request_id is None:
+        if compaction.summary_request_id is None:
             raise ValueError("compaction has no summary request to reject")
-        self._exclude_request(request_id)
         compaction.summary_request_id = None
-
-    def _exclude_request(self, request_id: str) -> None:
-        if request_id not in self._excluded_request_ids:
-            self._excluded_request_ids.append(request_id)
 
     def begin_compaction(self, session_id: str) -> Compaction:
         session = self._sessions[session_id]
@@ -213,6 +203,3 @@ class SemanticEdgeTracker:
 
     def snapshot(self) -> dict[str, list[dict[str, str]]]:
         return {"edges": [edge.copy() for edge in self._edges]}
-
-    def exclusions_snapshot(self) -> dict[str, list[str]]:
-        return {"request_ids": list(self._excluded_request_ids)}
