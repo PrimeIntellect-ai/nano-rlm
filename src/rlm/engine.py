@@ -841,9 +841,11 @@ class RLMEngine:
         """Ask the model for a handoff summary and rebuild ``messages``.
 
         Called in-place: mutates ``messages`` to ``[system, user(framing +
-        summary)]`` while preserving the IPython kernel. A summary attempt does
-        not count toward the policy turn limit, but every committed attempt remains
-        represented in the semantic graph.
+        summary)]`` while preserving the IPython kernel. A summary attempt is
+        housekeeping, not a work turn: it does not count toward ``max_total_turns``.
+        Its tokens still land in ``_total_usage`` for cost accounting and count
+        toward token budgets. Every committed attempt remains represented in the
+        semantic graph.
 
         Active tools are forwarded with ``tool_choice="none"`` so the system prompt matches
         regular turns (vLLM's chat-completions layer injects the tools
