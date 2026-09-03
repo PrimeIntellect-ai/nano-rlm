@@ -359,7 +359,7 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
         {
             "source_request_id": turn["X-ACP-Model-Request-ID"],
             "target_request_id": compaction["X-ACP-Model-Request-ID"],
-            "type": "continuation",
+            "type": "compaction_attempt",
         },
         {
             "source_request_id": compaction["X-ACP-Model-Request-ID"],
@@ -515,7 +515,7 @@ async def test_failed_prompt_restores_pre_compaction_context(session):
         {
             "source_request_id": initial,
             "target_request_id": summary,
-            "type": "continuation",
+            "type": "compaction_attempt",
         },
         {
             "source_request_id": summary,
@@ -819,6 +819,8 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
     client = DummyClient(
         [
             DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
+            DummyMessage(tool_calls=[DummyToolCall("add", {"a": 3, "b": 4})]),
+            DummyMessage(content="  "),
             DummyMessage(content="summary"),
             DummyMessage(content="done"),
         ]
@@ -838,23 +840,29 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
     try:
         response = await agent.prompt(created.session_id, [text_block("compact")])
         semantic_edges = response.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY]
+        request_ids = [
+            call["extra_headers"]["X-ACP-Model-Request-ID"] for call in client.calls
+        ]
+        turn, rejected_tool, rejected_empty, accepted, resumed = request_ids
         assert semantic_edges["edges"] == [
             {
-                "source_request_id": client.calls[0]["extra_headers"][
-                    "X-ACP-Model-Request-ID"
-                ],
-                "target_request_id": client.calls[1]["extra_headers"][
-                    "X-ACP-Model-Request-ID"
-                ],
-                "type": "continuation",
+                "source_request_id": turn,
+                "target_request_id": rejected_tool,
+                "type": "compaction_attempt",
             },
             {
-                "source_request_id": client.calls[1]["extra_headers"][
-                    "X-ACP-Model-Request-ID"
-                ],
-                "target_request_id": client.calls[2]["extra_headers"][
-                    "X-ACP-Model-Request-ID"
-                ],
+                "source_request_id": turn,
+                "target_request_id": rejected_empty,
+                "type": "compaction_attempt",
+            },
+            {
+                "source_request_id": turn,
+                "target_request_id": accepted,
+                "type": "compaction_attempt",
+            },
+            {
+                "source_request_id": accepted,
+                "target_request_id": resumed,
                 "type": "compaction",
             },
         ]

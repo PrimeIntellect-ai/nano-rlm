@@ -92,10 +92,92 @@ def test_completed_compaction_links_summary_to_resumed_request():
         {
             "source_request_id": preceding_request,
             "target_request_id": summary_request,
-            "type": "continuation",
+            "type": "compaction_attempt",
         },
         {
             "source_request_id": summary_request,
+            "target_request_id": resumed_request,
+            "type": "compaction",
+        },
+    ]
+
+
+def test_compaction_consumes_restored_edges_but_preserves_late_returns():
+    lineage = SemanticEdgeTracker()
+    lineage.register_session("root", parent_session_id=None)
+    preceding_request = _finish(lineage, "root")
+
+    lineage.register_session(
+        "early-child",
+        parent_session_id="root",
+        spawned_by_request_id=preceding_request,
+    )
+    early_child_request = _finish(lineage, "early-child")
+    lineage.finish_subagent("early-child")
+
+    failed_request = lineage.start_request("root")
+    lineage.fail_request(failed_request)
+    compaction = lineage.begin_compaction("root")
+
+    rejected_summary = lineage.start_request(
+        "root", compaction_id=compaction.compaction_id
+    )
+    lineage.finish_request(rejected_summary)
+    lineage.release_summary_request(compaction.compaction_id)
+
+    lineage.register_session(
+        "late-child",
+        parent_session_id="root",
+        spawned_by_request_id=preceding_request,
+    )
+    late_child_request = _finish(lineage, "late-child")
+    lineage.finish_subagent("late-child")
+
+    accepted_summary = lineage.start_request(
+        "root", compaction_id=compaction.compaction_id
+    )
+    lineage.finish_request(accepted_summary)
+    lineage.finish_compaction(compaction.compaction_id, "completed")
+    resumed_request = _finish(lineage, "root")
+
+    assert lineage.snapshot()["edges"] == [
+        {
+            "source_request_id": preceding_request,
+            "target_request_id": early_child_request,
+            "type": "subagent_call",
+        },
+        {
+            "source_request_id": preceding_request,
+            "target_request_id": rejected_summary,
+            "type": "compaction_attempt",
+        },
+        {
+            "source_request_id": early_child_request,
+            "target_request_id": rejected_summary,
+            "type": "subagent_return",
+        },
+        {
+            "source_request_id": preceding_request,
+            "target_request_id": late_child_request,
+            "type": "subagent_call",
+        },
+        {
+            "source_request_id": preceding_request,
+            "target_request_id": accepted_summary,
+            "type": "compaction_attempt",
+        },
+        {
+            "source_request_id": early_child_request,
+            "target_request_id": accepted_summary,
+            "type": "subagent_return",
+        },
+        {
+            "source_request_id": late_child_request,
+            "target_request_id": resumed_request,
+            "type": "subagent_return",
+        },
+        {
+            "source_request_id": accepted_summary,
             "target_request_id": resumed_request,
             "type": "compaction",
         },
@@ -116,9 +198,10 @@ def test_failed_compaction_publishes_no_transition():
     assert lineage.snapshot() == {"edges": []}
 
 
-def test_prompt_rollback_discards_unconsumed_compaction_transition():
+def test_prompt_rollback_keeps_unconsumed_compaction_attempt():
     lineage = SemanticEdgeTracker()
     lineage.register_session("root", parent_session_id=None)
+    preceding_request = _finish(lineage, "root")
     before = lineage.checkpoint("root")
     compaction = lineage.begin_compaction("root")
     summary_request = lineage.start_request(
@@ -129,9 +212,22 @@ def test_prompt_rollback_discards_unconsumed_compaction_transition():
     failed_target = lineage.start_request("root")
     lineage.fail_request(failed_target)
     lineage.restore("root", before)
-    _finish(lineage, "root")
+    retried_request = _finish(lineage, "root")
 
-    assert lineage.snapshot() == {"edges": []}
+    assert lineage.snapshot() == {
+        "edges": [
+            {
+                "source_request_id": preceding_request,
+                "target_request_id": summary_request,
+                "type": "compaction_attempt",
+            },
+            {
+                "source_request_id": preceding_request,
+                "target_request_id": retried_request,
+                "type": "continuation",
+            },
+        ]
+    }
 
 
 def test_prompt_rollback_restores_previous_continuation_point():
