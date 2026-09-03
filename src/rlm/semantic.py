@@ -53,6 +53,7 @@ class _Request:
 class _Compaction:
     session_id: str
     source_request_id: str | None
+    pending_edges: tuple[_PendingEdge, ...]
     summary_request_id: str | None = None
 
 
@@ -110,10 +111,15 @@ class SemanticEdgeTracker:
                 raise ValueError("compaction does not belong to session")
             if compaction.summary_request_id is not None:
                 raise ValueError("compaction already has a summary request")
-            inbound = (
-                [_PendingEdge(compaction.source_request_id, "compaction_attempt")]
-                if compaction.source_request_id is not None
-                else []
+            inbound = []
+            if compaction.source_request_id is not None:
+                inbound.append(
+                    _PendingEdge(compaction.source_request_id, "compaction_attempt")
+                )
+            inbound.extend(
+                edge
+                for edge in compaction.pending_edges
+                if edge.source_request_id != compaction.source_request_id
             )
         else:
             inbound = session.pending_edges
@@ -170,6 +176,7 @@ class SemanticEdgeTracker:
         self._compactions[compaction_id] = _Compaction(
             session_id=session_id,
             source_request_id=session.last_request_id,
+            pending_edges=tuple(session.pending_edges),
         )
         return Compaction(compaction_id=compaction_id, session_id=session_id)
 
@@ -183,6 +190,10 @@ class SemanticEdgeTracker:
             raise ValueError(
                 "completed compaction requires a successful summary request"
             )
+        captured_edges = list(compaction.pending_edges)
+        if session.pending_edges[: len(captured_edges)] != captured_edges:
+            raise ValueError("session pending edges changed during compaction")
+        del session.pending_edges[: len(captured_edges)]
         session.last_request_id = summary_request_id
         session.pending_edges.append(_PendingEdge(summary_request_id, "compaction"))
 
