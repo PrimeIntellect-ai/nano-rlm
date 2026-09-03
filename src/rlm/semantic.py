@@ -52,6 +52,7 @@ class _Request:
 @dataclass
 class _Compaction:
     session_id: str
+    source_request_id: str | None
     summary_request_id: str | None = None
 
 
@@ -63,6 +64,7 @@ class SemanticEdgeTracker:
         self._requests: dict[str, _Request] = {}
         self._compactions: dict[str, _Compaction] = {}
         self._edges: list[dict[str, str]] = []
+        self._excluded_request_ids: list[str] = []
 
     def register_session(
         self,
@@ -92,6 +94,9 @@ class SemanticEdgeTracker:
     def restore(self, session_id: str, checkpoint: _Checkpoint) -> None:
         """Restore the semantic continuation point after a rolled-back prompt."""
         session = self._sessions[session_id]
+        for edge in session.pending_edges:
+            if edge.type == "compaction":
+                self._exclude_request(edge.source_request_id)
         session.pending_edges = list(checkpoint.pending_edges)
         session.last_request_id = checkpoint.last_request_id
         session.spawn_claimed = checkpoint.spawn_claimed
@@ -103,24 +108,33 @@ class SemanticEdgeTracker:
         compaction_id: str | None = None,
     ) -> str:
         session = self._sessions[session_id]
-        inbound = session.pending_edges
-        session.pending_edges = []
-        if not session.spawn_claimed and session.spawned_by_request_id is not None:
-            inbound.append(_PendingEdge(session.spawned_by_request_id, "subagent_call"))
-            session.spawn_claimed = True
-        if session.last_request_id is not None and not any(
-            edge.source_request_id == session.last_request_id for edge in inbound
-        ):
-            inbound.append(_PendingEdge(session.last_request_id, "continuation"))
-
-        request_id = uuid.uuid4().hex
-        self._requests[request_id] = _Request(session_id, inbound, compaction_id)
         if compaction_id is not None:
             compaction = self._compactions[compaction_id]
             if compaction.session_id != session_id:
                 raise ValueError("compaction does not belong to session")
             if compaction.summary_request_id is not None:
                 raise ValueError("compaction already has a summary request")
+            inbound = (
+                [_PendingEdge(compaction.source_request_id, "compaction_attempt")]
+                if compaction.source_request_id is not None
+                else []
+            )
+        else:
+            inbound = session.pending_edges
+            session.pending_edges = []
+            if not session.spawn_claimed and session.spawned_by_request_id is not None:
+                inbound.append(
+                    _PendingEdge(session.spawned_by_request_id, "subagent_call")
+                )
+                session.spawn_claimed = True
+            if session.last_request_id is not None and not any(
+                edge.source_request_id == session.last_request_id for edge in inbound
+            ):
+                inbound.append(_PendingEdge(session.last_request_id, "continuation"))
+
+        request_id = uuid.uuid4().hex
+        self._requests[request_id] = _Request(session_id, inbound, compaction_id)
+        if compaction_id is not None:
             compaction.summary_request_id = request_id
         return request_id
 
@@ -134,27 +148,39 @@ class SemanticEdgeTracker:
                     "type": inbound.type,
                 }
             )
-        self._sessions[request.session_id].last_request_id = request_id
+        if request.compaction_id is None:
+            self._sessions[request.session_id].last_request_id = request_id
 
     def fail_request(self, request_id: str) -> None:
         request = self._requests.pop(request_id)
         session = self._sessions[request.session_id]
-        session.pending_edges = request.inbound_edges + session.pending_edges
-        # A failed summary attempt releases its compaction, so a retry can claim it.
         if request.compaction_id is not None:
             compaction = self._compactions.get(request.compaction_id)
             if compaction is not None and compaction.summary_request_id == request_id:
                 compaction.summary_request_id = None
+            return
+        session.pending_edges = request.inbound_edges + session.pending_edges
 
-    def release_summary_request(self, compaction_id: str) -> None:
-        """Unbind a compaction's summary request so a resampled attempt can claim it."""
-        compaction = self._compactions.get(compaction_id)
-        if compaction is not None:
-            compaction.summary_request_id = None
+    def reject_summary_request(self, compaction_id: str) -> None:
+        """Exclude a committed summary attempt and release the next attempt slot."""
+        compaction = self._compactions[compaction_id]
+        request_id = compaction.summary_request_id
+        if request_id is None:
+            raise ValueError("compaction has no summary request to reject")
+        self._exclude_request(request_id)
+        compaction.summary_request_id = None
+
+    def _exclude_request(self, request_id: str) -> None:
+        if request_id not in self._excluded_request_ids:
+            self._excluded_request_ids.append(request_id)
 
     def begin_compaction(self, session_id: str) -> Compaction:
+        session = self._sessions[session_id]
         compaction_id = uuid.uuid4().hex
-        self._compactions[compaction_id] = _Compaction(session_id=session_id)
+        self._compactions[compaction_id] = _Compaction(
+            session_id=session_id,
+            source_request_id=session.last_request_id,
+        )
         return Compaction(compaction_id=compaction_id, session_id=session_id)
 
     def finish_compaction(self, compaction_id: str, status: CompactionStatus) -> None:
@@ -163,10 +189,11 @@ class SemanticEdgeTracker:
             return
         summary_request_id = compaction.summary_request_id
         session = self._sessions[compaction.session_id]
-        if summary_request_id is None or session.last_request_id != summary_request_id:
+        if summary_request_id is None:
             raise ValueError(
                 "completed compaction requires a successful summary request"
             )
+        session.last_request_id = summary_request_id
         session.pending_edges.append(_PendingEdge(summary_request_id, "compaction"))
 
     def finish_subagent(self, session_id: str) -> None:
@@ -186,3 +213,6 @@ class SemanticEdgeTracker:
 
     def snapshot(self) -> dict[str, list[dict[str, str]]]:
         return {"edges": [edge.copy() for edge in self._edges]}
+
+    def exclusions_snapshot(self) -> dict[str, list[str]]:
+        return {"request_ids": list(self._excluded_request_ids)}

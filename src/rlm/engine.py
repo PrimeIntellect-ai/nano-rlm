@@ -841,9 +841,10 @@ class RLMEngine:
         """Ask the model for a handoff summary and rebuild ``messages``.
 
         Called in-place: mutates ``messages`` to ``[system, user(framing +
-        summary)]`` while preserving the IPython kernel. The LLM call for the
-        summary is housekeeping, not a work turn, but its tokens land in
-        ``_total_usage`` for cost accounting.
+        summary)]`` while preserving the IPython kernel. A summary attempt does
+        not count toward the policy turn limit, but all attempts remain in the
+        trace: accepted summary tokens are trainable, while rejected attempts
+        are explicitly excluded from training.
 
         Active tools are forwarded with ``tool_choice="none"`` so the system prompt matches
         regular turns (vLLM's chat-completions layer injects the tools
@@ -891,9 +892,7 @@ class RLMEngine:
                 if not message.tool_calls and text:
                     summary_text = text
                     break
-                # An unusable reply finished its request without failing it, so the
-                # compaction still holds the claim - release it for the resample.
-                self._semantic_edges.release_summary_request(compaction.compaction_id)
+                self._semantic_edges.reject_summary_request(compaction.compaction_id)
             if not summary_text:
                 raise CompactionFailed(
                     f"no usable summary after {self.max_compaction_attempts} attempts"
@@ -991,6 +990,7 @@ class RLMEngine:
                 "allow_git": self.runtime_config.policy.allow_git,
             },
             "semantic_edges": self._semantic_edges.snapshot(),
+            "training_exclusions": self._semantic_edges.exclusions_snapshot(),
         }
         return snapshot
 

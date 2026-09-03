@@ -55,6 +55,7 @@ CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
 ACP_SEMANTIC_EDGES_METADATA_KEY = "ai.prime.acp/semantic-edges-v1"
+ACP_TRAINING_EXCLUSIONS_METADATA_KEY = "ai.prime.acp/training-exclusions-v1"
 
 
 class _ContractModel(BaseModel):
@@ -117,6 +118,10 @@ class _SemanticEdgeSet(_ContractModel):
     edges: list[_SemanticEdge]
 
 
+class _TrainingExclusions(_ContractModel):
+    request_ids: list[str]
+
+
 class _SessionSnapshot(_ContractModel):
     session_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
     last_stop_reason: str | None
@@ -161,10 +166,16 @@ def _session_metadata(state: _SessionState) -> dict[str, Any]:
         **state.engine.execution_snapshot(),
     }
     semantic_edges = _SemanticEdgeSet.model_validate(snapshot.pop("semantic_edges"))
+    training_exclusions = _TrainingExclusions.model_validate(
+        snapshot.pop("training_exclusions")
+    )
     validated = _SessionSnapshot.model_validate(snapshot)
     return {
         SESSION_METADATA_KEY: validated.model_dump(mode="json", exclude_none=True),
         ACP_SEMANTIC_EDGES_METADATA_KEY: semantic_edges.model_dump(
+            mode="json", exclude_none=True
+        ),
+        ACP_TRAINING_EXCLUSIONS_METADATA_KEY: training_exclusions.model_dump(
             mode="json", exclude_none=True
         ),
     }
