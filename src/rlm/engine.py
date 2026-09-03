@@ -24,7 +24,6 @@ from rlm.client import (
 from rlm.compaction import (
     COMPACTION_ATTEMPTS,
     CHECKPOINT_PROMPT,
-    TOOL_OUTPUT_MAX_BYTES,
     CompactionFailed,
     REPL_NOTE,
     SUMMARY_FRAMING,
@@ -61,6 +60,11 @@ from rlm.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Deploy default (GLM-5.3 syngen tip; not for merge): the validated minimal
+# prompt replaces the composed builder. system_prompt_path and
+# append_to_system_prompt (the ACP contract) still take precedence / apply.
+GLM_MINIMAL_PROMPT = "You are a coding agent. Your tool is a persistent Python REPL. Run shell commands with `out = await bash('''command'''); print(out)` in one cell — assign AND print together (assignments alone display nothing; the output comes back as a string). Edit files with `await edit(path=..., old_str=..., new_str=...)` (old_str must occur exactly once). The REPL venv does not have the project installed — run project code and imports via bash with the repo's own python."
 
 
 def _parse_tool_call_args(raw: str) -> tuple[dict | None, dict | None]:
@@ -581,8 +585,10 @@ class RLMEngine:
             result = tool_result.content
 
             self.session.log_tool_result(turn, tool_name, result, duration)
-            content = truncate_tool_output(
-                result, self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
+            content = (
+                truncate_tool_output(result, self.max_tool_output_bytes)
+                if self.max_tool_output_bytes
+                else result
             )
             messages.append(
                 {
@@ -996,6 +1002,12 @@ class RLMEngine:
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         if self.system_prompt_path:
             return Path(self.system_prompt_path).read_text()
+        system_prompt = GLM_MINIMAL_PROMPT
+        if self.append_to_system_prompt:
+            system_prompt += "\n\n" + self.append_to_system_prompt
+        return system_prompt
+
+    def _load_system_prompt_built(self, active_tools: list[BuiltinTool]) -> str:
         system_prompt = build_system_prompt(
             self.cwd,
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
