@@ -37,10 +37,6 @@ information in this summary to assist with your own analysis:"""
 RESERVE_TOKENS = 16_384
 """Compact when this many tokens remain below the model context window."""
 
-COMPACTION_ATTEMPTS = 3
-"""Checkpoint attempts before compaction fails: a rejected request falls back to the
-last good snapshot; an empty or tool-calling reply is resampled."""
-
 TOOL_OUTPUT_MAX_BYTES = 20_000
 """Middle-out truncation budget for one tool result before it enters the conversation."""
 

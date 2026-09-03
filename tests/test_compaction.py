@@ -16,7 +16,7 @@ from conftest import (
     DummyToolCall,
     DummyUsage,
 )
-from rlm.compaction import is_context_overflow
+from rlm.compaction import CompactionFailed, is_context_overflow
 from rlm.config import (
     ExecutionPolicy,
     InvocationContext,
@@ -115,6 +115,7 @@ def _config(
     max_depth: int = 0,
     summarize_at_tokens: int | None = None,
     compaction: bool = True,
+    max_compaction_attempts: int = 5,
 ):
     return RuntimeConfig(
         model="test-model",
@@ -125,8 +126,35 @@ def _config(
             max_concurrent_subagents=max(4, max_depth),
             compaction=compaction,
             summarize_at_tokens=summarize_at_tokens,
+            max_compaction_attempts=max_compaction_attempts,
         ),
     )
+
+
+async def test_compaction_attempt_limit_is_configurable(session):
+    client = _ScriptedClient(
+        [
+            _response(DummyMessage(tool_calls=[DummyToolCall("ipython", {})])),
+            _response(DummyMessage(tool_calls=[DummyToolCall("ipython", {})])),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(max_compaction_attempts=2),
+    )
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "prompt"},
+    ]
+
+    try:
+        with pytest.raises(CompactionFailed, match="after 2 attempts"):
+            await engine._compact_branch(messages, turn=0)
+    finally:
+        engine.close()
+
+    assert len(client.calls) == 2
 
 
 async def test_tool_result_overflow_compacts_and_retries(session):

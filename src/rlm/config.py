@@ -81,6 +81,8 @@ class ExecutionPolicy(_ConfigModel):
     """Compactions per session before the engine stops compacting. None (default) =
     unlimited: every compaction cycle itself spends new tokens, so ``max_total_tokens``
     still bounds the session."""
+    max_compaction_attempts: int = Field(default=5, gt=0)
+    """Summary-generation attempts within one compaction cycle."""
     max_concurrent_subagents: int = Field(default=4, gt=0)
     max_subagent_calls: int = Field(default=64, gt=0)
     allow_git: bool = False
