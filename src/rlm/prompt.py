@@ -25,7 +25,7 @@ BASE_TOOLKIT = (
     "pydantic",
 )
 
-SHELL_TOOL_NAMES = frozenset({"ipython"})
+SHELL_TOOL_NAMES = frozenset({"bash", "ipython"})
 GIT_HISTORY_GUARD_PROMPT = (
     "Do not cheat by using online solutions or hints specific to this task, or "
     "by copying or inferring solutions from other branches, tags, remotes, "

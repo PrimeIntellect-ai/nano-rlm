@@ -35,13 +35,14 @@ def _prompt(
 
 
 def test_git_history_guard_prompt_included_for_shell_tools():
-    prompt = _prompt([_Tool("ipython")])
+    for tool in ("ipython", "bash"):
+        prompt = _prompt([_Tool(tool)])
 
-    assert GIT_HISTORY_GUARD_PROMPT in prompt
-    assert "Do not cheat" in prompt
-    assert "online solutions or hints specific to this task" in prompt
-    assert "other branches, tags, remotes" in prompt
-    assert "`--all`" in prompt
+        assert GIT_HISTORY_GUARD_PROMPT in prompt
+        assert "Do not cheat" in prompt
+        assert "online solutions or hints specific to this task" in prompt
+        assert "other branches, tags, remotes" in prompt
+        assert "`--all`" in prompt
 
 
 def test_git_history_guard_prompt_omitted_when_unrestricted():
