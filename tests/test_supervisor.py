@@ -440,6 +440,50 @@ async def test_real_kernel_excludes_parallel_subagent_wait_from_timeout(session)
     assert "execution timed out" not in tool_result(client)
 
 
+async def test_real_kernel_rebases_sequential_subagent_waits(session):
+    config = _config(max_depth=1, exec_timeout=1)
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(session.dir),
+        engine_factory=_DelayedEngine,
+    )
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": (
+                                "first = await rlm('1.2')\n"
+                                "second = await rlm('1.3')\n"
+                                "print(first.answer, second.answer)"
+                            )
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+        supervisor=supervisor,
+        invocation_id=supervisor.root_id,
+    )
+    try:
+        result = await asyncio.wait_for(engine.run("delegate"), timeout=12)
+    finally:
+        await supervisor.aclose()
+
+    assert result.answer == "done"
+    assert tool_result(client).strip() == "child:1.2 child:1.3"
+    assert "execution timed out" not in tool_result(client)
+
+
 async def test_execution_around_subagent_wait_remains_charged(session):
     config = _config(max_depth=1, exec_timeout=1)
     supervisor = SessionTreeSupervisor(
