@@ -7,6 +7,8 @@ import inspect
 import json
 import keyword
 import struct
+import threading
+import time
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -18,12 +20,61 @@ from rlm.types import RLMResult
 
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+BROKER_HEARTBEAT_INTERVAL_SECONDS = 0.25
+BROKER_HEARTBEAT_GRACE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
 class BrokerEndpoint:
     socket_path: str
     capability: str
+
+
+@dataclass(frozen=True)
+class BrokerWaitSnapshot:
+    """Thread-safe view of broker work awaited by one IPython cell."""
+
+    active: bool
+    responsive: bool
+    process_time: float | None
+
+
+class BrokerWaitTracker:
+    """Track live broker operations and kernel liveness for one cell."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._heartbeats: dict[str, float] = {}
+        self._process_time: float | None = None
+
+    def start(self, operation_id: str) -> None:
+        with self._lock:
+            self._heartbeats[operation_id] = time.monotonic()
+
+    def heartbeat(self, operation_id: str, process_time: float) -> None:
+        with self._lock:
+            if operation_id not in self._heartbeats:
+                return
+            self._heartbeats[operation_id] = time.monotonic()
+            if self._process_time is None or process_time > self._process_time:
+                self._process_time = process_time
+
+    def finish(self, operation_id: str) -> None:
+        with self._lock:
+            self._heartbeats.pop(operation_id, None)
+
+    def snapshot(self) -> BrokerWaitSnapshot:
+        with self._lock:
+            active = bool(self._heartbeats)
+            freshest = max(self._heartbeats.values(), default=0.0)
+            return BrokerWaitSnapshot(
+                active=active,
+                responsive=(
+                    active
+                    and time.monotonic() - freshest <= BROKER_HEARTBEAT_GRACE_SECONDS
+                ),
+                process_time=self._process_time,
+            )
 
 
 _endpoint: BrokerEndpoint | None = None
@@ -63,6 +114,15 @@ BrokerRequest = Annotated[
 _REQUEST_ADAPTER = TypeAdapter(BrokerRequest)
 
 
+class BrokerHeartbeat(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+    op: Literal["wait.heartbeat"]
+    process_time: Annotated[float, Field(ge=0)]
+
+
+_HEARTBEAT_ADAPTER = TypeAdapter(BrokerHeartbeat)
+
+
 class _BrokerSuccess(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid")
     result: dict[str, Any] | str
@@ -87,6 +147,13 @@ def parse_request(value: dict[str, Any]) -> BrokerRequest:
         return _REQUEST_ADAPTER.validate_python(value)
     except ValidationError:
         raise ValueError("invalid broker request") from None
+
+
+def parse_heartbeat(value: dict[str, Any]) -> BrokerHeartbeat:
+    try:
+        return _HEARTBEAT_ADAPTER.validate_python(value)
+    except ValidationError:
+        raise ValueError("invalid broker heartbeat") from None
 
 
 def result_to_payload(result: RLMResult) -> dict[str, Any]:
@@ -217,14 +284,19 @@ async def _request(payload: BrokerRequest) -> BrokerResponse:
     if _endpoint is None:
         raise RuntimeError("brokered calls are unavailable outside an active cell")
     reader, writer = await asyncio.open_unix_connection(_endpoint.socket_path)
+    heartbeat_task: asyncio.Task[None] | None = None
     try:
         await write_frame(
             writer,
             payload,
             MAX_REQUEST_BYTES,
         )
+        heartbeat_task = asyncio.create_task(_send_heartbeats(writer))
         raw_response = await read_frame(reader, MAX_RESPONSE_BYTES)
     finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
         writer.close()
         await writer.wait_closed()
     try:
@@ -234,3 +306,16 @@ async def _request(payload: BrokerRequest) -> BrokerResponse:
     if "error" in response:
         raise RuntimeError(response["error"])
     return response
+
+
+async def _send_heartbeats(writer: asyncio.StreamWriter) -> None:
+    while True:
+        await write_frame(
+            writer,
+            {
+                "op": "wait.heartbeat",
+                "process_time": time.process_time(),
+            },
+            MAX_REQUEST_BYTES,
+        )
+        await asyncio.sleep(BROKER_HEARTBEAT_INTERVAL_SECONDS)

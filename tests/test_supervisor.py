@@ -19,7 +19,11 @@ from rlm.types import RLMResult, TokenUsage
 
 
 def _config(
-    *, max_depth: int = 2, max_concurrent: int = 4, max_calls: int = 16
+    *,
+    max_depth: int = 2,
+    max_concurrent: int = 4,
+    max_calls: int = 16,
+    exec_timeout: int = 300,
 ) -> RuntimeConfig:
     return RuntimeConfig(
         model="test-model",
@@ -29,6 +33,7 @@ def _config(
             max_depth=max_depth,
             max_concurrent_subagents=max_concurrent,
             max_subagent_calls=max_calls,
+            exec_timeout=exec_timeout,
         ),
     )
 
@@ -79,6 +84,12 @@ class _SometimesBlockingEngine(_FastEngine):
             raise
         finally:
             state.active -= 1
+
+
+class _DelayedEngine(_FastEngine):
+    async def run(self, prompt: str) -> RLMResult:
+        await asyncio.sleep(float(prompt))
+        return RLMResult(answer=f"child:{prompt}", session_dir=self.session.dir)
 
 
 class _NestedEngine:
@@ -383,6 +394,98 @@ print(all(f'{name}=' not in subprocess_env for name in secret_names))
         "True",
     ]
     assert supervisor.total_calls == 2
+
+
+async def test_real_kernel_excludes_parallel_subagent_wait_from_timeout(session):
+    config = _config(max_depth=1, exec_timeout=1)
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(session.dir),
+        engine_factory=_DelayedEngine,
+    )
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": (
+                                "import asyncio\n"
+                                "results = await asyncio.gather(rlm('1.4'), rlm('1.5'))\n"
+                                "print([result.answer for result in results])"
+                            )
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+        supervisor=supervisor,
+        invocation_id=supervisor.root_id,
+    )
+    try:
+        result = await engine.run("delegate")
+    finally:
+        await supervisor.aclose()
+
+    assert result.answer == "done"
+    assert tool_result(client).strip() == "['child:1.4', 'child:1.5']"
+    assert "execution timed out" not in tool_result(client)
+
+
+async def test_active_subagent_does_not_shield_stuck_kernel(session):
+    _SometimesBlockingEngine.state = _EngineState()
+    _SometimesBlockingEngine.started = asyncio.Event()
+    config = _config(max_depth=1, exec_timeout=1)
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(session.dir),
+        engine_factory=_SometimesBlockingEngine,
+    )
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": (
+                                "import asyncio\n"
+                                "child = asyncio.create_task(rlm('wait'))\n"
+                                "await asyncio.sleep(0.2)\n"
+                                "while True: pass"
+                            )
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="recovered"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+        supervisor=supervisor,
+        invocation_id=supervisor.root_id,
+    )
+    try:
+        result = await asyncio.wait_for(engine.run("delegate"), timeout=12)
+    finally:
+        await supervisor.aclose()
+
+    assert result.answer == "recovered"
+    assert "execution timed out after 1s" in tool_result(client)
+    assert _SometimesBlockingEngine.state.cancelled == 1
+    assert supervisor.active_calls == 0
 
 
 async def test_real_kernel_cancels_child_and_remains_reusable(session):

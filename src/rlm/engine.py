@@ -528,7 +528,10 @@ class RLMEngine:
                     )
                 try:
                     if scope_id is not None:
-                        repl.set_broker_scope(scope_id)
+                        repl.set_broker_scope(
+                            scope_id,
+                            self._supervisor.broker_waits(scope_id),
+                        )
                     tool_task = asyncio.create_task(
                         asyncio.to_thread(
                             tool.execute, tool_args, self._tool_context(messages)

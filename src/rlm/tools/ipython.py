@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rlm.broker import BrokerWaitTracker
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
 from rlm.tools.skills import discover_skills
@@ -196,6 +197,7 @@ class IPythonREPL:
         self._ipc_dir = None
         self._lock = threading.Lock()
         self._interrupt_requested = threading.Event()
+        self._broker_waits: BrokerWaitTracker | None = None
 
     def start(self):
         """Start the IPython kernel."""
@@ -335,10 +337,15 @@ if {allow_recursion!r}:
 """
         self._execute_silent(setup_code)
 
-    def set_broker_scope(self, scope_id: str | None) -> None:
+    def set_broker_scope(
+        self,
+        scope_id: str | None,
+        broker_waits: BrokerWaitTracker | None = None,
+    ) -> None:
         """Set the active recursive-call scope inside the kernel."""
         if self.broker_endpoint is not None:
             self._execute_silent(f"_rlm_broker.set_scope({scope_id!r})")
+        self._broker_waits = broker_waits
 
     def _execute_silent(self, code: str):
         """Execute code without capturing output (for setup)."""
@@ -400,7 +407,10 @@ if {allow_recursion!r}:
 
     def _execute_locked(self, code: str, timeout: int | None) -> str:
         msg_id = self._kc.execute(code)
-        deadline = None if timeout is None else time.monotonic() + timeout
+        charged_time = 0.0
+        last_wall_time = time.monotonic()
+        last_process_time: float | None = None
+        was_waiting = False
 
         outputs: list[str] = []
         try:
@@ -408,10 +418,33 @@ if {allow_recursion!r}:
                 if self._interrupt_requested.is_set():
                     self._interrupt_and_recover()
                     break
-                if deadline is None:
+                if timeout is None:
                     wait_timeout = 0.1
                 else:
-                    remaining = deadline - time.monotonic()
+                    now = time.monotonic()
+                    waits = (
+                        self._broker_waits.snapshot()
+                        if self._broker_waits is not None
+                        else None
+                    )
+                    is_waiting = waits is not None and waits.responsive
+                    # Trusted broker waits suspend wall time, but kernel CPU used
+                    # during the wait still belongs to this cell's execution budget.
+                    if (
+                        was_waiting
+                        and is_waiting
+                        and last_process_time is not None
+                        and waits.process_time is not None
+                    ):
+                        charged_time += max(0.0, waits.process_time - last_process_time)
+                    else:
+                        charged_time += now - last_wall_time
+                    last_wall_time = now
+                    last_process_time = (
+                        waits.process_time if waits is not None else None
+                    )
+                    was_waiting = is_waiting
+                    remaining = timeout - charged_time
                     if remaining <= 0:
                         self._interrupt_and_recover()
                         outputs.append(

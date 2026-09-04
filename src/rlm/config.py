@@ -68,6 +68,8 @@ class ExecutionPolicy(_ConfigModel):
     head + tail, with a warning naming the original size). None = the built-in 20KB
     default; an explicit value overrides it in either direction."""
     exec_timeout: int = Field(default=300, gt=0)
+    """Active execution budget for one IPython cell. Responsive waits on supervisor-owned
+    sub-agents and skills do not consume it; kernel CPU and unresponsive time do."""
     max_tokens: int | None = Field(default=None, gt=0)
     compaction: bool = True
     """Compact the context once it outgrows ``summarize_at_tokens`` (and recover from
