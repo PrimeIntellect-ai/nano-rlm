@@ -292,8 +292,8 @@ class _CallableModule(types.ModuleType):
     # Make `await <skill>(...)` shorthand for `await <skill>.run(...)`.
     # __call__ is looked up on the type, not the instance, so the
     # override has to live on the class.
-    async def __call__(self, *args, **kwargs):
-        return await self.run(*args, **kwargs)
+    def __call__(self, *args, **kwargs):
+        return self.run(*args, **kwargs)
 
 
 def _wrap_callable(mod, log_source, register=True):

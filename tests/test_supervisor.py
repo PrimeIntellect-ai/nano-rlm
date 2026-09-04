@@ -486,6 +486,93 @@ async def test_execution_around_subagent_wait_remains_charged(session):
     assert "child:1.2" not in tool_result(client)
 
 
+async def test_background_subagent_does_not_shield_unrelated_wait(session):
+    config = _config(max_depth=1, exec_timeout=1)
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(session.dir),
+        engine_factory=_DelayedEngine,
+    )
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": (
+                                "import asyncio\n"
+                                "child = asyncio.create_task(rlm('2.0'))\n"
+                                "await asyncio.sleep(2.0)\n"
+                                "print((await child).answer)"
+                            )
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="recovered"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+        supervisor=supervisor,
+        invocation_id=supervisor.root_id,
+    )
+    try:
+        result = await asyncio.wait_for(engine.run("delegate"), timeout=12)
+    finally:
+        await supervisor.aclose()
+
+    assert result.answer == "recovered"
+    assert "execution timed out after 1s" in tool_result(client)
+    assert "child:2.0" not in tool_result(client)
+
+
+async def test_mixed_gather_does_not_shield_non_broker_wait(session):
+    config = _config(max_depth=1, exec_timeout=1)
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(session.dir),
+        engine_factory=_DelayedEngine,
+    )
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": (
+                                "import asyncio\n"
+                                "await asyncio.gather(rlm('2.0'), asyncio.sleep(2.0))"
+                            )
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="recovered"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+        supervisor=supervisor,
+        invocation_id=supervisor.root_id,
+    )
+    try:
+        result = await asyncio.wait_for(engine.run("delegate"), timeout=12)
+    finally:
+        await supervisor.aclose()
+
+    assert result.answer == "recovered"
+    assert "execution timed out after 1s" in tool_result(client)
+
+
 async def test_active_subagent_does_not_shield_stuck_kernel(session):
     _SometimesBlockingEngine.state = _EngineState()
     _SometimesBlockingEngine.started = asyncio.Event()

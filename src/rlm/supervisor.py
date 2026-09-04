@@ -510,7 +510,11 @@ class SessionTreeSupervisor:
     ) -> None:
         while True:
             heartbeat = parse_heartbeat(await read_frame(reader))
-            wait_tracker.heartbeat(operation_id, heartbeat["process_time"])
+            wait_tracker.heartbeat(
+                operation_id,
+                heartbeat["process_time"],
+                heartbeat["exclusive_wait"],
+            )
 
     async def aclose(self) -> None:
         if self._closed and self._close_task is None:
