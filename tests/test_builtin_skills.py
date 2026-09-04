@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -156,6 +157,51 @@ print('SERPER_API_KEY=' not in child_env)
     assert secret not in source
     meta = json.loads((session.dir / "meta.json").read_text())
     assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"search": 1}
+
+
+async def test_brokered_skill_wait_counts_toward_execution_timeout(
+    monkeypatch, session
+):
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            await asyncio.sleep(2)
+            raise AssertionError("timed-out search should be cancelled")
+
+    monkeypatch.setattr("rlm.skills.search.httpx.AsyncClient", FakeClient)
+    config = RuntimeConfig(
+        model="test-model",
+        provider=ProviderConfig(base_url="http://interceptor", api_key="secret"),
+        invocation=InvocationContext(),
+        policy=ExecutionPolicy(exec_timeout=1),
+        skills=("search",),
+        search_api_key="search-secret",
+    )
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall("ipython", {"code": "await search(query='needle')"})
+                ]
+            ),
+            DummyMessage(content="recovered"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+    )
+
+    result = await engine.run("search")
+
+    assert result.answer == "recovered"
+    assert "execution timed out after 1s" in tool_result(client)
 
 
 async def test_bash_returns_output():

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import json
 import keyword
 import struct
+import threading
+import time
+import weakref
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -18,6 +23,8 @@ from rlm.types import RLMResult
 
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+BROKER_HEARTBEAT_INTERVAL_SECONDS = 0.25
+BROKER_HEARTBEAT_GRACE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -26,8 +33,70 @@ class BrokerEndpoint:
     capability: str
 
 
+@dataclass(frozen=True)
+class BrokerWaitSnapshot:
+    """Thread-safe view of broker work awaited by one IPython cell."""
+
+    active: bool
+    responsive: bool
+    process_time: float | None
+
+
+class BrokerWaitTracker:
+    """Track live broker operations and kernel liveness for one cell."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._heartbeats: dict[str, tuple[float, bool]] = {}
+        self._process_time: float | None = None
+
+    def start(self, operation_id: str) -> None:
+        with self._lock:
+            self._heartbeats[operation_id] = (0.0, False)
+
+    def heartbeat(
+        self, operation_id: str, process_time: float, exclusive_wait: bool
+    ) -> None:
+        with self._lock:
+            if operation_id not in self._heartbeats:
+                return
+            self._heartbeats[operation_id] = (time.monotonic(), exclusive_wait)
+            if self._process_time is None or process_time > self._process_time:
+                self._process_time = process_time
+
+    def finish(self, operation_id: str) -> None:
+        with self._lock:
+            self._heartbeats.pop(operation_id, None)
+
+    def snapshot(self) -> BrokerWaitSnapshot:
+        with self._lock:
+            active = bool(self._heartbeats)
+            freshest_exclusive = max(
+                (
+                    heartbeat_at
+                    for heartbeat_at, exclusive in self._heartbeats.values()
+                    if exclusive
+                ),
+                default=0.0,
+            )
+            return BrokerWaitSnapshot(
+                active=active,
+                responsive=(
+                    freshest_exclusive > 0
+                    and time.monotonic() - freshest_exclusive
+                    <= BROKER_HEARTBEAT_GRACE_SECONDS
+                ),
+                process_time=self._process_time,
+            )
+
+
 _endpoint: BrokerEndpoint | None = None
 _scope_id: str | None = None
+_original_gather = asyncio.gather
+_subagent_calls: weakref.WeakSet[Coroutine[Any, Any, Any]] = weakref.WeakSet()
+_collective_subagent_waits: weakref.WeakSet[Coroutine[Any, Any, Any]] = (
+    weakref.WeakSet()
+)
 
 _JSON_TO_PY = {
     "string": str,
@@ -63,6 +132,16 @@ BrokerRequest = Annotated[
 _REQUEST_ADAPTER = TypeAdapter(BrokerRequest)
 
 
+class BrokerHeartbeat(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+    op: Literal["wait.heartbeat"]
+    process_time: Annotated[float, Field(ge=0)]
+    exclusive_wait: bool
+
+
+_HEARTBEAT_ADAPTER = TypeAdapter(BrokerHeartbeat)
+
+
 class _BrokerSuccess(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid")
     result: dict[str, Any] | str
@@ -89,6 +168,13 @@ def parse_request(value: dict[str, Any]) -> BrokerRequest:
         raise ValueError("invalid broker request") from None
 
 
+def parse_heartbeat(value: dict[str, Any]) -> BrokerHeartbeat:
+    try:
+        return _HEARTBEAT_ADAPTER.validate_python(value)
+    except ValidationError:
+        raise ValueError("invalid broker heartbeat") from None
+
+
 def result_to_payload(result: RLMResult) -> dict[str, Any]:
     return _RESULT_ADAPTER.dump_python(result, mode="json")
 
@@ -108,6 +194,8 @@ def result_from_payload(value: dict[str, Any]) -> RLMResult:
 def configure(endpoint: BrokerEndpoint | None) -> None:
     global _endpoint
     _endpoint = endpoint
+    if endpoint is not None:
+        _install_asyncio_hooks()
 
 
 def is_configured() -> bool:
@@ -145,43 +233,52 @@ async def write_frame(
     await writer.drain()
 
 
-async def run(prompt: str) -> RLMResult:
+def run(prompt: str) -> Coroutine[Any, Any, RLMResult]:
     """Run a recursive RLM through the trusted session supervisor."""
     if _endpoint is None or _scope_id is None:
         raise RuntimeError("recursive RLM calls are unavailable outside an active cell")
     if not isinstance(prompt, str):
         raise TypeError("prompt must be a string")
-    response = await _request(
-        {
-            "op": "rlm.run",
-            "capability": _endpoint.capability,
-            "scope_id": _scope_id,
-            "prompt": prompt,
-        }
+    payload = BrokerRunRequest(
+        op="rlm.run",
+        capability=_endpoint.capability,
+        scope_id=_scope_id,
+        prompt=prompt,
     )
-    result = response.get("result")
-    if not isinstance(result, dict):
-        raise RuntimeError("invalid response from RLM supervisor")
-    return result_from_payload(result)
+
+    async def invoke() -> RLMResult:
+        response = await _request(payload, _is_exclusive_subagent_wait(creator_task))
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("invalid response from RLM supervisor")
+        return result_from_payload(result)
+
+    creator_task = asyncio.current_task()
+    call = invoke()
+    _subagent_calls.add(call)
+    return call
 
 
-async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
+def call_skill(capability: str, arguments: dict[str, Any]) -> Coroutine[Any, Any, str]:
     """Invoke a supervisor-owned skill through its opaque capability."""
     if _endpoint is None or _scope_id is None:
         raise RuntimeError("brokered calls are unavailable outside an active cell")
-    response = await _request(
-        {
-            "op": "skill.call",
-            "capability": _endpoint.capability,
-            "scope_id": _scope_id,
-            "skill_capability": capability,
-            "arguments": arguments,
-        }
+    payload = BrokerSkillRequest(
+        op="skill.call",
+        capability=_endpoint.capability,
+        scope_id=_scope_id,
+        skill_capability=capability,
+        arguments=arguments,
     )
-    result = response.get("result")
-    if not isinstance(result, str):
-        raise RuntimeError("invalid skill response from RLM supervisor")
-    return result
+
+    async def invoke() -> str:
+        response = await _request(payload, exclusive_wait=False)
+        result = response.get("result")
+        if not isinstance(result, str):
+            raise RuntimeError("invalid skill response from RLM supervisor")
+        return result
+
+    return invoke()
 
 
 def make_skill(descriptor: dict[str, Any]):
@@ -190,8 +287,8 @@ def make_skill(descriptor: dict[str, Any]):
     description = descriptor["description"]
     schema = descriptor["input_schema"]
 
-    async def run(**kwargs: Any) -> str:
-        return await call_skill(capability, kwargs)
+    def run(**kwargs: Any) -> Coroutine[Any, Any, str]:
+        return call_skill(capability, kwargs)
 
     properties = schema.get("properties", {})
     required = set(schema.get("required", []))
@@ -213,18 +310,23 @@ def make_skill(descriptor: dict[str, Any]):
     return run
 
 
-async def _request(payload: BrokerRequest) -> BrokerResponse:
+async def _request(payload: BrokerRequest, exclusive_wait: bool) -> BrokerResponse:
     if _endpoint is None:
         raise RuntimeError("brokered calls are unavailable outside an active cell")
     reader, writer = await asyncio.open_unix_connection(_endpoint.socket_path)
+    heartbeat_task: asyncio.Task[None] | None = None
     try:
         await write_frame(
             writer,
             payload,
             MAX_REQUEST_BYTES,
         )
+        heartbeat_task = asyncio.create_task(_send_heartbeats(writer, exclusive_wait))
         raw_response = await read_frame(reader, MAX_RESPONSE_BYTES)
     finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
         writer.close()
         await writer.wait_closed()
     try:
@@ -234,3 +336,49 @@ async def _request(payload: BrokerRequest) -> BrokerResponse:
     if "error" in response:
         raise RuntimeError(response["error"])
     return response
+
+
+async def _send_heartbeats(writer: asyncio.StreamWriter, exclusive_wait: bool) -> None:
+    while True:
+        await write_frame(
+            writer,
+            {
+                "op": "wait.heartbeat",
+                "process_time": time.process_time(),
+                "exclusive_wait": exclusive_wait,
+            },
+            MAX_REQUEST_BYTES,
+        )
+        await asyncio.sleep(BROKER_HEARTBEAT_INTERVAL_SECONDS)
+
+
+def _is_exclusive_subagent_wait(creator_task: asyncio.Task[Any] | None) -> bool:
+    current_task = asyncio.current_task()
+    if current_task is creator_task:
+        return True
+    if current_task is None:
+        return False
+    try:
+        return current_task.get_coro() in _collective_subagent_waits
+    except TypeError:
+        return False
+
+
+def _is_subagent_call(value: Any) -> bool:
+    try:
+        return value in _subagent_calls
+    except TypeError:
+        return False
+
+
+@functools.wraps(asyncio.gather)
+def _subagent_aware_gather(*aws: Any, **kwargs: Any):
+    if aws and all(_is_subagent_call(aw) for aw in aws):
+        _collective_subagent_waits.update(aws)
+    return _original_gather(*aws, **kwargs)
+
+
+def _install_asyncio_hooks() -> None:
+    if asyncio.gather is _subagent_aware_gather:
+        return
+    asyncio.gather = _subagent_aware_gather

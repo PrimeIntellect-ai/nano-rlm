@@ -115,6 +115,8 @@ results = await asyncio.gather(
 
 Recursive calls are created by a session-local supervisor rather than by the IPython kernel. The supervisor assigns depth and session ancestry, enforces the concurrency and total-call limits, and cancels descendants when their parent cell or session closes. When recursion is disabled by depth, the system prompt does not advertise these APIs and child runs beyond the depth limit fail immediately.
 
+The IPython execution timeout measures active cell execution. Time spent responsively awaiting a supervisor-owned sub-agent does not consume that budget, nor does an `asyncio.gather` containing only sub-agent calls. Kernel CPU, skills, ordinary waits, mixed gathers, background sub-agent tasks, and periods without broker heartbeats still do. Recursive work remains bounded independently by the tree resource policy and the runtime hosting the rollout.
+
 ## Compaction
 
 There is no model-driven compaction tool. Compaction is on by default and unlimited (the policy's `compaction` field turns it off, `max_compactions` caps it); the default 1M `max_total_tokens` tree budget keeps sessions bounded, since each compaction cycle itself spends new tokens. The engine reads the model context window from the provider's `/models` response and compacts when 16k tokens remain below it; small windows keep at least half. Set `summarize_at_tokens` to pin the threshold explicitly. Without a known window or explicit threshold, proactive compaction stays off, but a provider overflow still triggers it reactively. A tool result larger than 20KB is truncated to its head and tail before it enters the conversation, with a warning naming the original size.

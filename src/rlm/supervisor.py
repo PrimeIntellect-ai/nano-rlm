@@ -9,13 +9,15 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rlm.broker import (
     BrokerEndpoint,
+    BrokerWaitTracker,
+    parse_heartbeat,
     parse_request,
     read_frame,
     result_to_payload,
@@ -58,6 +60,7 @@ class _Scope:
     invocation_id: str
     tasks: set[asyncio.Task[Any]]
     request_id: str | None = None
+    broker_waits: BrokerWaitTracker = field(default_factory=BrokerWaitTracker)
 
 
 def depth_capacities(max_depth: int, limit: int, root_depth: int = 0) -> dict[int, int]:
@@ -264,6 +267,12 @@ class SessionTreeSupervisor:
             self._scopes[scope_id] = _Scope(invocation_id, set(), request_id)
             return scope_id
 
+    def broker_waits(self, scope_id: str) -> BrokerWaitTracker:
+        scope = self._scopes.get(scope_id)
+        if scope is None:
+            raise RuntimeError("broker scope is no longer active")
+        return scope.broker_waits
+
     async def close_scope(self, scope_id: str) -> None:
         async with self._lock:
             scope = self._scopes.pop(scope_id, None)
@@ -432,7 +441,9 @@ class SessionTreeSupervisor:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         operation_task: asyncio.Task[Any] | None = None
-        disconnect_task: asyncio.Task[bytes] | None = None
+        heartbeat_task: asyncio.Task[None] | None = None
+        wait_tracker: BrokerWaitTracker | None = None
+        operation_id: str | None = None
         try:
             try:
                 request = await asyncio.wait_for(
@@ -454,12 +465,17 @@ class SessionTreeSupervisor:
                     request["skill_capability"],
                     request["arguments"],
                 )
-            disconnect_task = asyncio.create_task(reader.read(1))
+            wait_tracker = self.broker_waits(request["scope_id"])
+            operation_id = uuid.uuid4().hex
+            wait_tracker.start(operation_id)
+            heartbeat_task = asyncio.create_task(
+                self._receive_heartbeats(reader, wait_tracker, operation_id)
+            )
             done, _ = await asyncio.wait(
-                {operation_task, disconnect_task},
+                {operation_task, heartbeat_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if disconnect_task in done and operation_task not in done:
+            if heartbeat_task in done and operation_task not in done:
                 operation_task.cancel()
                 await asyncio.gather(operation_task, return_exceptions=True)
                 return
@@ -474,15 +490,31 @@ class SessionTreeSupervisor:
                 except (ConnectionError, OSError, asyncio.IncompleteReadError):
                     pass
         finally:
-            if disconnect_task is not None:
-                disconnect_task.cancel()
-                await asyncio.gather(disconnect_task, return_exceptions=True)
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+            if wait_tracker is not None and operation_id is not None:
+                wait_tracker.finish(operation_id)
             writer.close()
             try:
                 await writer.wait_closed()
             except (ConnectionError, OSError):
                 pass
             self._connection_writers.discard(writer)
+
+    async def _receive_heartbeats(
+        self,
+        reader: asyncio.StreamReader,
+        wait_tracker: BrokerWaitTracker,
+        operation_id: str,
+    ) -> None:
+        while True:
+            heartbeat = parse_heartbeat(await read_frame(reader))
+            wait_tracker.heartbeat(
+                operation_id,
+                heartbeat["process_time"],
+                heartbeat["exclusive_wait"],
+            )
 
     async def aclose(self) -> None:
         if self._closed and self._close_task is None:
