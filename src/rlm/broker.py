@@ -93,8 +93,10 @@ class BrokerWaitTracker:
 _endpoint: BrokerEndpoint | None = None
 _scope_id: str | None = None
 _original_gather = asyncio.gather
-_broker_calls: weakref.WeakSet[Coroutine[Any, Any, Any]] = weakref.WeakSet()
-_collective_waits: weakref.WeakSet[Coroutine[Any, Any, Any]] = weakref.WeakSet()
+_subagent_calls: weakref.WeakSet[Coroutine[Any, Any, Any]] = weakref.WeakSet()
+_collective_subagent_waits: weakref.WeakSet[Coroutine[Any, Any, Any]] = (
+    weakref.WeakSet()
+)
 
 _JSON_TO_PY = {
     "string": str,
@@ -245,7 +247,7 @@ def run(prompt: str) -> Coroutine[Any, Any, RLMResult]:
     )
 
     async def invoke() -> RLMResult:
-        response = await _request(payload, _is_exclusive_wait(creator_task))
+        response = await _request(payload, _is_exclusive_subagent_wait(creator_task))
         result = response.get("result")
         if not isinstance(result, dict):
             raise RuntimeError("invalid response from RLM supervisor")
@@ -253,7 +255,7 @@ def run(prompt: str) -> Coroutine[Any, Any, RLMResult]:
 
     creator_task = asyncio.current_task()
     call = invoke()
-    _broker_calls.add(call)
+    _subagent_calls.add(call)
     return call
 
 
@@ -270,16 +272,13 @@ def call_skill(capability: str, arguments: dict[str, Any]) -> Coroutine[Any, Any
     )
 
     async def invoke() -> str:
-        response = await _request(payload, _is_exclusive_wait(creator_task))
+        response = await _request(payload, exclusive_wait=False)
         result = response.get("result")
         if not isinstance(result, str):
             raise RuntimeError("invalid skill response from RLM supervisor")
         return result
 
-    creator_task = asyncio.current_task()
-    call = invoke()
-    _broker_calls.add(call)
-    return call
+    return invoke()
 
 
 def make_skill(descriptor: dict[str, Any]):
@@ -353,33 +352,33 @@ async def _send_heartbeats(writer: asyncio.StreamWriter, exclusive_wait: bool) -
         await asyncio.sleep(BROKER_HEARTBEAT_INTERVAL_SECONDS)
 
 
-def _is_exclusive_wait(creator_task: asyncio.Task[Any] | None) -> bool:
+def _is_exclusive_subagent_wait(creator_task: asyncio.Task[Any] | None) -> bool:
     current_task = asyncio.current_task()
     if current_task is creator_task:
         return True
     if current_task is None:
         return False
     try:
-        return current_task.get_coro() in _collective_waits
+        return current_task.get_coro() in _collective_subagent_waits
     except TypeError:
         return False
 
 
-def _is_broker_call(value: Any) -> bool:
+def _is_subagent_call(value: Any) -> bool:
     try:
-        return value in _broker_calls
+        return value in _subagent_calls
     except TypeError:
         return False
 
 
 @functools.wraps(asyncio.gather)
-def _broker_aware_gather(*aws: Any, **kwargs: Any):
-    if aws and all(_is_broker_call(aw) for aw in aws):
-        _collective_waits.update(aws)
+def _subagent_aware_gather(*aws: Any, **kwargs: Any):
+    if aws and all(_is_subagent_call(aw) for aw in aws):
+        _collective_subagent_waits.update(aws)
     return _original_gather(*aws, **kwargs)
 
 
 def _install_asyncio_hooks() -> None:
-    if asyncio.gather is _broker_aware_gather:
+    if asyncio.gather is _subagent_aware_gather:
         return
-    asyncio.gather = _broker_aware_gather
+    asyncio.gather = _subagent_aware_gather

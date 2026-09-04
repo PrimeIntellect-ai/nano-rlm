@@ -115,7 +115,7 @@ results = await asyncio.gather(
 
 Recursive calls are created by a session-local supervisor rather than by the IPython kernel. The supervisor assigns depth and session ancestry, enforces the concurrency and total-call limits, and cancels descendants when their parent cell or session closes. When recursion is disabled by depth, the system prompt does not advertise these APIs and child runs beyond the depth limit fail immediately.
 
-The IPython execution timeout measures active cell execution. Time spent responsively awaiting a supervisor-owned sub-agent or skill does not consume that budget, nor does an `asyncio.gather` containing only those broker calls. Kernel CPU, ordinary waits, mixed gathers, background broker tasks, and periods without broker heartbeats still do. Recursive work remains bounded independently by the tree resource policy and the runtime hosting the rollout.
+The IPython execution timeout measures active cell execution. Time spent responsively awaiting a supervisor-owned sub-agent does not consume that budget, nor does an `asyncio.gather` containing only sub-agent calls. Kernel CPU, skills, ordinary waits, mixed gathers, background sub-agent tasks, and periods without broker heartbeats still do. Recursive work remains bounded independently by the tree resource policy and the runtime hosting the rollout.
 
 ## Compaction
 
