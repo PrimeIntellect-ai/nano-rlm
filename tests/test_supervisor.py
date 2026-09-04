@@ -440,6 +440,52 @@ async def test_real_kernel_excludes_parallel_subagent_wait_from_timeout(session)
     assert "execution timed out" not in tool_result(client)
 
 
+async def test_execution_around_subagent_wait_remains_charged(session):
+    config = _config(max_depth=1, exec_timeout=1)
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(session.dir),
+        engine_factory=_DelayedEngine,
+    )
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": (
+                                "import time\n"
+                                "time.sleep(0.55)\n"
+                                "result = await rlm('1.2')\n"
+                                "time.sleep(0.55)\n"
+                                "print(result.answer)"
+                            )
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="recovered"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=config,
+        supervisor=supervisor,
+        invocation_id=supervisor.root_id,
+    )
+    try:
+        result = await asyncio.wait_for(engine.run("delegate"), timeout=12)
+    finally:
+        await supervisor.aclose()
+
+    assert result.answer == "recovered"
+    assert "execution timed out after 1s" in tool_result(client)
+    assert "child:1.2" not in tool_result(client)
+
+
 async def test_active_subagent_does_not_shield_stuck_kernel(session):
     _SometimesBlockingEngine.state = _EngineState()
     _SometimesBlockingEngine.started = asyncio.Event()
