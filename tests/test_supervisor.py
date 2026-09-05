@@ -149,6 +149,7 @@ async def test_parallel_children_respect_depth_capacity(tmp_path):
         session.close()
 
     assert [result.answer for result in results] == [f"child:{i}" for i in range(6)]
+    assert [result.task for result in results] == [str(i) for i in range(6)]
     assert _FastEngine.state.peak == 2
     assert supervisor.total_calls == 6
 
@@ -181,6 +182,7 @@ async def test_total_call_limit_is_atomic(tmp_path):
         sum(result.answer == "[recursive call limit reached]" for result in results)
         == 1
     )
+    assert [result.task for result in results] == [str(i) for i in range(3)]
 
 
 async def test_cancel_while_awaiting_registry_lock_closes_child_session(
@@ -365,6 +367,7 @@ child = await rlm('hello')
 other = await rlm.api.run('again')
 subprocess_env = subprocess.check_output(['env'], text=True)
 print(child.answer, other.answer)
+print(child.task, other.task)
 print(all(name not in os.environ for name in secret_names))
 print(all(f'{name}=' not in subprocess_env for name in secret_names))
 """
@@ -390,6 +393,7 @@ print(all(f'{name}=' not in subprocess_env for name in secret_names))
     assert result.answer == "done"
     assert tool_result(client).strip().splitlines() == [
         "child:hello child:again",
+        "hello again",
         "True",
         "True",
     ]

@@ -7,8 +7,9 @@ from openai import APIError, APIStatusError, AsyncOpenAI
 
 CHECKPOINT_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary another LLM can ACT on immediately to resume the task.
 
+The harness preserves the caller's requests verbatim alongside your summary. Do not reconstruct or repeat the task; focus on the state needed to continue.
+
 Include:
-- The task, requested deliverable, and important constraints
 - Current progress, established facts with source URLs or file paths, and key decisions
 - Unresolved questions, contradictory evidence, and a NUMBERED list of remaining next steps
 - Important tool state that the next model can reuse

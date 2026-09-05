@@ -130,9 +130,10 @@ def build_system_prompt(
     if depth > 0:
         done_line = (
             "When the task is done, stop calling tools and state your final "
-            "answer. It is the only thing your caller receives, so make it a "
-            "complete, self-contained result — the answer plus the evidence "
-            "needed to trust it (sources, file paths, values)."
+            "answer. It is the only report your caller receives, so include "
+            "the answer plus the evidence needed to trust it (sources, file paths, "
+            "values). The harness returns your exact assignment separately as "
+            "result.task; you do not need to repeat the assignment in your report."
         )
     else:
         done_line = "When you are done, stop calling tools and state your final answer."
@@ -140,6 +141,7 @@ def build_system_prompt(
     parts: list[str] = [
         role,
         done_line,
+        "The harness preserves your caller's requests verbatim across context compaction.",
         "",
         f"Working directory: {cwd}",
         f"Conversation log: {log_dir}/messages.jsonl",
@@ -181,7 +183,7 @@ def build_system_prompt(
         parts.extend(
             [
                 "",
-                "A callable `rlm` is already in your global namespace — call it directly with `await rlm('sub-task')` to spawn a recursive sub-agent. Returns an `RLMResult` with `.answer` (string), `.usage`, `.turns`, and `.session_dir`.",
+                "A callable `rlm` is already in your global namespace — call it directly with `await rlm('sub-task')` to spawn a recursive sub-agent. Returns an `RLMResult` with `.answer` (the child's report), `.task` (the exact assignment you passed, automatically preserved by the harness), `.usage`, `.turns`, and `.session_dir`. Use `.task` to identify the assignment associated with each report; do not ask the child to reconstruct it.",
                 "For parallel sub-agents, use normal Python async patterns such as `await asyncio.gather(rlm('task1'), rlm('task2'))`.",
             ]
         )

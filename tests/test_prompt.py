@@ -58,6 +58,26 @@ def test_ipython_control_prompt_included_for_ipython_tool():
     assert IPYTHON_CONTROL_PROMPT in prompt
     assert "`%%bash` as the very first line" in prompt
     assert "project's interpreter" in prompt
+    assert "preserves your caller's requests verbatim" in prompt
+    recursive = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        allow_recursion=True,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+    )
+    assert "`.task` (the exact assignment you passed" in recursive
+    child = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        depth=1,
+        allow_recursion=False,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+    )
+    assert "returns your exact assignment separately as result.task" in child
 
 
 def test_ipython_control_prompt_omitted_without_ipython_tool():

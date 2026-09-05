@@ -173,6 +173,8 @@ async def test_engine_prompt_preserves_conversation(session):
 
     assert first.answer == "first"
     assert second.answer == "second"
+    assert first.task == "one"
+    assert second.task == "two"
     assert first.turns == 1
     assert second.turns == 1
     assert first.usage == TokenUsage(prompt_tokens=1, completion_tokens=1)
@@ -412,6 +414,7 @@ async def test_depth_limit_is_a_completed_result(session):
 
     meta = json.loads((Path(session.dir) / "meta.json").read_text())
     assert result.answer == "[depth limit 0 reached, cannot start]"
+    assert result.task == "too deep"
     assert meta["status"] == "done"
     assert meta["metrics"]["stop_reason"] == "depth_limit"
 
