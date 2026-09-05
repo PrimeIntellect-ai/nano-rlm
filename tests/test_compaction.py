@@ -184,6 +184,7 @@ async def test_tool_result_overflow_compacts_and_retries(session):
         engine.close()
 
     assert result.answer == "done"
+    assert result.task == "produce a large tool result"
     assert engine._metrics.num_compactions == 1
     assert client.calls[3]["tool_choice"] == "none"
     # The retried work call runs on the rebuilt branch: system + framed summary.
@@ -219,7 +220,8 @@ async def test_repeated_compaction_retains_user_requests_despite_bad_summary(ses
             == 1
         )
         assert "summary without the task" in content
-        await engine.prompt("Include the decisive source URL.")
+        result = await engine.prompt("Include the decisive source URL.")
+        assert result.task == "Include the decisive source URL."
         await engine._compact_branch(engine._messages, turn=1)
         content = engine._messages[1]["content"]
         assert "Identify the original site. Preserve this exact question." in content

@@ -261,3 +261,5 @@ class RLMResult:
     session_dir: Path | None = None
     usage: TokenUsage = field(default_factory=TokenUsage)
     turns: NonNegativeInt = 0
+    task: str = ""
+    """Exact caller-supplied prompt for this invocation, populated by the harness."""

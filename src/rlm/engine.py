@@ -244,6 +244,7 @@ class RLMEngine:
             self._has_result = True
             return RLMResult(
                 answer=answer,
+                task=prompt,
                 turns=0,
                 session_dir=self.session.dir if self.session is not None else None,
             )
@@ -319,6 +320,7 @@ class RLMEngine:
             ),
         )
         result.turns = self._turn - turn_before
+        result.task = prompt
         self._last_answer = result.answer
         self._has_result = True
         return result

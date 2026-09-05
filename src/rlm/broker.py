@@ -157,7 +157,7 @@ _RESPONSE_ADAPTER = TypeAdapter(BrokerResponse)
 
 
 _RESULT_ADAPTER = TypeAdapter(RLMResult)
-_RESULT_FIELDS = {"answer", "session_dir", "usage", "turns"}
+_RESULT_FIELDS = {"answer", "session_dir", "usage", "turns", "task"}
 _USAGE_FIELDS = {"prompt_tokens", "completion_tokens"}
 
 

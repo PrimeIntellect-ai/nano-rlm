@@ -294,11 +294,11 @@ class SessionTreeSupervisor:
             child_depth = parent.runtime_config.invocation.depth + 1
             if child_depth > parent.runtime_config.policy.max_depth:
                 return asyncio.create_task(
-                    self._limit_result(parent, "depth limit reached")
+                    self._limit_result(parent, prompt, "depth limit reached")
                 )
             if self._total_calls >= parent.runtime_config.policy.max_subagent_calls:
                 return asyncio.create_task(
-                    self._limit_result(parent, "recursive call limit reached")
+                    self._limit_result(parent, prompt, "recursive call limit reached")
                 )
             policy = parent.runtime_config.policy
             if (
@@ -306,14 +306,14 @@ class SessionTreeSupervisor:
                 and self._total_turns >= policy.max_total_turns
             ):
                 return asyncio.create_task(
-                    self._limit_result(parent, "turn budget reached")
+                    self._limit_result(parent, prompt, "turn budget reached")
                 )
             if (
                 policy.max_total_tokens is not None
                 and self._total_tokens >= policy.max_total_tokens
             ):
                 return asyncio.create_task(
-                    self._limit_result(parent, "token budget reached")
+                    self._limit_result(parent, prompt, "token budget reached")
                 )
             self._total_calls += 1
             task = asyncio.create_task(
@@ -361,8 +361,12 @@ class SessionTreeSupervisor:
             task.add_done_callback(scope.tasks.discard)
             return task
 
-    async def _limit_result(self, parent: _Invocation, message: str) -> RLMResult:
-        return RLMResult(answer=f"[{message}]", session_dir=parent.session.dir)
+    async def _limit_result(
+        self, parent: _Invocation, prompt: str, message: str
+    ) -> RLMResult:
+        return RLMResult(
+            answer=f"[{message}]", task=prompt, session_dir=parent.session.dir
+        )
 
     async def _run_child(
         self,
@@ -427,6 +431,7 @@ class SessionTreeSupervisor:
                     self.semantic_edges.finish_subagent(child_id)
                     raise
                 self.semantic_edges.finish_subagent(child_id)
+                result.task = prompt
                 return result
             finally:
                 # Close synchronously first: the lock acquisition below can be
