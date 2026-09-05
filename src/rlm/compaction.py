@@ -74,6 +74,48 @@ class CompactionFailed(Exception):
     """Every checkpoint attempt failed - the caller ends the run cleanly instead."""
 
 
+def checkpoint_rejection_reason(
+    choice: Any, *, require_completion_status: bool = False
+) -> str | None:
+    """Validate a checkpoint without importing a provider or renderer implementation.
+
+    ``vf_completion`` is choice-level response metadata, never model-authored text.
+    Absent or explicitly unaudited parser metadata can use the compatible check;
+    known incomplete/invalid output and unsupported metadata always fail closed.
+    """
+    metadata = getattr(choice, "vf_completion", None)
+    if metadata is not None:
+        if not isinstance(metadata, dict) or type(metadata.get("version")) is not int:
+            return "invalid_completion_metadata"
+        if metadata["version"] != 1:
+            return "unsupported_completion_metadata"
+        status = metadata.get("status")
+        reason = metadata.get("reason")
+        if (
+            not isinstance(status, str)
+            or status not in {"complete", "incomplete", "invalid", "unknown"}
+            or not (reason is None or isinstance(reason, str))
+        ):
+            return "invalid_completion_metadata"
+        if status in {"incomplete", "invalid"}:
+            return reason or status
+        if status == "unknown" and (
+            require_completion_status or reason != "parser_unavailable"
+        ):
+            return reason or "unknown_completion_status"
+    elif require_completion_status:
+        return "missing_completion_status"
+    finish = getattr(choice, "finish_reason", None)
+    if finish != "stop":
+        return "output_truncated" if finish == "length" else "non_final_termination"
+    message = choice.message
+    if message.tool_calls:
+        return "tool_call"
+    if not isinstance(message.content, str) or not message.content.strip():
+        return "missing_final_output"
+    return None
+
+
 def is_context_overflow(error: APIStatusError) -> bool:
     details = f"{error} {error.body or ''}"
     # An overflow is deterministic: a 400, or a 413 for a byte-size cap.

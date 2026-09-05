@@ -127,9 +127,22 @@ The IPython execution timeout measures active cell execution. Time spent respons
 
 There is no model-driven compaction tool. Compaction is on by default and unlimited (the policy's `compaction` field turns it off, `max_compactions` caps it); the default 1M `max_total_tokens` tree budget keeps sessions bounded, since each compaction cycle itself spends new tokens. The engine reads the model context window from the provider's `/models` response and compacts when 16k tokens remain below it; small windows keep at least half. Set `summarize_at_tokens` to pin the threshold explicitly. Without a known window or explicit threshold, proactive compaction stays off, but a provider overflow still triggers it reactively. A tool result larger than 20KB is truncated to its head and tail before it enters the conversation, with a warning naming the original size.
 
-The engine asks the model for a plain-text handoff summary and resumes the task on a fresh branch seeded with that summary; reasoning is never part of it. A provider overflow (a 400 or 413 naming a context limit) triggers the same compaction reactively from the current state. A rejected checkpoint request falls back to the last state that passed a threshold check - by definition a state with a full reserve of room - and an empty or tool-calling reply is resampled; after three failed attempts the run ends cleanly with what the conversation holds. An overflow with no history beyond the task propagates: the task alone approaches the window and there is nothing to reclaim.
+The engine asks the model for a plain-text handoff summary and resumes the task on a fresh branch seeded with that summary; reasoning is never part of it. A provider overflow (a 400 or 413 naming a context limit) triggers the same compaction reactively from the current state. A rejected checkpoint request falls back to the last state that passed a threshold check - by definition a state with a full reserve of room - and an empty or tool-calling reply is resampled; after `max_compaction_attempts` failed attempts (default 5) the run ends cleanly with what the conversation holds. An overflow with no history beyond the task propagates: the task alone approaches the window and there is nothing to reclaim.
 
 The IPython kernel keeps running across the compaction, so all variables, imports, and in-memory data are preserved. The model is told to mention important variable names in its summary so the resumed branch knows what is available. The same policy applies to the main agent and all recursive agents.
+
+Checkpoint acceptance uses only normally terminated, nonempty final text without tool calls.
+The provider may attach choice-level `vf_completion` metadata:
+`{"version":1,"status":"incomplete","reason":"unfinished_reasoning"}`.
+Known incomplete/invalid output is rejected even when it contains text or reports `stop`.
+Set `policy.require_compaction_completion_status=true` to require explicit `complete` evidence.
+Otherwise absent metadata or `unknown/parser_unavailable` uses the compatible final-text check;
+unsupported/malformed metadata and unknown termination are rejected.
+
+Each attempt is logged with its request ID, outcome and reason. Attempts, including rejected
+ones, remain charged and represented in the semantic trace. History changes only after a summary
+passes validation. `num_compaction_attempts` and `num_failed_compaction_attempts` distinguish
+attempt outcomes from successful `num_compactions`; failed attempts include cancelled requests.
 
 ## Session Directory
 

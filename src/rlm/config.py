@@ -85,6 +85,8 @@ class ExecutionPolicy(_ConfigModel):
     still bounds the session."""
     max_compaction_attempts: int = Field(default=5, gt=0)
     """Summary-generation attempts within one compaction cycle."""
+    require_compaction_completion_status: bool = False
+    """Require versioned structural-completion evidence instead of the legacy final-text check."""
     max_concurrent_subagents: int = Field(default=4, gt=0)
     max_subagent_calls: int = Field(default=64, gt=0)
     allow_git: bool = False
