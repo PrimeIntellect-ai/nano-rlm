@@ -203,6 +203,7 @@ class RLMEngine:
         self._branch_start_turn: int = 0
 
         self._messages: list[dict] | None = None
+        self._user_prompts: list[str] = []
         self._active_tools: list[BuiltinTool] = []
         self._active_tool_schemas: list[dict] = []
         self._turn = 0
@@ -266,6 +267,7 @@ class RLMEngine:
             # This turn's opening state is the floor for checkpoint fallbacks:
             # a fallback must never drop the newest user instruction.
             self._last_good = len(self._messages)
+        self._user_prompts.append(prompt)
         branch_start_before = self._branch_start_turn
         compacted_before = self._compacted
         semantic_edges_before = self._semantic_edges.checkpoint(self._invocation_id)
@@ -276,6 +278,7 @@ class RLMEngine:
         )
         self._metrics.stop_reason = ""
         try:
+            self.session.log({"type": "user", "turn": self._turn, "content": prompt})
             result = await self._run_loop()
         except BaseException as exc:
             attempted_turns = self._turn - turn_before
@@ -298,6 +301,7 @@ class RLMEngine:
             # kernel/tool side effects, and the append-only audit log describe work
             # that really ran and remain part of session accounting.
             self._messages[:] = messages_before
+            self._user_prompts.pop()
             self._last_good = last_good_before
             self._compacted = compacted_before
             self._branch_start_turn = branch_start_before
@@ -843,8 +847,8 @@ class RLMEngine:
     ) -> None:
         """Ask the model for a handoff summary and rebuild ``messages``.
 
-        Called in-place: mutates ``messages`` to ``[system, user(framing +
-        summary)]`` while preserving the IPython kernel. A summary attempt is
+        Called in-place: mutates ``messages`` to ``[system, user(requests +
+        framing + summary)]`` while preserving the IPython kernel. A summary attempt is
         housekeeping, not a work turn: it does not count toward ``max_total_turns``.
         Its tokens still land in ``_total_usage`` for cost accounting and count
         toward token budgets. Every committed attempt remains represented in the
@@ -910,7 +914,14 @@ class RLMEngine:
 
         system_msg = messages[0]
         self._last_handoff_summary = summary_text
-        compacted_user_content = SUMMARY_FRAMING + "\n\n" + summary_text
+        requests = (
+            "User requests (verbatim JSON strings, in chronological order; later requests "
+            "may revise earlier ones):\n\n"
+            + json.dumps(self._user_prompts, ensure_ascii=False, indent=2)
+        )
+        compacted_user_content = (
+            requests + "\n\n" + SUMMARY_FRAMING + "\n\n" + summary_text
+        )
         messages[:] = [
             system_msg,
             {"role": "user", "content": compacted_user_content},

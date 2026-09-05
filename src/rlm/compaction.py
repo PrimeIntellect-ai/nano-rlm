@@ -7,17 +7,15 @@ from openai import APIError, APIStatusError, AsyncOpenAI
 
 CHECKPOINT_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary another LLM can ACT on immediately to resume the task.
 
-It MUST contain, as fenced code blocks (not prose):
-- The exact shell/test command(s) to reproduce and verify — copy-pasteable, with the real path and test filter
-- Any edit still to apply, as the concrete `await edit(path=..., old_str=..., new_str=...)` call
+Include:
+- The task, requested deliverable, and important constraints
+- Current progress, established facts with source URLs or file paths, and key decisions
+- Unresolved questions, contradictory evidence, and a NUMBERED list of remaining next steps
+- Important tool state that the next model can reuse
 
-Then:
-- A NUMBERED list of remaining next steps
-- Current progress, key decisions, and constraints
+For coding tasks, include exact reproduction/test commands and concrete pending edits in fenced code blocks when applicable. For research tasks, preserve the evidence needed to support or reject candidates. Distinguish verified facts from hypotheses. If the task is already solved, state the answer and its supporting evidence.
 
-Be concise and concrete: prefer runnable commands over descriptions.
-
-Reply with the summary as plain text. Do not call any tools - summarize from the conversation as it stands."""
+Be concise and concrete. Reply with the summary as plain text. Do not call tools or emit tool-call markup; summarize from the conversation as it stands."""
 
 REPL_NOTE = (
     "\n\n"
