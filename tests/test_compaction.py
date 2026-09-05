@@ -265,13 +265,16 @@ async def test_compaction_attempt_limit_is_configurable(session):
 
 
 @pytest.mark.parametrize("succeeds", [False, True])
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+@pytest.mark.parametrize("summarize_at_tokens", [None, 8, 32])
 async def test_rejected_checkpoint_preserves_history_budget_and_edges(
-    session, succeeds
+    session, succeeds, finish_reason, summarize_at_tokens
 ):
     bad = _response(
         DummyMessage(content="unfinished reasoning"),
         prompt_tokens=10,
         completion_tokens=3,
+        finish_reason=finish_reason,
     )
     bad.choices[0].vf_completion = {
         "version": 1,
@@ -301,6 +304,8 @@ async def test_rejected_checkpoint_preserves_history_budget_and_edges(
         {"role": "assistant", "content": "work"},
     ]
     original = deepcopy(messages)
+    engine._last_good = 2
+    engine.summarize_at_tokens = summarize_at_tokens
     try:
         await engine._call_model(messages)
         if succeeds:
@@ -317,7 +322,14 @@ async def test_rejected_checkpoint_preserves_history_budget_and_edges(
         assert engine._metrics.num_compaction_attempts == 2
         assert engine._metrics.num_failed_compaction_attempts == (1 if succeeds else 2)
         assert engine._own_new_tokens == (31 if succeeds else 28)
-        assert client.calls[1]["messages"] == client.calls[2]["messages"]
+        if finish_reason == "length" and summarize_at_tokens == 8:
+            assert client.calls[2]["messages"] == [
+                *original[:2],
+                client.calls[1]["messages"][-1],
+            ]
+            assert len(client.calls[2]["messages"]) < len(client.calls[1]["messages"])
+        else:
+            assert client.calls[1]["messages"] == client.calls[2]["messages"]
         edges = engine._semantic_edges.snapshot()["edges"]
         assert sum(e["type"] == "compaction_attempt" for e in edges) == 2
         assert sum(e["type"] == "compaction" for e in edges) == int(succeeds)
