@@ -66,8 +66,9 @@ EDIT_SKILL_PROMPT = (
 )
 SEARCH_SKILL_PROMPT = (
     "For web search, use the pre-imported async `search` skill from IPython: "
-    '`await search(query="...")`. Results come back as title, URL, and snippet; '
-    "assign the result to a variable so you can revisit it. To cover "
+    '`await search(query="...")` returns one formatted text string containing '
+    "titles, URLs, and snippets, not a list of records. Assign it to a variable "
+    "and print it to read the results. To cover "
     "several angles at once, fan out with `asyncio.gather(search(...), search(...))`."
 )
 FETCH_SKILL_PROMPT = (

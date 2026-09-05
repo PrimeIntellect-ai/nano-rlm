@@ -99,6 +99,7 @@ def test_search_skill_prompt_included_only_when_search_is_installed():
 
     assert SEARCH_SKILL_PROMPT in prompt
     assert "await search(query=" in prompt
+    assert "one formatted text string" in prompt
     assert SEARCH_SKILL_PROMPT not in _prompt(
         [_Tool("ipython")], installed_skills=["search_docs"]
     )
