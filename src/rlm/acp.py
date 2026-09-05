@@ -104,6 +104,7 @@ class _LimitsSnapshot(_ContractModel):
     summarize_at_tokens: int | None = Field(default=None, gt=0)
     max_compactions: int | None = Field(default=None, gt=0)
     max_compaction_attempts: int = Field(gt=0)
+    require_compaction_completion_status: bool = False
     allow_git: bool
 
 

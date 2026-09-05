@@ -27,6 +27,7 @@ from rlm.compaction import (
     CompactionFailed,
     REPL_NOTE,
     SUMMARY_FRAMING,
+    checkpoint_rejection_reason,
     compactable,
     discover_threshold,
     estimated_tokens,
@@ -760,6 +761,8 @@ class RLMEngine:
         request_id = self._semantic_edges.start_request(
             self._invocation_id, compaction_id=compaction_id
         )
+        if checkpoint:
+            self._checkpoint_request_id = request_id
         request: dict = {
             "model": self.model,
             "messages": messages,
@@ -878,7 +881,10 @@ class RLMEngine:
             # resampled. Reasoning is never part of the summary.
             base = messages
             summary_text = ""
-            for _ in range(self.max_compaction_attempts):
+            for attempt in range(1, self.max_compaction_attempts + 1):
+                if cap := self._spent_tree_cap():
+                    raise CompactionFailed(f"{cap} reached before checkpoint attempt")
+                self._metrics.num_compaction_attempts += 1
                 checkpoint = [
                     *base,
                     {"role": "user", "content": checkpoint_prompt},
@@ -890,17 +896,72 @@ class RLMEngine:
                         compaction_id=compaction.compaction_id,
                     )
                 except APIStatusError as e:
+                    self._metrics.num_failed_compaction_attempts += 1
+                    self.session.log(
+                        {
+                            "type": "compaction_attempt",
+                            "compaction_id": compaction.compaction_id,
+                            "request_id": self._checkpoint_request_id,
+                            "attempt": attempt,
+                            "turn": turn,
+                            "status": "failed",
+                            "reason": "context_overflow"
+                            if is_context_overflow(e)
+                            else "provider_error",
+                        }
+                    )
                     if not is_context_overflow(e):
                         raise
                     base = messages[: self._last_good]
                     continue
-                message = response.choices[0].message
-                # Reasoning never enters the summary: only the reply's final text
-                # counts, so a reply that lives entirely in the reasoning channel
-                # is resampled like an empty one.
-                text = (message.content or "").strip()
-                if not message.tool_calls and text:
-                    summary_text = text
+                except BaseException as e:
+                    self._metrics.num_failed_compaction_attempts += 1
+                    self.session.log(
+                        {
+                            "type": "compaction_attempt",
+                            "compaction_id": compaction.compaction_id,
+                            "request_id": self._checkpoint_request_id,
+                            "attempt": attempt,
+                            "turn": turn,
+                            "status": "cancelled"
+                            if isinstance(e, asyncio.CancelledError)
+                            else "failed",
+                            "reason": "cancelled"
+                            if isinstance(e, asyncio.CancelledError)
+                            else "provider_error",
+                        }
+                    )
+                    raise
+                choice = response.choices[0]
+                rejection = checkpoint_rejection_reason(
+                    choice,
+                    require_completion_status=self.runtime_config.policy.require_compaction_completion_status,
+                )
+                metadata = getattr(choice, "vf_completion", None)
+                if rejection:
+                    self._metrics.num_failed_compaction_attempts += 1
+                self.session.log(
+                    {
+                        "type": "compaction_attempt",
+                        "compaction_id": compaction.compaction_id,
+                        "request_id": self._checkpoint_request_id,
+                        "attempt": attempt,
+                        "turn": turn,
+                        "status": "failed" if rejection else "accepted",
+                        "reason": rejection,
+                        "finish_reason": choice.finish_reason,
+                        "completion_status": metadata,
+                        "validation": "strict"
+                        if self.runtime_config.policy.require_compaction_completion_status
+                        else "compatible",
+                        "usage": {
+                            "prompt_tokens": usage.prompt_tokens,
+                            "completion_tokens": usage.completion_tokens,
+                        },
+                    }
+                )
+                if rejection is None:
+                    summary_text = choice.message.content.strip()
                     break
                 self._semantic_edges.release_summary_request(compaction.compaction_id)
             if not summary_text:
@@ -1004,6 +1065,7 @@ class RLMEngine:
                 "summarize_at_tokens": self.summarize_at_tokens,
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "max_compaction_attempts": self.max_compaction_attempts,
+                "require_compaction_completion_status": self.runtime_config.policy.require_compaction_completion_status,
                 "allow_git": self.runtime_config.policy.allow_git,
             },
             "semantic_edges": self._semantic_edges.snapshot(),

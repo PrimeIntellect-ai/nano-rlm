@@ -150,6 +150,8 @@ class RLMMetrics:
 
     # Compaction metrics (auto-summarization at a token threshold)
     num_compactions: int = 0
+    num_compaction_attempts: int = 0
+    num_failed_compaction_attempts: int = 0
     has_compacted: int = 0  # 1 if num_compactions > 0, else 0; aggregates as the per-batch fraction of rollouts that compacted
     turns_since_last_compaction: int = 0
     turns_between_compactions_mean: float = 0.0
