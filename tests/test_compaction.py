@@ -190,6 +190,43 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     retry_messages = client.calls[4]["messages"]
     assert len(retry_messages) == 2
     assert "summary" in retry_messages[1]["content"]
+    assert "produce a large tool result" in retry_messages[1]["content"]
+
+
+async def test_repeated_compaction_retains_user_requests_despite_bad_summary(session):
+    client = _ScriptedClient(
+        [
+            _response(DummyMessage(content="first answer")),
+            _response(DummyMessage(content="<tool_call>ipython</tool_call>")),
+            _response(DummyMessage(content="summary without the task")),
+            _response(DummyMessage(content="second answer")),
+            _response(DummyMessage(content="third summary")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(),
+    )
+    try:
+        await engine.prompt("Identify the original site. Preserve this exact question.")
+        # Exercise two checkpoints on the same branch without another work turn.
+        await engine._compact_branch(engine._messages, turn=0)
+        await engine._compact_branch(engine._messages, turn=0)
+        content = engine._messages[1]["content"]
+        assert (
+            content.count("Identify the original site. Preserve this exact question.")
+            == 1
+        )
+        assert "summary without the task" in content
+        await engine.prompt("Include the decisive source URL.")
+        await engine._compact_branch(engine._messages, turn=1)
+        content = engine._messages[1]["content"]
+        assert "Identify the original site. Preserve this exact question." in content
+        assert "Include the decisive source URL." in content
+        assert "summary without the task" not in content
+    finally:
+        await engine.aclose()
 
 
 async def test_overflow_recovers_without_discovered_threshold(session):

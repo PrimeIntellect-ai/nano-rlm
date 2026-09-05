@@ -289,6 +289,7 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
     with pytest.raises(asyncio.CancelledError):
         await pending
 
+    assert engine._user_prompts == []
     try:
         result = await engine.prompt("continue")
     finally:
@@ -296,6 +297,7 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
 
     assert result.answer == "continued"
     assert result.turns == 1
+    assert engine._user_prompts == ["continue"]
     assert client.calls[-1]["messages"][-2:] == [
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
@@ -448,6 +450,7 @@ async def test_engine_failed_prompt_can_be_retried(session):
     with pytest.raises(RuntimeError, match="boom"):
         await engine.prompt("fail")
 
+    assert engine._user_prompts == []
     try:
         result = await engine.prompt("continue")
     finally:
@@ -462,13 +465,18 @@ async def test_engine_failed_prompt_can_be_retried(session):
         for line in (Path(session.dir) / "messages.jsonl").read_text().splitlines()
     ]
     assert [entry["type"] for entry in log] == [
+        "user",
         "assistant",
         "prompt_rollback",
+        "user",
         "assistant",
         "done",
     ]
-    assert log[1]["attempted_turns"] == 1
-    assert log[1]["reason"] == "error"
+    assert log[0]["content"] == "fail"
+    assert log[2]["attempted_turns"] == 1
+    assert log[2]["reason"] == "error"
+    assert log[3]["content"] == "continue"
+    assert engine._user_prompts == ["continue"]
     assert client.calls[-1]["messages"][-2:] == [
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
