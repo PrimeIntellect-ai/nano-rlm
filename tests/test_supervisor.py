@@ -413,7 +413,7 @@ async def test_real_kernel_excludes_parallel_subagent_wait_from_timeout(session)
                         {
                             "code": (
                                 "import asyncio\n"
-                                "results = await asyncio.gather(rlm('1.4'), rlm('1.5'))\n"
+                                "results = await rlm.gather(rlm('1.4'), rlm('1.5'))\n"
                                 "print([result.answer for result in results])"
                             )
                         },
@@ -542,6 +542,13 @@ async def test_execution_around_subagent_wait_remains_charged(session):
         "await asyncio.sleep(2.0)\n"
         "print(await children)",
         "import asyncio\n"
+        "await asyncio.gather(rlm('3.0'), rlm('3.0'))\n"
+        "print('completed')",
+        "import asyncio\n"
+        "children = asyncio.create_task(rlm.gather(rlm('3.0'), rlm('3.0')))\n"
+        "await asyncio.sleep(2.0)\n"
+        "print(await children)",
+        "import asyncio\n"
         "async def child():\n"
         "    return await rlm('3.0')\n"
         "background = asyncio.create_task(child())\n"
@@ -554,7 +561,7 @@ async def test_execution_around_subagent_wait_remains_charged(session):
         "print('completed')",
         "import asyncio\n"
         "try:\n"
-        "    await asyncio.gather(rlm('invalid-delay'), rlm('3.0'))\n"
+        "    await rlm.gather(rlm('invalid-delay'), rlm('3.0'))\n"
         "except RuntimeError:\n"
         "    pass\n"
         "await asyncio.sleep(2.0)\n"
@@ -563,6 +570,8 @@ async def test_execution_around_subagent_wait_remains_charged(session):
     ids=[
         "task",
         "unawaited-gather",
+        "ordinary-gather",
+        "background-rlm-gather",
         "helper-task",
         "mixed-helper-gather",
         "gather-error",

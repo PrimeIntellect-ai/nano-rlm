@@ -16,3 +16,10 @@ def run(prompt: str) -> Coroutine[Any, Any, RLMResult]:
             "consumed via the ACP runtime contract."
         )
     return broker.run(prompt)
+
+
+async def gather(*calls: Coroutine[Any, Any, RLMResult]) -> list[RLMResult]:
+    """Run sub-agent calls concurrently when awaited, excluding their inference wait
+    from the cell's execution timeout. Accepts only calls to rlm() or rlm.run().
+    """
+    return await broker.gather(*calls)

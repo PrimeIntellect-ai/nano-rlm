@@ -102,20 +102,20 @@ Each agent runs inside a persistent IPython kernel with an already-running event
 result = await rlm("verify the fix")
 ```
 
-The result is an `RLMResult` with `.answer`, `.usage`, `.turns`, and `.session_dir`. For parallel sub-agents, use normal async Python:
+The result is an `RLMResult` with `.answer`, `.usage`, `.turns`, and `.session_dir`. For parallel sub-agents, use `rlm.gather`:
 
 ```python
-import asyncio
-
-results = await asyncio.gather(
+results = await rlm.gather(
     rlm("check auth.py"),
     rlm("check login.py"),
 )
 ```
 
+`rlm.gather` accepts only calls to `rlm(...)` or `rlm.run(...)`, starts them concurrently when awaited or scheduled, and returns results in input order. It is an async function: assigning `pending = rlm.gather(...)` does not start the calls. If a call raises, the exception propagates; remaining calls stay owned by the cell scope.
+
 Recursive calls are created by a session-local supervisor rather than by the IPython kernel. The supervisor assigns depth and session ancestry, enforces the concurrency and total-call limits, and cancels descendants when their parent cell or session closes. When recursion is disabled by depth, the system prompt does not advertise these APIs and child runs beyond the depth limit fail immediately.
 
-The IPython execution timeout measures active cell execution. Time spent responsively awaiting a supervisor-owned sub-agent does not consume that budget, nor does an `asyncio.gather` containing only sub-agent calls. Kernel CPU, skills, ordinary waits, mixed gathers, background sub-agent tasks, and periods without broker heartbeats still do. Recursive work remains bounded independently by the tree resource policy and the runtime hosting the rollout.
+The IPython execution timeout measures active cell execution. Direct `await rlm(...)` and `await rlm.gather(...)` exclude responsive inference waits from that budget. Kernel CPU, skills, ordinary waits, all `asyncio.gather(...)` calls, background sub-agent tasks, and periods without broker heartbeats still consume it. Recursive work remains bounded independently by the tree resource policy and the runtime hosting the rollout.
 
 ## Compaction
 

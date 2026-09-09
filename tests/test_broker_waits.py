@@ -4,11 +4,10 @@ import asyncio
 
 import pytest
 
-from rlm import broker
+from rlm import broker, gather, run
 
 
-@pytest.mark.parametrize("return_exceptions", [False, True])
-async def test_gather_cancellation_releases_cell_lease(monkeypatch, return_exceptions):
+async def test_gather_cancellation_releases_cell_lease(monkeypatch):
     monkeypatch.setattr(broker, "_endpoint", broker.BrokerEndpoint("unused", "test"))
     monkeypatch.setattr(broker, "_scope_id", "cell")
     started = asyncio.Event()
@@ -25,27 +24,34 @@ async def test_gather_cancellation_releases_cell_lease(monkeypatch, return_excep
             cancelled.append(wait)
 
     monkeypatch.setattr(broker, "_request", request)
-    observed = []
-    with broker.cell_execution():
-        group = broker._subagent_aware_gather(
-            broker.run("one"), broker.run("two"), return_exceptions=return_exceptions
-        )
-        assert asyncio.isfuture(group)
-        await started.wait()
-        assert not any(wait.exclusive for wait in running)
 
-        def cancel():
-            observed.extend(wait.exclusive for wait in running)
-            group.cancel("stop")
-
-        asyncio.get_running_loop().call_soon(cancel)
-        with pytest.raises(asyncio.CancelledError):
+    async def cell():
+        with broker.cell_execution():
+            group = gather(run("one"), run("two"))
+            await asyncio.sleep(0)
+            assert not running
             await group
 
-        assert observed == [True, True]
-        assert len(cancelled) == 2
-        assert not any(wait.exclusive for wait in running)
-        assert group.done()
-        assert not group.cancelled()
-        assert not group.cancel()
+    task = asyncio.create_task(cell())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert all(wait.exclusive for wait in running)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(cancelled) == 2
+    assert not any(wait.exclusive for wait in running)
     assert broker._cell_task is None
+
+
+async def test_gather_rejects_non_subagent_calls(monkeypatch):
+    monkeypatch.setattr(broker, "_endpoint", broker.BrokerEndpoint("unused", "test"))
+    monkeypatch.setattr(broker, "_scope_id", "cell")
+    child = run("one")
+    other = asyncio.sleep(0)
+    try:
+        with pytest.raises(TypeError, match="only calls returned by rlm"):
+            await gather(child, other)
+    finally:
+        child.close()
+        other.close()

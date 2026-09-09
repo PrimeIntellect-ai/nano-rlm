@@ -441,7 +441,7 @@ class SessionTreeSupervisor:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         operation_task: asyncio.Task[Any] | None = None
-        heartbeat_task: asyncio.Task[None] | None = None
+        connection_task: asyncio.Task[Any] | None = None
         wait_tracker: BrokerWaitTracker | None = None
         operation_id: str | None = None
         try:
@@ -458,6 +458,12 @@ class SessionTreeSupervisor:
                     request["scope_id"],
                     request["prompt"],
                 )
+                wait_tracker = self.broker_waits(request["scope_id"])
+                operation_id = uuid.uuid4().hex
+                wait_tracker.start(operation_id)
+                connection_task = asyncio.create_task(
+                    self._receive_heartbeats(reader, wait_tracker, operation_id)
+                )
             else:
                 operation_task = await self._start_skill_call(
                     request["capability"],
@@ -465,17 +471,12 @@ class SessionTreeSupervisor:
                     request["skill_capability"],
                     request["arguments"],
                 )
-            wait_tracker = self.broker_waits(request["scope_id"])
-            operation_id = uuid.uuid4().hex
-            wait_tracker.start(operation_id)
-            heartbeat_task = asyncio.create_task(
-                self._receive_heartbeats(reader, wait_tracker, operation_id)
-            )
+                connection_task = asyncio.create_task(reader.read(1))
             done, _ = await asyncio.wait(
-                {operation_task, heartbeat_task},
+                {operation_task, connection_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if heartbeat_task in done and operation_task not in done:
+            if connection_task in done and operation_task not in done:
                 operation_task.cancel()
                 await asyncio.gather(operation_task, return_exceptions=True)
                 return
@@ -490,9 +491,9 @@ class SessionTreeSupervisor:
                 except (ConnectionError, OSError, asyncio.IncompleteReadError):
                     pass
         finally:
-            if heartbeat_task is not None:
-                heartbeat_task.cancel()
-                await asyncio.gather(heartbeat_task, return_exceptions=True)
+            if connection_task is not None:
+                connection_task.cancel()
+                await asyncio.gather(connection_task, return_exceptions=True)
             if wait_tracker is not None and operation_id is not None:
                 wait_tracker.finish(operation_id)
             writer.close()

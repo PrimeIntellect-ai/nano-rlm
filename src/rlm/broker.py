@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import inspect
 import json
 import keyword
@@ -38,7 +37,6 @@ class BrokerEndpoint:
 class BrokerWaitSnapshot:
     """Thread-safe view of broker work awaited by one IPython cell."""
 
-    active: bool
     responsive: bool
     process_time: float | None
 
@@ -71,7 +69,6 @@ class BrokerWaitTracker:
 
     def snapshot(self) -> BrokerWaitSnapshot:
         with self._lock:
-            active = bool(self._heartbeats)
             freshest_exclusive = max(
                 (
                     heartbeat_at
@@ -81,7 +78,6 @@ class BrokerWaitTracker:
                 default=0.0,
             )
             return BrokerWaitSnapshot(
-                active=active,
                 responsive=(
                     freshest_exclusive > 0
                     and time.monotonic() - freshest_exclusive
@@ -94,7 +90,6 @@ class BrokerWaitTracker:
 _endpoint: BrokerEndpoint | None = None
 _scope_id: str | None = None
 _cell_task: asyncio.Task[Any] | None = None
-_original_gather = asyncio.gather
 
 
 @dataclass
@@ -239,8 +234,6 @@ def result_from_payload(value: dict[str, Any]) -> RLMResult:
 def configure(endpoint: BrokerEndpoint | None) -> None:
     global _endpoint
     _endpoint = endpoint
-    if endpoint is not None:
-        _install_asyncio_hooks()
 
 
 def is_configured() -> bool:
@@ -306,26 +299,33 @@ def run(prompt: str) -> Coroutine[Any, Any, RLMResult]:
     return call
 
 
-def call_skill(capability: str, arguments: dict[str, Any]) -> Coroutine[Any, Any, str]:
+async def gather(*calls: Coroutine[Any, Any, RLMResult]) -> list[RLMResult]:
+    """Run sub-agent calls concurrently while the cell awaits their results."""
+    if not all(inspect.iscoroutine(call) and call in _subagent_calls for call in calls):
+        raise TypeError(
+            "rlm.gather() accepts only calls returned by rlm() or rlm.run()"
+        )
+    with _exclusive_wait(*(_subagent_calls[call] for call in calls)):
+        return await asyncio.gather(*calls)
+
+
+async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
     """Invoke a supervisor-owned skill through its opaque capability."""
     if _endpoint is None or _scope_id is None:
         raise RuntimeError("brokered calls are unavailable outside an active cell")
-    payload = BrokerSkillRequest(
-        op="skill.call",
-        capability=_endpoint.capability,
-        scope_id=_scope_id,
-        skill_capability=capability,
-        arguments=arguments,
+    response = await _request(
+        {
+            "op": "skill.call",
+            "capability": _endpoint.capability,
+            "scope_id": _scope_id,
+            "skill_capability": capability,
+            "arguments": arguments,
+        }
     )
-
-    async def invoke() -> str:
-        response = await _request(payload)
-        result = response.get("result")
-        if not isinstance(result, str):
-            raise RuntimeError("invalid skill response from RLM supervisor")
-        return result
-
-    return invoke()
+    result = response.get("result")
+    if not isinstance(result, str):
+        raise RuntimeError("invalid skill response from RLM supervisor")
+    return result
 
 
 def make_skill(descriptor: dict[str, Any]):
@@ -334,8 +334,8 @@ def make_skill(descriptor: dict[str, Any]):
     description = descriptor["description"]
     schema = descriptor["input_schema"]
 
-    def run(**kwargs: Any) -> Coroutine[Any, Any, str]:
-        return call_skill(capability, kwargs)
+    async def run(**kwargs: Any) -> str:
+        return await call_skill(capability, kwargs)
 
     properties = schema.get("properties", {})
     required = set(schema.get("required", []))
@@ -370,7 +370,8 @@ async def _request(
             payload,
             MAX_REQUEST_BYTES,
         )
-        heartbeat_task = asyncio.create_task(_send_heartbeats(writer, wait))
+        if wait is not None:
+            heartbeat_task = asyncio.create_task(_send_heartbeats(writer, wait))
         raw_response = await read_frame(reader, MAX_RESPONSE_BYTES)
     finally:
         if heartbeat_task is not None:
@@ -387,76 +388,21 @@ async def _request(
     return response
 
 
-async def _send_heartbeats(
-    writer: asyncio.StreamWriter, wait: _SubagentWait | None
-) -> None:
+async def _send_heartbeats(writer: asyncio.StreamWriter, wait: _SubagentWait) -> None:
     while True:
-        if wait is not None:
-            wait.changed.clear()
+        wait.changed.clear()
         await write_frame(
             writer,
             {
                 "op": "wait.heartbeat",
                 "process_time": time.process_time(),
-                "exclusive_wait": wait is not None and wait.exclusive,
+                "exclusive_wait": wait.exclusive,
             },
             MAX_REQUEST_BYTES,
         )
-        if wait is None:
-            await asyncio.sleep(BROKER_HEARTBEAT_INTERVAL_SECONDS)
-        else:
-            try:
-                await asyncio.wait_for(
-                    wait.changed.wait(), BROKER_HEARTBEAT_INTERVAL_SECONDS
-                )
-            except asyncio.TimeoutError:
-                pass
-
-
-class _SubagentGather(asyncio.Future):
-    """An eager gather whose lease lasts only for a cell-task await."""
-
-    def __init__(self, gather: asyncio.Future, waits: list[_SubagentWait]) -> None:
-        super().__init__(loop=gather.get_loop())
-        self._gather = gather
-        self._waits = waits
-        gather.add_done_callback(self._complete)
-
-    def _complete(self, gather: asyncio.Future) -> None:
-        if gather.cancelled():
-            super().cancel()
-        elif (error := gather.exception()) is not None:
-            self.set_exception(error)
-        else:
-            self.set_result(gather.result())
-
-    def cancel(self, msg: str | None = None) -> bool:
-        return self._gather.cancel(msg=msg)
-
-    def __await__(self):
-        with _exclusive_wait(*self._waits):
-            return (yield from super().__await__())
-
-    __iter__ = __await__
-
-
-def _is_subagent_call(value: Any) -> bool:
-    try:
-        return value in _subagent_calls
-    except TypeError:
-        return False
-
-
-@functools.wraps(asyncio.gather)
-def _subagent_aware_gather(*aws: Any, **kwargs: Any):
-    if aws and all(_is_subagent_call(aw) for aw in aws):
-        return _SubagentGather(
-            _original_gather(*aws, **kwargs), [_subagent_calls[aw] for aw in aws]
-        )
-    return _original_gather(*aws, **kwargs)
-
-
-def _install_asyncio_hooks() -> None:
-    if asyncio.gather is _subagent_aware_gather:
-        return
-    asyncio.gather = _subagent_aware_gather
+        try:
+            await asyncio.wait_for(
+                wait.changed.wait(), BROKER_HEARTBEAT_INTERVAL_SECONDS
+            )
+        except asyncio.TimeoutError:
+            pass

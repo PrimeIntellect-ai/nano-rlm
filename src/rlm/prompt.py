@@ -182,7 +182,10 @@ def build_system_prompt(
             [
                 "",
                 "A callable `rlm` is already in your global namespace — call it directly with `await rlm('sub-task')` to spawn a recursive sub-agent. Returns an `RLMResult` with `.answer` (string), `.usage`, `.turns`, and `.session_dir`.",
-                "For parallel sub-agents, use normal Python async patterns such as `await asyncio.gather(rlm('task1'), rlm('task2'))`.",
+                "For parallel sub-agents, use `await rlm.gather(rlm('task1'), rlm('task2'))`. "
+                "It accepts only sub-agent calls and starts them when awaited. "
+                "Direct `await rlm(...)` and `await rlm.gather(...)` exclude inference waits from the cell timeout; "
+                "ordinary `asyncio.gather(...)` and background tasks still consume that budget.",
             ]
         )
 
