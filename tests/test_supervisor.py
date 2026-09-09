@@ -530,7 +530,45 @@ async def test_execution_around_subagent_wait_remains_charged(session):
     assert "child:1.2" not in tool_result(client)
 
 
-async def test_background_subagent_does_not_shield_unrelated_wait(session):
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import asyncio\n"
+        "child = asyncio.create_task(rlm('3.0'))\n"
+        "await asyncio.sleep(2.0)\n"
+        "print((await child).answer)",
+        "import asyncio\n"
+        "children = asyncio.gather(rlm('3.0'), rlm('3.0'))\n"
+        "await asyncio.sleep(2.0)\n"
+        "print(await children)",
+        "import asyncio\n"
+        "async def child():\n"
+        "    return await rlm('3.0')\n"
+        "background = asyncio.create_task(child())\n"
+        "await asyncio.sleep(2.0)\n"
+        "print(await background)",
+        "import asyncio\n"
+        "async def child():\n"
+        "    return await rlm('3.0')\n"
+        "await asyncio.gather(child(), asyncio.sleep(2.0))\n"
+        "print('completed')",
+        "import asyncio\n"
+        "try:\n"
+        "    await asyncio.gather(rlm('invalid-delay'), rlm('3.0'))\n"
+        "except RuntimeError:\n"
+        "    pass\n"
+        "await asyncio.sleep(2.0)\n"
+        "print('completed')",
+    ],
+    ids=[
+        "task",
+        "unawaited-gather",
+        "helper-task",
+        "mixed-helper-gather",
+        "gather-error",
+    ],
+)
+async def test_background_subagent_does_not_shield_unrelated_wait(session, code):
     config = _config(max_depth=1, exec_timeout=1)
     supervisor = SessionTreeSupervisor(
         root_session=session,
@@ -544,14 +582,7 @@ async def test_background_subagent_does_not_shield_unrelated_wait(session):
                 tool_calls=[
                     DummyToolCall(
                         "ipython",
-                        {
-                            "code": (
-                                "import asyncio\n"
-                                "child = asyncio.create_task(rlm('2.0'))\n"
-                                "await asyncio.sleep(2.0)\n"
-                                "print((await child).answer)"
-                            )
-                        },
+                        {"code": code},
                     )
                 ]
             ),
@@ -572,7 +603,8 @@ async def test_background_subagent_does_not_shield_unrelated_wait(session):
 
     assert result.answer == "recovered"
     assert "execution timed out after 1s" in tool_result(client)
-    assert "child:2.0" not in tool_result(client)
+    assert "child:3.0" not in tool_result(client)
+    assert "completed" not in tool_result(client)
 
 
 async def test_mixed_gather_does_not_shield_non_broker_wait(session):

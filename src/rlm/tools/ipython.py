@@ -325,6 +325,14 @@ if {bool(self.broker_endpoint)!r}:
         {self.broker_endpoint.socket_path if self.broker_endpoint else None!r},
         {self.broker_endpoint.capability if self.broker_endpoint else None!r},
     ))
+    _rlm_run_code = get_ipython().run_code
+
+    @functools.wraps(_rlm_run_code)
+    async def _rlm_scoped_run_code(*args, **kwargs):
+        with _rlm_broker.cell_execution():
+            return await _rlm_run_code(*args, **kwargs)
+
+    get_ipython().run_code = _rlm_scoped_run_code
 
 for _name in {skill_names!r}:
     _module = __import__(_name)
