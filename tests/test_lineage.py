@@ -23,7 +23,8 @@ def test_subagent_call_and_return_are_request_edges():
         parent_session_id="root",
         spawned_by_request_id=parent_request,
     )
-    lineage.deliver_message("child", parent_request, downward=True)
+    lineage.deliver_message("child", parent_request, edge_type="agent_steer")
+    lineage.deliver_message("child", parent_request, edge_type="agent_steer")
     child_request = _finish(lineage, "child")
     lineage.finish_subagent("child")
     resumed_request = _finish(lineage, "root")
@@ -34,6 +35,11 @@ def test_subagent_call_and_return_are_request_edges():
     }
     assert lineage.snapshot() == {
         "edges": [
+            {
+                "source_request_id": parent_request,
+                "target_request_id": child_request,
+                "type": "agent_steer",
+            },
             {
                 "source_request_id": parent_request,
                 "target_request_id": child_request,

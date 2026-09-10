@@ -129,5 +129,16 @@ print('MESSAGING_OK')
         )
         assert len(supervisor._invocations[supervisor.root_id].inbox) == 4
         assert all(e["read"] for e in supervisor._invocations[supervisor.root_id].inbox)
+        edge_types = {
+            edge["type"] for edge in supervisor.semantic_edges.snapshot()["edges"]
+        }
+        assert {
+            "agent_queue",
+            "agent_steer",
+            "agent_report",
+            "agent_completion",
+            "subagent_call",
+            "subagent_return",
+        } <= edge_types
     finally:
         await supervisor.aclose()

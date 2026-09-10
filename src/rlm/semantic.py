@@ -203,13 +203,11 @@ class SemanticEdgeTracker:
         return self._sessions[session_id].last_request_id
 
     def deliver_message(
-        self, session_id: str, source_request_id: str | None, *, downward: bool
+        self, session_id: str, source_request_id: str | None, *, edge_type: str
     ) -> None:
         if source_request_id is None:
             return
-        edge = _PendingEdge(
-            source_request_id, "subagent_call" if downward else "subagent_return"
-        )
+        edge = _PendingEdge(source_request_id, edge_type)
         pending = self._sessions[session_id].pending_edges
         if edge not in pending:
             pending.append(edge)
@@ -224,7 +222,9 @@ class SemanticEdgeTracker:
         if session.parent_session_id is None:
             raise ValueError("root session cannot return to a parent")
         self.deliver_message(
-            session.parent_session_id, session.last_request_id, downward=False
+            session.parent_session_id,
+            session.last_request_id,
+            edge_type="subagent_return",
         )
         session.returned_request_id = session.last_request_id
 
