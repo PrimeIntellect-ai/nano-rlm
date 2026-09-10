@@ -31,6 +31,9 @@ from rlm.mcp import (
     MCPToolDescriptor,
     write_skill_modules,
 )
+from rlm.shell_jobs import ShellJob, ShellJobs
+from rlm.tools.ipython import build_kernel_env
+from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
 from rlm.types import ProgrammaticToolCallStats, RLMResult
@@ -134,6 +137,7 @@ class SessionTreeSupervisor:
                 Callable[[dict[str, Any]], Awaitable[str]],
             ],
         ] = {}
+        self._shell_jobs = ShellJobs(self._publish_job)
         self._root_config = runtime_config
         if "search" in runtime_config.skills:
             capability = secrets.token_urlsafe(24)
@@ -513,9 +517,65 @@ class SessionTreeSupervisor:
         finally:
             agent.status = "running"
 
+    def _publish_job(self, job: ShellJob) -> None:
+        owner = self._invocations[job.info.owner_id]
+        if self._closed or owner.capability not in self._capabilities:
+            return
+        self._publish(
+            owner,
+            self._event(
+                owner,
+                "shell.completed",
+                {
+                    "job_id": job.info.id,
+                    "status": job.info.status,
+                    "exit_code": job.info.exit_code,
+                    "output_complete": job.info.output_complete,
+                    "output_truncated": job.info.output_truncated,
+                    "error": job.info.error,
+                },
+                job.source_request_id,
+            ),
+        )
+
+    async def _shell_operation(self, parent: _Invocation, request: dict) -> Any:
+        op = request["op"]
+        if op == "shell.run":
+            command = request["command"]
+            if not command.strip():
+                raise ValueError("empty command")
+            blocked = find_blocked_command(
+                command, allow_git=parent.runtime_config.policy.allow_git
+            )
+            if blocked:
+                raise PermissionError(refusal(blocked))
+            cwd = Path(parent.cwd) / (request["cwd"] or ".")
+            return self._shell_jobs.start(
+                owner_id=parent.id,
+                command=command,
+                cwd=str(cwd.resolve()),
+                directory=parent.session.dir,
+                env=build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                source_request_id=self._scopes[request["scope_id"]].request_id,
+            )
+        if op == "shell.list":
+            return [
+                job.snapshot()
+                for job in self._shell_jobs.jobs.values()
+                if job.info.owner_id == parent.id
+            ]
+        job = self._shell_jobs.get(parent.id, request["job_id"])
+        if op == "shell.read":
+            return self._shell_jobs.read(job, request["cursor"], request["max_bytes"])
+        if op == "shell.cancel":
+            return await self._shell_jobs.cancel(job)
+        return job.snapshot()
+
     async def _agent_operation(self, request: dict) -> Any:
         parent = self._caller(request["capability"], request["scope_id"])
         op = request["op"]
+        if op.startswith("shell."):
+            return await self._shell_operation(parent, request)
         if op == "inbox.list":
             return [
                 {
@@ -536,7 +596,9 @@ class SessionTreeSupervisor:
                 event["read"] = True
                 self.semantic_edges.deliver_message(
                     parent.id,
-                    event["source_request_id"],
+                    event["source_request_id"]
+                    if event["type"].startswith("agent.")
+                    else None,
                     edge_type="agent_message",
                 )
             return dict(event)
@@ -715,6 +777,7 @@ class SessionTreeSupervisor:
 
     async def _release_agent(self, child: _Invocation) -> None:
         self._capabilities.pop(child.capability, None)
+        await self._shell_jobs.close(child.id)
         for scope_id, scope in list(self._scopes.items()):
             if scope.invocation_id == child.id:
                 await self.close_scope(scope_id)
@@ -835,6 +898,7 @@ class SessionTreeSupervisor:
         for child in list(self._invocations.values()):
             if child.parent_id == self.root_id:
                 await self._terminate(child)
+        await self._shell_jobs.close()
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()

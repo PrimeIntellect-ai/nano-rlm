@@ -381,6 +381,7 @@ class RLMEngine:
         broker_endpoint = None
         if (
             self._supervisor is not None
+            or any(tool.name == "ipython" for tool in self._active_tools)
             or self.depth < self.max_depth
             or self.mcp_servers
             or "search" in self.skills
