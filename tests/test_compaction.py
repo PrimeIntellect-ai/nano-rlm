@@ -157,6 +157,80 @@ async def test_compaction_attempt_limit_is_configurable(session):
     assert len(client.calls) == 2
 
 
+@pytest.mark.parametrize(
+    "finish_reason", ["length", "content_filter", "tool_calls", None]
+)
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_compaction_requires_normal_termination(session, finish_reason, recovers):
+    rejected = _response(
+        DummyMessage(content="unfinished summary"), finish_reason=finish_reason
+    )
+    client = _ScriptedClient(
+        [
+            rejected,
+            _response(DummyMessage(content="complete summary"))
+            if recovers
+            else rejected,
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(max_compaction_attempts=2),
+    )
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "progress"},
+    ]
+    original = deepcopy(messages)
+    try:
+        if recovers:
+            await engine._compact_branch(messages, turn=0)
+            assert len(messages) == 2
+            assert "complete summary" in messages[1]["content"]
+            assert "unfinished summary" not in messages[1]["content"]
+            assert engine._metrics.num_compactions == 1
+        else:
+            with pytest.raises(CompactionFailed, match="after 2 attempts"):
+                await engine._compact_branch(messages, turn=0)
+            assert messages == original
+            assert engine._metrics.num_compactions == 0
+        assert len(client.calls) == 2
+        assert client.calls[0]["messages"] == client.calls[1]["messages"]
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("content", [None, "", " \n\t"])
+async def test_compaction_retries_reasoning_without_final_content(session, content):
+    message = DummyMessage(content=content)
+    message.reasoning_content = "unfinished reasoning"
+    client = _ScriptedClient(
+        [
+            _response(message),
+            _response(DummyMessage(content="complete summary")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(max_compaction_attempts=2),
+    )
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+    ]
+    try:
+        await engine._compact_branch(messages, turn=0)
+        assert "complete summary" in messages[1]["content"]
+        assert "unfinished reasoning" not in messages[1]["content"]
+        assert len(client.calls) == 2
+        assert engine._metrics.num_compactions == 1
+    finally:
+        engine.close()
+
+
 async def test_tool_result_overflow_compacts_and_retries(session):
     client = _ScriptedClient(
         [
