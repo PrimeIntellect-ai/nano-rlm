@@ -133,10 +133,7 @@ print('MESSAGING_OK')
             edge["type"] for edge in supervisor.semantic_edges.snapshot()["edges"]
         }
         assert {
-            "agent_queue",
-            "agent_steer",
-            "agent_report",
-            "agent_completion",
+            "agent_message",
             "subagent_call",
             "subagent_return",
         } <= edge_types

@@ -145,7 +145,7 @@ Parent instructions are pushed into the child's conversation. Steering does not 
 
 Reports and `agent.completed` events enter the parent's inbox at every depth. The model sees an unread count before each inference step and chooses when to retrieve payloads. `list()` returns metadata without marking events read; `read(id)` returns the payload and marks it read. `list(unread_only=False)` includes previously read events. Completion payloads identify the agent and status; retrieve the answer with its handle's `result()`.
 
-ACP dependency edges distinguish delivered instructions (`agent_queue`, `agent_steer`), explicitly read child reports (`agent_report`), and explicitly read lifecycle notifications (`agent_completion`). Spawning uses `subagent_call`; retrieving an answer uses `subagent_return`. An inbox notification alone creates no report or completion edge.
+ACP dependency edges use `agent_message` for delivered instructions and explicitly read inbox events. Spawning uses `subagent_call`; retrieving an answer uses `subagent_return`. Delivery policy and event type remain in the event records. An unread-count notification alone creates no `agent_message` edge.
 
 The native `wait` tool suspends inference without occupying an IPython cell, until a new inbox arrival, parent instruction, or timeout (default 300 seconds, range 0–300). It also yields to queued instructions. Already-announced unread events do not repeatedly wake it. A final root answer returns control to the ACP caller; use `wait` to keep the current prompt available for events.
 

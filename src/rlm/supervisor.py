@@ -478,7 +478,7 @@ class SessionTreeSupervisor:
                 self.semantic_edges.deliver_message(
                     agent.id,
                     event["source_request_id"],
-                    edge_type=f"agent_{event['type']}",
+                    edge_type="agent_message",
                 )
         return selected
 
@@ -537,9 +537,7 @@ class SessionTreeSupervisor:
                 self.semantic_edges.deliver_message(
                     parent.id,
                     event["source_request_id"],
-                    edge_type="agent_report"
-                    if event["type"] == "agent.message"
-                    else "agent_completion",
+                    edge_type="agent_message",
                 )
             return dict(event)
         if op == "agent.report":
