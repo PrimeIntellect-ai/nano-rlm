@@ -61,7 +61,7 @@ async def run_with_api_key(
         num_results: Number of results to return.
 
     Returns:
-        Formatted results (title, URL, snippet).
+        One formatted text string containing titles, URLs, and snippets.
     """
     if not api_key:
         return "Error: SERPER_API_KEY environment variable is not set"
