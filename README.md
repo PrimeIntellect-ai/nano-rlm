@@ -362,3 +362,29 @@ finishes; detached processes that escape the process group are not managed.
 
 Automatic kernel restart and subscriptions are separate implementation slices.
 There is no PTY, stdin API, or redirection of IPython's `!` / `%%bash` magics.
+
+### IPython crash recovery
+
+If the kernel exits during a cell, the harness starts a fresh kernel under the
+same agent identity and resumes the conversation with a recovery notice. A dead
+kernel discovered before a cell starts is also restarted; that cell is returned
+unexecuted so the model can first reconstruct its Python state.
+
+The conversation, history, child agents, shell jobs, and inbox (including read
+state) remain owned by the live supervisor. Recover handles with
+`rlm.agent.list/get` and `rlm.shell.list/get`. Python variables, imports, and
+in-kernel tasks are lost. The interrupted cell is never replayed automatically:
+its file writes or accepted spawn/send/job requests may already have happened.
+Inspect those resources before retrying an operation.
+
+Recovery notices are separate `kernel_recovery` history records and active
+conversation messages, so truncating tool output cannot hide them. A kernel
+restart required after an unresponsive timeout/interrupt produces the same notice.
+A successful interrupt that preserves the kernel does not claim variables were lost.
+
+There are at most three recovery attempts without a subsequently completed cell.
+A failed startup reports failure; a later IPython call may retry within that
+budget. Exhausting the budget leaves IPython unavailable, while the agent can
+still respond or use native waiting. Supervisor crash recovery is not supported.
+Kernel death is detected during execution or at the next IPython call; this does
+not introduce a background kernel-health subscription.

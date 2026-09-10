@@ -607,6 +607,9 @@ async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
             raise RuntimeError("interrupted tool failed")
 
     class FakeREPL:
+        def take_recovery_notices(self):
+            return []
+
         def __init__(self):
             self.finished = False
             self.stopped = False
@@ -724,6 +727,9 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
     repls = []
 
     class FakeREPL:
+        def take_recovery_notices(self):
+            return []
+
         def __init__(self, **kwargs):
             self.started = False
             self.stopped = False

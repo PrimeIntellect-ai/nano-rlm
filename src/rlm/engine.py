@@ -461,6 +461,18 @@ class RLMEngine:
                 self._owns_supervisor = False
             raise
 
+    def _deliver_kernel_notices(self) -> None:
+        if self._repl is None:
+            return
+        for notice in self._repl.take_recovery_notices():
+            self.session.log(
+                {
+                    "type": "kernel_recovery",
+                    "message": {"role": "user", "content": notice},
+                },
+                in_context=True,
+            )
+
     def _deliver_supervisor_input(
         self, *, include_queue: bool = False, notify: bool = True
     ) -> bool:
@@ -518,6 +530,7 @@ class RLMEngine:
                     )
                 )
                 break
+            self._deliver_kernel_notices()
             self._deliver_supervisor_input()
             messages = self.session.messages
             self._turn = turn + 1
@@ -695,6 +708,7 @@ class RLMEngine:
                 call_id=tc.id,
                 context_content=content,
             )
+            self._deliver_kernel_notices()
             messages = self.session.messages
 
             if tool_name == "wait":
