@@ -513,6 +513,7 @@ async def test_persistent_handles_history_permissions_and_subtree_lifetime(tmp_p
                     tool_calls=[DummyToolCall("ipython", {"code": "saved = 42"})]
                 ),
                 DummyMessage(content="ready"),
+                DummyMessage(tool_calls=[DummyToolCall("wait", {"timeout": 300})]),
             ]
         )
         engine = RLMEngine(client=client, **kwargs)

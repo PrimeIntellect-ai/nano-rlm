@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 import shutil
@@ -40,6 +41,8 @@ if TYPE_CHECKING:
 
 MAX_BROKER_CONNECTIONS = 128
 BROKER_INITIAL_FRAME_TIMEOUT_SECONDS = 5
+MAX_INBOX_EVENTS = 10_000
+MAX_MESSAGE_BYTES = 65_536
 
 
 @dataclass
@@ -65,6 +68,10 @@ class _Invocation:
     runner: asyncio.Task[None] | None = None
     stop_task: asyncio.Task[None] | None = None
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    inbox: list[dict] = field(default_factory=list)
+    instructions: list[dict] = field(default_factory=list)
+    announced: int = 0
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass
@@ -398,9 +405,152 @@ class SessionTreeSupervisor:
         child.runner.add_done_callback(self._child_tasks.discard)
         return child
 
+    def _record_event(self, agent: _Invocation, record: dict) -> None:
+        with (agent.session.dir / "inbox.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record) + "\n")
+
+    def _event(
+        self, sender: _Invocation, kind: str, content: Any, request_id: str | None
+    ) -> dict:
+        if len(json.dumps(content).encode("utf-8")) > MAX_MESSAGE_BYTES:
+            raise ValueError("message exceeds 65536 bytes")
+        return {
+            "id": uuid.uuid4().hex,
+            "type": kind,
+            "sender_id": sender.id,
+            "created_at": time.time(),
+            "content": content,
+            "source_request_id": request_id,
+            "read": False,
+        }
+
+    def _wake_agent(self, agent: _Invocation) -> None:
+        agent.changed.set()
+        if agent.parent_id is None or agent.status != "idle":
+            return
+        policy = agent.runtime_config.policy
+        if (
+            policy.max_total_turns is not None
+            and self._total_turns >= policy.max_total_turns
+        ) or (
+            policy.max_total_tokens is not None
+            and self._total_tokens >= policy.max_total_tokens
+        ):
+            return
+        agent.done.clear()
+        agent.status = "starting"
+        agent.result = None
+        agent.runner = asyncio.create_task(self._run_child(agent))
+        self._tasks.add(agent.runner)
+        self._child_tasks.add(agent.runner)
+        agent.runner.add_done_callback(self._tasks.discard)
+        agent.runner.add_done_callback(self._child_tasks.discard)
+
+    def _publish(self, target: _Invocation, event: dict) -> str:
+        if event["type"] == "agent.message" and len(target.inbox) >= MAX_INBOX_EVENTS:
+            raise RuntimeError("inbox event limit reached")
+        self._record_event(target, event)
+        target.inbox.append(event)
+        self._wake_agent(target)
+        return event["id"]
+
+    def take_instructions(
+        self, invocation_id: str, *, include_queue: bool = False
+    ) -> list[dict]:
+        agent = self._invocations[invocation_id]
+        selected = [
+            event
+            for event in agent.instructions
+            if include_queue or event["type"] == "steer"
+        ]
+        if selected:
+            self._record_event(
+                agent,
+                {
+                    "type": "instructions_delivered",
+                    "event_ids": [e["id"] for e in selected],
+                },
+            )
+            agent.instructions = [
+                event for event in agent.instructions if event not in selected
+            ]
+            for event in selected:
+                self.semantic_edges.deliver_message(
+                    agent.id, event["source_request_id"], downward=True
+                )
+        return selected
+
+    def inbox_notification(self, invocation_id: str) -> str | None:
+        agent = self._invocations[invocation_id]
+        agent.announced = len(agent.inbox)
+        count = sum(not event["read"] for event in agent.inbox)
+        return (
+            f"Supervisor: Inbox: {count} unread events. Use rlm.inbox.list() and rlm.inbox.read(event_id) to inspect them."
+            if count
+            else None
+        )
+
+    async def wait_for_events(self, invocation_id: str, timeout: float) -> str:
+        agent = self._invocations[invocation_id]
+
+        def ready():
+            return len(agent.inbox) > agent.announced or bool(agent.instructions)
+
+        agent.changed.clear()
+        agent.status = "waiting"
+        try:
+            if not ready() and timeout > 0:
+                await asyncio.wait_for(agent.changed.wait(), timeout=timeout)
+            return (
+                "New supervisor events or instructions are available."
+                if ready()
+                else "Wait timed out."
+            )
+        except asyncio.TimeoutError:
+            return "Wait timed out."
+        finally:
+            agent.status = "running"
+
     async def _agent_operation(self, request: dict) -> Any:
         parent = self._caller(request["capability"], request["scope_id"])
         op = request["op"]
+        if op == "inbox.list":
+            return [
+                {
+                    key: event[key]
+                    for key in ("id", "type", "sender_id", "created_at", "read")
+                }
+                for event in parent.inbox
+                if not request["unread_only"] or not event["read"]
+            ]
+        if op == "inbox.read":
+            event = next(
+                (e for e in parent.inbox if e["id"] == request["event_id"]), None
+            )
+            if event is None:
+                raise ValueError("unknown inbox event")
+            if not event["read"]:
+                self._record_event(parent, {"type": "read", "event_id": event["id"]})
+                event["read"] = True
+                self.semantic_edges.deliver_message(
+                    parent.id, event["source_request_id"], downward=False
+                )
+            return dict(event)
+        if op == "agent.report":
+            if parent.parent_id is None:
+                raise PermissionError("root agent has no parent")
+            target = self._invocations[parent.parent_id]
+            if target.capability not in self._capabilities:
+                raise RuntimeError("parent is no longer active")
+            return self._publish(
+                target,
+                self._event(
+                    parent,
+                    "agent.message",
+                    request["message"],
+                    self._scopes[request["scope_id"]].request_id,
+                ),
+            )
         if op == "agent.spawn":
             return self._info(
                 self._spawn(
@@ -424,6 +574,21 @@ class SessionTreeSupervisor:
                     ancestor = self._parents[ancestor]
             return agents
         child = self._child(parent, request.get("name_or_id", request.get("agent_id")))
+        if op in {"agent.send", "agent.steer"}:
+            if child.status in {"completed", "failed", "cancelled"}:
+                raise RuntimeError("agent is no longer active")
+            if len(child.instructions) >= MAX_INBOX_EVENTS:
+                raise RuntimeError("instruction queue limit reached")
+            event = self._event(
+                parent,
+                "steer" if op == "agent.steer" else "queue",
+                request["message"],
+                self._scopes[request["scope_id"]].request_id,
+            )
+            self._record_event(child, event)
+            child.instructions.append(event)
+            self._wake_agent(child)
+            return event["id"]
         if op == "agent.wait":
             if not child.done.is_set() and request["timeout"] > 0:
                 try:
@@ -487,15 +652,30 @@ class SessionTreeSupervisor:
                     from rlm.engine import RLMEngine
 
                     factory = RLMEngine
-                child.engine = factory(
-                    cwd=child.cwd,
-                    session=child.session,
-                    mcp_servers=child.mcp_servers,
-                    runtime_config=child.runtime_config,
-                    supervisor=self,
-                    invocation_id=child.id,
-                )
-                child.result = await child.engine.prompt(child.task)
+                if child.engine is None:
+                    child.engine = factory(
+                        cwd=child.cwd,
+                        session=child.session,
+                        mcp_servers=child.mcp_servers,
+                        runtime_config=child.runtime_config,
+                        supervisor=self,
+                        invocation_id=child.id,
+                    )
+                    child.result = await child.engine.prompt(child.task)
+                else:
+                    instructions = self.take_instructions(child.id, include_queue=True)
+                    prompt = (
+                        "\n\n".join(event["content"] for event in instructions)
+                        if instructions
+                        else "Supervisor: new inbox events are available."
+                    )
+                    child.result = await child.engine.prompt(
+                        prompt,
+                        message_type="parent_message"
+                        if instructions
+                        else "supervisor_notification",
+                        event_ids=[e["id"] for e in instructions],
+                    )
                 child.status = "idle" if child.persistent else "completed"
         except asyncio.CancelledError:
             child.status = "cancelled"
@@ -513,6 +693,21 @@ class SessionTreeSupervisor:
                 child.error = f"agent cleanup failed: {exc}"
             finally:
                 child.done.set()
+                parent = self._invocations.get(child.parent_id)
+                if parent is not None and parent.capability in self._capabilities:
+                    self._publish(
+                        parent,
+                        self._event(
+                            child,
+                            "agent.completed",
+                            {"agent_id": child.id, "status": child.status},
+                            self.semantic_edges.last_request_id(child.id),
+                        ),
+                    )
+                if child.status == "idle" and (
+                    child.instructions or len(child.inbox) > child.announced
+                ):
+                    self._wake_agent(child)
 
     async def _release_agent(self, child: _Invocation) -> None:
         self._capabilities.pop(child.capability, None)
@@ -544,7 +739,7 @@ class SessionTreeSupervisor:
 
     async def _stop_agent(self, child: _Invocation) -> None:
         if child.runner is not None and not child.runner.done():
-            if child.status in {"starting", "running"}:
+            if child.status in {"starting", "running", "waiting"}:
                 child.runner.cancel()
             await asyncio.gather(child.runner, return_exceptions=True)
         if not child.done.is_set() or child.status == "idle":

@@ -118,13 +118,36 @@ if result is not None:
     print(result.answer)
 ```
 
-`result()` returns `None` while pending, an `RLMResult` after success, and raises on failure or cancellation. `wait()` returns current metadata after an outcome or its timeout (default 30 seconds, range 0–300). It waits inside the Python cell and uses the cell's normal execution timeout. Cancelling or timing out a wait does not cancel the agent. Inference-level waiting and inbox notifications belong to a later change.
+`result()` returns `None` while pending, an `RLMResult` after success, and raises on failure or cancellation. `wait()` returns current metadata after an outcome or its timeout (default 30 seconds, range 0–300). It waits inside the Python cell and uses the cell's normal execution timeout. Cancelling or timing out a wait does not cancel the agent.
 
-`await researcher.cancel()` terminates the agent and its descendants and waits for cleanup. Ordinary agents release their kernels after answering. An agent spawned with `persistent=True` becomes idle after answering and retains its conversation and kernel; follow-up messaging is not available yet. Parent termination tears down all descendants, including persistent agents. Closing the ACP session tears down the tree. Cancelling an individual prompt or cell leaves its accepted children registered and recoverable.
+`await researcher.cancel()` terminates the agent and its descendants and waits for cleanup. Ordinary agents release their kernels after answering. An agent spawned with `persistent=True` becomes idle after answering and retains its conversation and kernel; a parent instruction or new inbox event wakes it. Parent termination tears down all descendants, including persistent agents. Closing the ACP session tears down the tree. Cancelling an individual prompt or cell leaves its accepted children registered and recoverable.
 
-Status is `starting` while waiting for capacity, `running` during execution, `idle` for a persistent agent that has answered, or `completed`, `failed`, or `cancelled` after termination. Completed metadata, results, and history remain accessible for the supervisor's lifetime. Shared filesystem access is trusted; handle permissions are orchestration controls, not filesystem isolation.
+Status is `starting` while waiting for capacity, `running` during execution, `waiting` during a native event wait, `idle` for a persistent agent that has answered, or `completed`, `failed`, or `cancelled` after termination. Completed metadata, results, and history remain accessible for the supervisor's lifetime. Shared filesystem access is trusted; handle permissions are orchestration controls, not filesystem isolation.
 
 Depth, concurrency, total-spawn, and shared token/turn limits remain supervisor-enforced. Rejected spawns raise before registration. Persistent idle kernels release inference capacity but still count toward the session's total-spawn limit. A child return enters the ACP semantic trace when the parent retrieves its result, so background completion is not mistaken for result consumption.
+
+### Messages and event waiting
+
+```python
+await researcher.send("Also check logout")   # Deliver after its answer or native wait
+await researcher.steer("Focus on login first")  # Deliver at the next model/tool boundary
+
+# Inside the child:
+await rlm.agent.send_to_parent("Found a missing permission check")
+
+# Inside its parent:
+for event in await rlm.inbox.list():
+    report = await rlm.inbox.read(event["id"])
+    print(report["type"], report["content"])
+```
+
+Parent instructions are pushed into the child's conversation. Steering does not interrupt a running model request or tool. Queued messages wait until the child answers or calls the native `wait` tool. Both operations wake an idle persistent child; sending to a terminated child raises.
+
+Reports and `agent.completed` events enter the parent's inbox at every depth. The model sees an unread count before each inference step and chooses when to retrieve payloads. `list()` returns metadata without marking events read; `read(id)` returns the payload and marks it read. `list(unread_only=False)` includes previously read events. Completion payloads identify the agent and status; retrieve the answer with its handle's `result()`.
+
+The native `wait` tool suspends inference without occupying an IPython cell, until a new inbox arrival, parent instruction, or timeout (default 300 seconds, range 0–300). It also yields to queued instructions. Already-announced unread events do not repeatedly wake it. A final root answer returns control to the ACP caller; use `wait` to keep the current prompt available for events.
+
+The supervisor owns inboxes and instruction queues. Each agent's `inbox.jsonl` records arrivals, instruction delivery, and explicit reads; delivered messages and notifications also enter `messages.jsonl`. Message payloads are limited to 65,536 JSON-encoded UTF-8 bytes. Reports are rejected once an inbox contains 10,000 events, and pending instruction queues have the same limit; lifecycle events remain recordable. This state lasts while the supervisor lives. Restarting a crashed IPython kernel and restoring a crashed supervisor are separate features.
 
 ## Compaction
 

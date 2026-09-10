@@ -82,6 +82,39 @@ class BrokerAgentWaitRequest(TypedDict):
     timeout: Annotated[float, Field(ge=0, le=300, allow_inf_nan=False)]
 
 
+class BrokerAgentMessageRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.send", "agent.steer"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+    message: Annotated[str, Field(min_length=1)]
+
+
+class BrokerAgentReportRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.report"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    message: Annotated[str, Field(min_length=1)]
+
+
+class BrokerInboxListRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["inbox.list"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    unread_only: bool
+
+
+class BrokerInboxReadRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["inbox.read"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    event_id: Annotated[str, Field(min_length=1)]
+
+
 class BrokerSkillRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid")
     op: Literal["skill.call"]
@@ -97,7 +130,11 @@ BrokerRequest = Annotated[
     | BrokerAgentListRequest
     | BrokerAgentHandleRequest
     | BrokerAgentWaitRequest
-    | BrokerSkillRequest,
+    | BrokerSkillRequest
+    | BrokerAgentMessageRequest
+    | BrokerAgentReportRequest
+    | BrokerInboxListRequest
+    | BrokerInboxReadRequest,
     Field(discriminator="op"),
 ]
 _REQUEST_ADAPTER = TypeAdapter(BrokerRequest)

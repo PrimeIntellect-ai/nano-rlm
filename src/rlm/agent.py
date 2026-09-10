@@ -18,7 +18,9 @@ class AgentInfo:
     parent_id: str | None
     name: str | None
     task: str
-    status: Literal["starting", "running", "idle", "completed", "failed", "cancelled"]
+    status: Literal[
+        "starting", "running", "waiting", "idle", "completed", "failed", "cancelled"
+    ]
     persistent: bool
     created_at: float
     elapsed_seconds: float
@@ -66,6 +68,18 @@ class AgentHandle:
             await broker.agent_request("agent.cancel", agent_id=self.id)
         )
 
+    async def send(self, message: str) -> str:
+        """Queue an instruction for the child's next answer/wait boundary."""
+        return await broker.agent_request(
+            "agent.send", agent_id=self.id, message=message
+        )
+
+    async def steer(self, message: str) -> str:
+        """Insert an instruction at the next model/tool boundary without interruption."""
+        return await broker.agent_request(
+            "agent.steer", agent_id=self.id, message=message
+        )
+
 
 async def spawn(
     task: str, *, name: str | None = None, persistent: bool = False
@@ -89,6 +103,11 @@ async def get(name_or_id: str) -> AgentHandle:
         await broker.agent_request("agent.get", name_or_id=name_or_id)
     )
     return AgentHandle(info.id, info.session_dir)
+
+
+async def send_to_parent(message: str) -> str:
+    """Place a report in the immediate parent's inbox; the parent chooses when to read it."""
+    return await broker.agent_request("agent.report", message=message)
 
 
 async def list(*, recursive: bool = False) -> builtins.list[AgentInfo]:

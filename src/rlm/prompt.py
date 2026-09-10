@@ -111,7 +111,7 @@ def build_system_prompt(
     if depth > 0:
         role = (
             "You are a coding agent, spawned as a sub-agent: your caller "
-            "delegated a single task to you and sees none of your work. Do "
+            "delegated a task to you and can inspect your history. Do "
             "exactly that task; don't widen the scope."
         )
     else:
@@ -131,7 +131,7 @@ def build_system_prompt(
     if depth > 0:
         done_line = (
             "When the task is done, stop calling tools and state your final "
-            "answer. It is the only thing your caller receives, so make it a "
+            "answer. Make it a "
             "complete, self-contained result — the answer plus the evidence "
             "needed to trust it (sources, file paths, values)."
         )
@@ -195,7 +195,16 @@ def build_system_prompt(
                 "The `rlm` package is available in Python. `child = await rlm.agent.spawn(task='...', name='researcher')` registers a child and returns a handle immediately; the child continues across cells.",
                 "Use `await rlm.agent.list()` for child metadata, or `recursive=True` for descendants. Recover a direct child's handle with `await rlm.agent.get('researcher')` or its ID. Names are unique among siblings and reserved for this session.",
                 "`await child.info()` reads status/task/timing; `child.history()` reads its conversation. `await child.result()` returns an RLMResult with .answer, .usage, .turns, .session_dir, or None while pending; failed/cancelled agents raise. `await child.wait(timeout=30)` waits at most that many seconds and returns current metadata. Waits use the cell's normal timeout and never cancel the agent. Avoid busy polling.",
-                "`await child.cancel()` terminates the child and its descendants. An ordinary child releases its kernel after answering. `persistent=True` retains an idle kernel after answering; follow-up messaging is not available yet. Terminating a parent terminates all its descendants. Only direct children can be controlled; descendant listing grants no control.",
+                "`await child.cancel()` terminates the child and its descendants. An ordinary child releases its kernel after answering. `persistent=True` retains an idle kernel after answering; Use `await child.send(message)` to queue an instruction until an answer or explicit wait, and `await child.steer(message)` for the next model/tool boundary. Terminating a parent terminates all its descendants. Only direct children can be controlled; descendant listing grants no control.",
+            ]
+        )
+
+    if has_ipython and (allow_recursion or depth > 0):
+        parts.extend(
+            [
+                "",
+                "Supervisor inbox: `await rlm.inbox.list()` lists unread event metadata without reading payloads. `await rlm.inbox.read(event_id)` retrieves a payload and marks it read; `list(unread_only=False)` includes read events. Child completion is automatic; reports use `await rlm.agent.send_to_parent(message)`. Children cannot steer parents or message siblings.",
+                "Call the native `wait` tool when you have no work until a new event arrives. It suspends inference without occupying IPython. Already-announced unread events do not wake it repeatedly. Parent instructions are pushed automatically; reports and completion events require inbox reads. Notifications contain only an unread count. A final answer ends this ACP prompt; use wait to remain available. Queued instructions are delivered at an answer or wait boundary, steering at the next model/tool boundary; active tools are not interrupted.",
             ]
         )
 
