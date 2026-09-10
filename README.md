@@ -124,6 +124,27 @@ The engine asks the model for a plain-text handoff summary and resumes the task 
 
 The IPython kernel keeps running across the compaction, so all variables, imports, and in-memory data are preserved. The model is told to mention important variable names in its summary so the resumed branch knows what is available. The same policy applies to the main agent and all recursive agents.
 
+Compaction retains recent user messages as separate messages under a shared 20 KB UTF-8 text budget, favoring newer requests and truncating the boundary message if necessary. It then appends the new summary. Previous summaries are not retained as user requests, and older requests are not automatically reloaded from disk on later compactions.
+
+The full conversation remains in the session's append-only `messages.jsonl`, which the model can search and process from Python. Message records have stable event `id` fields, zero-based `message_index` values, and a `message` object containing the role, content, and tool-call fields. Full tool outputs and shortened context versions have separate indices; the shortened tool record links to its `source_message_index`. System messages, checkpoint requests/responses, and installed summaries are also logged. A `user` record begins a prompt attempt; `prompt_rollback.prompt_id` identifies a failed or cancelled attempt, whose records remain available as history.
+
+Each `context_window` record declares a zero-based `window` index, a `reason` (`start`, `compaction`, or `rollback`), and the ordered `message_indices` that seed that window. Subsequent message records with a `window` field append to it. Closed windows never change. Rollback opens a new window containing the restored context, preserving addresses in the failed window. Checkpoint-only messages remain addressable in the ledger but are not appended to the agent's working window. The `turn` field is an execution-loop counter, not a message or window index.
+
+The kernel can inspect its own history or a child's, including while the child is running:
+
+```python
+from rlm import history
+
+h = history()                        # Defaults to $RLM_SESSION_DIR
+requests = h.user_messages()          # Original inputs, including rolled-back attempts
+message = h.messages[3]               # Session-wide message index
+earlier = h.windows[0].messages       # Initial working context
+child = history(h.children[0])        # Paths are recorded when children spawn
+message = child.windows[4].messages[2]  # If that child has reached window 4
+```
+
+Snapshots contain complete records as of the read; call `history(...)` again to observe new activity. `h.events` exposes lifecycle records, including each child's spawn prompt and rollback markers. The compacted context points to this API so the model can retrieve omitted details without putting the whole transcript back in context.
+
 ## Session Directory
 
 Every invocation writes to `$RLM_HOME/sessions/<id>/`. Nested session directories mirror the call tree.

@@ -389,7 +389,9 @@ class SessionTreeSupervisor:
             # must start before the first await so a cancellation while waiting
             # for the lock still closes the session and clears the registry.
             try:
-                parent.session.log_sub_spawn(child_session.dir.name, "(brokered rlm())")
+                parent.session.log_sub_spawn(
+                    child_session.dir.name, "(brokered rlm())", prompt=prompt
+                )
                 async with self._lock:
                     if self._closed:
                         raise asyncio.CancelledError

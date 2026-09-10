@@ -307,6 +307,7 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
     with pytest.raises(asyncio.CancelledError):
         await pending
 
+    assert [message["role"] for message in engine._messages] == ["system"]
     try:
         result = await engine.prompt("continue")
     finally:
@@ -432,7 +433,7 @@ async def test_depth_limit_is_a_completed_result(session):
     assert meta["metrics"]["stop_reason"] == "depth_limit"
 
 
-async def test_compaction_counts_seed_prompt(session):
+async def test_compaction_dropped_chars_excludes_retained_user_text(session):
     client = DummyClient([DummyMessage(content="summary")])
     engine = RLMEngine(
         client=client, session=session, runtime_config=make_runtime_config()
@@ -449,7 +450,7 @@ async def test_compaction_counts_seed_prompt(session):
         await engine.aclose()
 
     assert engine._metrics.num_compactions == 1
-    assert engine._metrics.compaction_chars_dropped_mean == len("original promptwork")
+    assert engine._metrics.compaction_chars_dropped_mean == len("work")
 
 
 async def test_engine_failed_prompt_can_be_retried(session):
@@ -466,6 +467,7 @@ async def test_engine_failed_prompt_can_be_retried(session):
     with pytest.raises(RuntimeError, match="boom"):
         await engine.prompt("fail")
 
+    assert [message["role"] for message in engine._messages] == ["system"]
     try:
         result = await engine.prompt("continue")
     finally:
@@ -478,15 +480,23 @@ async def test_engine_failed_prompt_can_be_retried(session):
     log = [
         json.loads(line)
         for line in (Path(session.dir) / "messages.jsonl").read_text().splitlines()
+        if json.loads(line)["type"] != "context_window"
     ]
     assert [entry["type"] for entry in log] == [
+        "system",
+        "user",
         "assistant",
         "prompt_rollback",
+        "user",
         "assistant",
         "done",
     ]
-    assert log[1]["attempted_turns"] == 1
-    assert log[1]["reason"] == "error"
+    assert log[1]["message"] == {"role": "user", "content": "fail"}
+    assert log[3]["prompt_id"] == log[1]["id"]
+    assert log[3]["attempted_turns"] == 1
+    assert log[3]["reason"] == "error"
+    assert log[4]["message"] == {"role": "user", "content": "continue"}
+    assert len({entry["id"] for entry in log}) == len(log)
     assert client.calls[-1]["messages"][-2:] == [
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},

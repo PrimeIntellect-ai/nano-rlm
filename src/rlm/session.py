@@ -8,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
+from rlm.history import read_records
 from rlm.types import ChildSessionAggregate, ProgrammaticToolCallStats
 
 
@@ -23,6 +24,18 @@ class Session:
         self.dir = Path(session_dir).resolve()
         self.dir.mkdir(parents=True, exist_ok=True)
         self._msg_file = open(self.dir / "messages.jsonl", "a")
+        self._message_count = 0
+        self._window = -1
+        for entry in read_records(self.dir / "messages.jsonl"):
+            if "message_index" in entry:
+                self._message_count = max(
+                    self._message_count, entry["message_index"] + 1
+                )
+            if entry["type"] == "context_window":
+                self._window = max(self._window, entry["window"])
+        self._context_messages: list[dict] = []
+        self.context_indices: list[int] = []
+        self._context_started = False
 
     def write_meta(self, **kwargs):
         """Write meta.json atomically."""
@@ -37,35 +50,110 @@ class Session:
         tmp.write_text(json.dumps(data, indent=2, default=str))
         tmp.rename(meta_path)
 
-    def log(self, entry: dict):
+    def log(self, entry: dict, *, in_context: bool = False) -> int | None:
         """Append a line to messages.jsonl."""
+        if in_context and not self._context_started:
+            self.replace_context([], reason="start")
+        index = None
+        if "message" in entry:
+            index = self._message_count
+            entry["message_index"] = index
+            if in_context:
+                entry["window"] = self._window
         entry.setdefault("timestamp", time.time())
+        entry.setdefault("id", uuid.uuid4().hex)
         self._msg_file.write(json.dumps(entry, default=str) + "\n")
         self._msg_file.flush()
+        if index is not None:
+            self._message_count += 1
+            if in_context:
+                self._context_messages.append(entry["message"])
+                self.context_indices.append(index)
+        return index
 
-    def log_assistant(
-        self, turn: int, tool_calls: list[dict] | None, content: str | None
-    ):
-        entry = {"type": "assistant", "turn": turn}
+    def replace_context(
+        self, messages: list[dict], *, reason: str, indices: list[int] | None = None
+    ) -> int:
+        """Start a new window without changing any previous window's addresses."""
+        if indices is None:
+            known = {
+                id(message): index
+                for message, index in zip(
+                    self._context_messages, self.context_indices, strict=True
+                )
+            }
+            indices = []
+            for message in messages:
+                index = known.get(id(message))
+                if index is None:
+                    index = self.log({"type": "context_message", "message": message})
+                indices.append(index)
+        self.log(
+            {
+                "type": "context_window",
+                "window": self._window + 1,
+                "reason": reason,
+                "message_indices": indices,
+            }
+        )
+        self._window += 1
+        self._context_started = True
+        self._context_messages = list(messages)
+        self.context_indices = list(indices)
+        return self._window
+
+    def log_assistant(self, turn: int, tool_calls: list[dict] | None, message: dict):
+        entry = {"type": "assistant", "turn": turn, "message": message}
         if tool_calls:
             entry["tool_calls"] = tool_calls
-        if content:
-            entry["content"] = content
-        self.log(entry)
+        if message.get("content"):
+            entry["content"] = message["content"]
+        self.log(entry, in_context=True)
 
-    def log_tool_result(self, turn: int, tool: str, content: str, duration: float):
-        self.log(
+    def log_tool_result(
+        self,
+        turn: int,
+        tool: str,
+        content: str,
+        duration: float,
+        *,
+        call_id: str,
+        context_content: str | None = None,
+    ) -> dict:
+        message = {"role": "tool", "tool_call_id": call_id, "content": content}
+        truncated = context_content is not None and context_content != content
+        source_index = self.log(
             {
                 "type": "tool_result",
                 "turn": turn,
                 "tool": tool,
                 "content": content,
                 "duration": round(duration, 3),
+                "message": message,
+            },
+            in_context=not truncated,
+        )
+        if truncated:
+            message = {**message, "content": context_content}
+            self.log(
+                {
+                    "type": "context_message",
+                    "source_message_index": source_index,
+                    "message": message,
+                },
+                in_context=True,
+            )
+        return message
+
+    def log_sub_spawn(self, child_name: str, command: str, *, prompt: str):
+        self.log(
+            {
+                "type": "sub_spawn",
+                "child_dir": child_name,
+                "command": command,
+                "prompt": prompt,
             }
         )
-
-    def log_sub_spawn(self, child_name: str, command: str):
-        self.log({"type": "sub_spawn", "child_dir": child_name, "command": command})
 
     def aggregate_child_metrics(
         self, field: str = "programmatic_tool_call_stats"

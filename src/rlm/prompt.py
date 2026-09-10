@@ -144,6 +144,16 @@ def build_system_prompt(
         "",
         f"Working directory: {cwd}",
         f"Conversation log: {log_dir}/messages.jsonl",
+        "Read the live conversation ledger with `from rlm import history; h = history()`. "
+        "`h.messages[i]` addresses a session-wide message; `h.windows[w].messages[i]` addresses "
+        "a message within a context window. Indices are zero-based. Compaction and rollback "
+        "start new windows; earlier windows remain available. `h.user_messages()` returns "
+        "original user inputs. `h.children` lists spawned child session paths: "
+        "`history(h.children[0])` reads a child's live history. Call `history(...)` again for a "
+        "fresh snapshot. `h.events` includes spawn prompts and rollback markers. "
+        "Full tool outputs and their shortened context versions have separate message indices. "
+        "Search or print selected records to recover missing context; avoid printing the whole ledger. "
+        "Failed attempts remain as history: `prompt_rollback.prompt_id` identifies their user record.",
     ]
 
     skill_lines: list[str] = []

@@ -31,6 +31,7 @@ from rlm.compaction import (
     discover_threshold,
     estimated_tokens,
     is_context_overflow,
+    retain_user_messages,
     truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
@@ -275,7 +276,19 @@ class RLMEngine:
             completion_tokens=self._total_usage.completion_tokens,
         )
         self._metrics.stop_reason = ""
+        prompt_id = uuid.uuid4().hex
+        context_before = list(self.session.context_indices)
         try:
+            self.session.log(
+                {
+                    "id": prompt_id,
+                    "type": "user",
+                    "turn": self._turn,
+                    "content": prompt,
+                    "message": self._messages[-1],
+                },
+                in_context=True,
+            )
             result = await self._run_loop()
         except BaseException as exc:
             attempted_turns = self._turn - turn_before
@@ -283,6 +296,7 @@ class RLMEngine:
                 self.session.log(
                     {
                         "type": "prompt_rollback",
+                        "prompt_id": prompt_id,
                         "start_turn": turn_before,
                         "attempted_turns": attempted_turns,
                         "reason": (
@@ -298,6 +312,9 @@ class RLMEngine:
             # kernel/tool side effects, and the append-only audit log describe work
             # that really ran and remain part of session accounting.
             self._messages[:] = messages_before
+            self.session.replace_context(
+                messages_before, reason="rollback", indices=context_before
+            )
             self._last_good = last_good_before
             self._compacted = compacted_before
             self._branch_start_turn = branch_start_before
@@ -398,6 +415,9 @@ class RLMEngine:
             # The initial conversation is the floor for checkpoint fallbacks: a
             # first-turn checkpoint must never retry from an empty base.
             self._last_good = len(self._messages)
+            self.session.log(
+                {"type": "system", "message": self._messages[0]}, in_context=True
+            )
             self._started = True
         except BaseException:
             self._repl.shutdown()
@@ -470,14 +490,15 @@ class RLMEngine:
                             "args": err if args is None else args,
                         }
                     )
-            self.session.log_assistant(turn, tool_calls_log, msg.content)
+            self.session.log_assistant(turn, tool_calls_log, msg_dict)
 
             if msg.tool_calls and len(msg.tool_calls) > 1:
                 feedback = "Error: only one tool call per turn allowed"
                 for tc in msg.tool_calls:
-                    self.session.log_tool_result(turn, tc.function.name, feedback, 0.0)
                     messages.append(
-                        {"role": "tool", "tool_call_id": tc.id, "content": feedback}
+                        self.session.log_tool_result(
+                            turn, tc.function.name, feedback, 0.0, call_id=tc.id
+                        )
                     )
                 continue
 
@@ -489,9 +510,10 @@ class RLMEngine:
                     f"Error: invalid JSON arguments for tool '{tool_name}': "
                     f"{err_info['_parse_error']}"
                 )
-                self.session.log_tool_result(turn, tool_name, feedback, 0.0)
                 messages.append(
-                    {"role": "tool", "tool_call_id": tc.id, "content": feedback}
+                    self.session.log_tool_result(
+                        turn, tool_name, feedback, 0.0, call_id=tc.id
+                    )
                 )
                 continue
 
@@ -583,16 +605,18 @@ class RLMEngine:
 
             result = tool_result.content
 
-            self.session.log_tool_result(turn, tool_name, result, duration)
             content = truncate_tool_output(
                 result, self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
             )
             messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": content,
-                }
+                self.session.log_tool_result(
+                    turn,
+                    tool_name,
+                    result,
+                    duration,
+                    call_id=tc.id,
+                    context_content=content,
+                )
             )
 
             if self._should_compact(messages, usage, content):
@@ -767,6 +791,14 @@ class RLMEngine:
                 request["parallel_tool_calls"] = False
 
         try:
+            if checkpoint:
+                self.session.log(
+                    {
+                        "type": "checkpoint_request",
+                        "request_id": request_id,
+                        "message": messages[-1],
+                    }
+                )
             response = await call_with_retries(
                 self.client.chat.completions.create, **request
             )
@@ -789,6 +821,16 @@ class RLMEngine:
         if not checkpoint:
             self._last_prompt_tokens = usage.prompt_tokens
             self._last_call_id = request_id
+        else:
+            self.session.log(
+                {
+                    "type": "checkpoint_response",
+                    "request_id": request_id,
+                    "message": response.choices[0].message.model_dump(
+                        exclude_none=True
+                    ),
+                }
+            )
         return response, usage
 
     async def _complete(
@@ -824,6 +866,13 @@ class RLMEngine:
                 messages, usage
             ):
                 return response, usage
+            self.session.log(
+                {
+                    "type": "discarded_assistant",
+                    "request_id": self._last_call_id,
+                    "message": choice.message.model_dump(exclude_none=True),
+                }
+            )
 
         await self._compact_branch(messages, turn)
         try:
@@ -843,8 +892,8 @@ class RLMEngine:
     ) -> None:
         """Ask the model for a handoff summary and rebuild ``messages``.
 
-        Called in-place: mutates ``messages`` to ``[system, user(framing +
-        summary)]`` while preserving the IPython kernel. A summary attempt is
+        Called in-place: retains bounded recent user messages and appends a framed
+        summary while preserving the system message and IPython kernel. A summary attempt is
         housekeeping, not a work turn: it does not count toward ``max_total_turns``.
         Its tokens still land in ``_total_usage`` for cost accounting and count
         toward token budgets. Every committed attempt remains represented in the
@@ -859,7 +908,10 @@ class RLMEngine:
         keeps the original "text-only summary" behaviour by forbidding
         tool calls on this turn.
         """
-        dropped_chars = _count_messages_chars(messages[1:])
+        retained_messages = retain_user_messages(messages)
+        dropped_chars = _count_messages_chars(messages[1:]) - _count_messages_chars(
+            retained_messages
+        )
         turns_since_last = turn + 1 - self._branch_start_turn
 
         checkpoint_prompt = CHECKPOINT_PROMPT
@@ -910,14 +962,27 @@ class RLMEngine:
 
         system_msg = messages[0]
         self._last_handoff_summary = summary_text
-        compacted_user_content = SUMMARY_FRAMING + "\n\n" + summary_text
+        compacted_user_content = (
+            SUMMARY_FRAMING
+            + "\n\n"
+            + summary_text
+            + "\n\nFull conversation history is available in "
+            + str(self.session.dir / "messages.jsonl")
+            + ". Use `from rlm import history; h = history()` to inspect "
+            "`h.windows[w].messages[i]`, `h.messages[i]`, or `h.user_messages()`. "
+            "Search or read relevant records with Python when the summary or retained "
+            "requests lack context. The log includes failed attempts: prompt_rollback.prompt_id "
+            "identifies the user record whose attempt was rolled back."
+        )
         messages[:] = [
             system_msg,
+            *retained_messages,
             {"role": "user", "content": compacted_user_content},
         ]
         self._last_good = len(messages)
         self._compacted = True
         self._semantic_edges.finish_compaction(compaction.compaction_id, "completed")
+        window = self.session.replace_context(messages, reason="compaction")
 
         # Log the compaction for traceability.
         self.session.log(
@@ -925,6 +990,8 @@ class RLMEngine:
                 "type": "compaction",
                 "turn": turn,
                 "summary": summary_text,
+                "window": window,
+                "summary_message_index": self.session.context_indices[-1],
                 "summary_chars": len(summary_text),
                 "dropped_chars": dropped_chars,
                 "turns_since_last_compaction": turns_since_last,

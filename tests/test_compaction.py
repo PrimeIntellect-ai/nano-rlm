@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
@@ -16,7 +17,12 @@ from conftest import (
     DummyToolCall,
     DummyUsage,
 )
-from rlm.compaction import CompactionFailed, is_context_overflow
+from rlm.compaction import (
+    SUMMARY_FRAMING,
+    CompactionFailed,
+    is_context_overflow,
+    retain_user_messages,
+)
 from rlm.config import (
     ExecutionPolicy,
     InvocationContext,
@@ -24,6 +30,7 @@ from rlm.config import (
     RuntimeConfig,
 )
 from rlm.engine import RLMEngine
+from rlm.history import history
 from rlm.session import Session
 from rlm.supervisor import SessionTreeSupervisor
 
@@ -162,12 +169,32 @@ async def test_tool_result_overflow_compacts_and_retries(session):
         [
             _response(
                 DummyMessage(
-                    tool_calls=[DummyToolCall("ipython", {"code": "print('x' * 4000)"})]
+                    tool_calls=[
+                        DummyToolCall("ipython", {"code": "print('x' * 40000)"})
+                    ]
                 )
             ),
             _overflow(),
             _overflow(),
             _response(DummyMessage(content="summary")),
+            _response(
+                DummyMessage(
+                    tool_calls=[
+                        DummyToolCall(
+                            "ipython",
+                            {
+                                "code": (
+                                    "from rlm import history\n"
+                                    "h = history()\n"
+                                    "print(h.user_messages()[0]['content'])\n"
+                                    "print(len(next(r['message']['content'] for r in h.events if r['type'] == 'tool_result')))\n"
+                                    "print(h.windows[1].messages[1]['content'])"
+                                )
+                            },
+                        )
+                    ]
+                )
+            ),
             _response(DummyMessage(content="done")),
         ],
         max_model_len=32_768,
@@ -186,10 +213,105 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 1
     assert client.calls[3]["tool_choice"] == "none"
-    # The retried work call runs on the rebuilt branch: system + framed summary.
     retry_messages = client.calls[4]["messages"]
-    assert len(retry_messages) == 2
-    assert "summary" in retry_messages[1]["content"]
+    assert len(retry_messages) == 3
+    assert retry_messages[1] == {
+        "role": "user",
+        "content": "produce a large tool result",
+    }
+    assert retry_messages[2]["content"].startswith(SUMMARY_FRAMING)
+    assert str(session.dir / "messages.jsonl") in retry_messages[2]["content"]
+    records = [
+        json.loads(line)
+        for line in (session.dir / "messages.jsonl").read_text().splitlines()
+    ]
+    tool_records = [entry for entry in records if entry["type"] == "tool_result"]
+    assert tool_records[0]["message"] == {
+        "role": "tool",
+        "tool_call_id": "call_0",
+        "content": "x" * 40000 + "\n",
+    }
+    assistant = next(entry for entry in records if entry["type"] == "assistant")
+    assert (
+        assistant["message"]["tool_calls"][0]["id"]
+        == tool_records[0]["message"]["tool_call_id"]
+    )
+    assert "40001" in tool_records[1]["content"]
+    assert "produce a large tool result" in tool_records[1]["content"]
+    assert (
+        next(entry for entry in records if entry["type"] == "system")["message"]["role"]
+        == "system"
+    )
+    assert any(entry["type"] == "checkpoint_response" for entry in records)
+    ledger = history(session.dir)
+    assert ledger.windows[0].messages == client.calls[1]["messages"]
+    assert ledger.windows[1].messages[:3] == retry_messages
+    assert ledger.windows[1].messages == engine._messages
+    assert (
+        ledger.windows[0].message_indices[:2] == ledger.windows[1].message_indices[:2]
+    )
+
+
+async def test_repeated_compaction_retains_user_requests_despite_bad_summary(session):
+    client = _ScriptedClient(
+        [
+            _response(DummyMessage(content="first answer")),
+            _response(DummyMessage(content="<tool_call>ipython</tool_call>")),
+            _response(DummyMessage(content="summary without the task")),
+            _response(DummyMessage(content="second answer")),
+            _response(DummyMessage(content="third summary")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(),
+    )
+    try:
+        await engine.prompt("Identify the original site. Preserve this exact question.")
+        # Exercise two checkpoints on the same branch without another work turn.
+        await engine._compact_branch(engine._messages, turn=0)
+        await engine._compact_branch(engine._messages, turn=0)
+        assert len(engine._messages) == 3
+        assert engine._messages[1] == {
+            "role": "user",
+            "content": "Identify the original site. Preserve this exact question.",
+        }
+        assert "summary without the task" in engine._messages[-1]["content"]
+        await engine.prompt("Include the decisive source URL.")
+        await engine._compact_branch(engine._messages, turn=1)
+        assert [message["content"] for message in engine._messages[1:-1]] == [
+            "Identify the original site. Preserve this exact question.",
+            "Include the decisive source URL.",
+        ]
+        assert "summary without the task" not in engine._messages[-1]["content"]
+    finally:
+        await engine.aclose()
+
+
+@pytest.mark.parametrize("budget", [1, 40, 100, 1000])
+def test_retained_user_history_is_bounded_and_newest_first(budget):
+    messages = [
+        {"role": "user", "content": "old " * 1000},
+        {"role": "assistant", "content": "work"},
+        {"role": "user", "content": SUMMARY_FRAMING + "old summary"},
+        {"role": "user", "content": "新" * 100},
+        {"role": "user", "content": "latest"},
+    ]
+    before = deepcopy(messages)
+    retained = retain_user_messages(messages, max_bytes=budget)
+    assert (
+        sum(len(message["content"].encode("utf-8")) for message in retained) <= budget
+    )
+    assert retained[-1]["content"] == "latest"[:budget]
+    assert all(message["role"] == "user" for message in retained)
+    assert all(
+        not message["content"].startswith(SUMMARY_FRAMING) for message in retained
+    )
+    assert messages == before
+    assert retain_user_messages(retained, max_bytes=budget) == retained
+    if budget >= 1000:
+        assert retained[-2] == messages[-2]
 
 
 async def test_overflow_recovers_without_discovered_threshold(session):
