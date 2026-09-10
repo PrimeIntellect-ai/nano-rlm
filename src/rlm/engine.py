@@ -979,8 +979,8 @@ class RLMEngine:
         compaction = self._semantic_edges.begin_compaction(self._invocation_id)
         try:
             # A rejected checkpoint falls back to the last good snapshot (which has a
-            # full reserve of room, so it fits); an empty or tool-calling reply is
-            # resampled. Reasoning is never part of the summary.
+            # full reserve of room, so it fits); an incomplete, empty, or
+            # tool-calling reply is resampled. Reasoning is never part of the summary.
             base = messages
             summary_text = ""
             for _ in range(self.max_compaction_attempts):
@@ -999,12 +999,13 @@ class RLMEngine:
                         raise
                     base = messages[: self._last_good]
                     continue
-                message = response.choices[0].message
+                choice = response.choices[0]
+                message = choice.message
                 # Reasoning never enters the summary: only the reply's final text
                 # counts, so a reply that lives entirely in the reasoning channel
                 # is resampled like an empty one.
                 text = (message.content or "").strip()
-                if not message.tool_calls and text:
+                if choice.finish_reason == "stop" and not message.tool_calls and text:
                     summary_text = text
                     break
                 self._semantic_edges.release_summary_request(compaction.compaction_id)
