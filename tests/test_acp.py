@@ -433,7 +433,7 @@ async def test_depth_limit_is_a_completed_result(session):
     assert meta["metrics"]["stop_reason"] == "depth_limit"
 
 
-async def test_compaction_dropped_chars_excludes_retained_user_text(session):
+async def test_compaction_counts_seed_prompt(session):
     client = DummyClient([DummyMessage(content="summary")])
     engine = RLMEngine(
         client=client, session=session, runtime_config=make_runtime_config()
@@ -450,7 +450,7 @@ async def test_compaction_dropped_chars_excludes_retained_user_text(session):
         await engine.aclose()
 
     assert engine._metrics.num_compactions == 1
-    assert engine._metrics.compaction_chars_dropped_mean == len("work")
+    assert engine._metrics.compaction_chars_dropped_mean == len("original promptwork")
 
 
 async def test_engine_failed_prompt_can_be_retried(session):

@@ -31,7 +31,6 @@ from rlm.compaction import (
     discover_threshold,
     estimated_tokens,
     is_context_overflow,
-    retain_user_messages,
     truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
@@ -874,8 +873,8 @@ class RLMEngine:
     ) -> None:
         """Ask the model for a handoff summary and rebuild ``messages``.
 
-        Called in-place: retains bounded recent user messages and appends a framed
-        summary while preserving the system message and IPython kernel. A summary attempt is
+        Called in-place: mutates ``messages`` to ``[system, user(framing +
+        summary)]`` while preserving the IPython kernel. A summary attempt is
         housekeeping, not a work turn: it does not count toward ``max_total_turns``.
         Its tokens still land in ``_total_usage`` for cost accounting and count
         toward token budgets. Every committed attempt remains represented in the
@@ -890,10 +889,7 @@ class RLMEngine:
         keeps the original "text-only summary" behaviour by forbidding
         tool calls on this turn.
         """
-        retained_messages = retain_user_messages(messages)
-        dropped_chars = _count_messages_chars(messages[1:]) - _count_messages_chars(
-            retained_messages
-        )
+        dropped_chars = _count_messages_chars(messages[1:])
         turns_since_last = turn + 1 - self._branch_start_turn
 
         checkpoint_prompt = CHECKPOINT_PROMPT
@@ -952,13 +948,11 @@ class RLMEngine:
             + str(self.session.dir / "messages.jsonl")
             + ". Use `from rlm import history; h = history()` to inspect "
             "`h.windows[w].messages[i]`, `h.messages[i]`, or `h.user_messages()`. "
-            "Search or read relevant records with Python when the summary or retained "
-            "requests lack context. The log includes failed attempts: prompt_rollback.prompt_id "
+            "Search or read relevant records with Python when the summary lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
             "identifies the user record whose attempt was rolled back."
         )
         messages[:] = [
             system_msg,
-            *retained_messages,
             {"role": "user", "content": compacted_user_content},
         ]
         self._last_good = len(messages)

@@ -21,7 +21,6 @@ from rlm.compaction import (
     SUMMARY_FRAMING,
     CompactionFailed,
     is_context_overflow,
-    retain_user_messages,
 )
 from rlm.config import (
     ExecutionPolicy,
@@ -188,7 +187,7 @@ async def test_tool_result_overflow_compacts_and_retries(session):
                                     "h = history()\n"
                                     "print(h.user_messages()[0]['content'])\n"
                                     "print(len(next(r['message']['content'] for r in h.events if r['type'] == 'tool_result')))\n"
-                                    "print(h.windows[1].messages[1]['content'])"
+                                    "print(h.windows[0].messages[1]['content'])"
                                 )
                             },
                         )
@@ -214,13 +213,9 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert engine._metrics.num_compactions == 1
     assert client.calls[3]["tool_choice"] == "none"
     retry_messages = client.calls[4]["messages"]
-    assert len(retry_messages) == 3
-    assert retry_messages[1] == {
-        "role": "user",
-        "content": "produce a large tool result",
-    }
-    assert retry_messages[2]["content"].startswith(SUMMARY_FRAMING)
-    assert str(session.dir / "messages.jsonl") in retry_messages[2]["content"]
+    assert len(retry_messages) == 2
+    assert retry_messages[1]["content"].startswith(SUMMARY_FRAMING)
+    assert str(session.dir / "messages.jsonl") in retry_messages[1]["content"]
     records = [
         json.loads(line)
         for line in (session.dir / "messages.jsonl").read_text().splitlines()
@@ -245,73 +240,9 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert not any(entry["type"].startswith("checkpoint_") for entry in records)
     ledger = history(session.dir)
     assert ledger.windows[0].messages == client.calls[1]["messages"]
-    assert ledger.windows[1].messages[:3] == retry_messages
+    assert ledger.windows[1].messages[:2] == retry_messages
     assert ledger.windows[1].messages == engine._messages
-    assert (
-        ledger.windows[0].message_indices[:2] == ledger.windows[1].message_indices[:2]
-    )
-
-
-async def test_repeated_compaction_retains_user_requests_despite_bad_summary(session):
-    client = _ScriptedClient(
-        [
-            _response(DummyMessage(content="first answer")),
-            _response(DummyMessage(content="<tool_call>ipython</tool_call>")),
-            _response(DummyMessage(content="summary without the task")),
-            _response(DummyMessage(content="second answer")),
-            _response(DummyMessage(content="third summary")),
-        ]
-    )
-    engine = RLMEngine(
-        client=client,  # type: ignore[arg-type]
-        session=session,
-        runtime_config=_config(),
-    )
-    try:
-        await engine.prompt("Identify the original site. Preserve this exact question.")
-        # Exercise two checkpoints on the same branch without another work turn.
-        await engine._compact_branch(engine._messages, turn=0)
-        await engine._compact_branch(engine._messages, turn=0)
-        assert len(engine._messages) == 3
-        assert engine._messages[1] == {
-            "role": "user",
-            "content": "Identify the original site. Preserve this exact question.",
-        }
-        assert "summary without the task" in engine._messages[-1]["content"]
-        await engine.prompt("Include the decisive source URL.")
-        await engine._compact_branch(engine._messages, turn=1)
-        assert [message["content"] for message in engine._messages[1:-1]] == [
-            "Identify the original site. Preserve this exact question.",
-            "Include the decisive source URL.",
-        ]
-        assert "summary without the task" not in engine._messages[-1]["content"]
-    finally:
-        await engine.aclose()
-
-
-@pytest.mark.parametrize("budget", [1, 40, 100, 1000])
-def test_retained_user_history_is_bounded_and_newest_first(budget):
-    messages = [
-        {"role": "user", "content": "old " * 1000},
-        {"role": "assistant", "content": "work"},
-        {"role": "user", "content": SUMMARY_FRAMING + "old summary"},
-        {"role": "user", "content": "新" * 100},
-        {"role": "user", "content": "latest"},
-    ]
-    before = deepcopy(messages)
-    retained = retain_user_messages(messages, max_bytes=budget)
-    assert (
-        sum(len(message["content"].encode("utf-8")) for message in retained) <= budget
-    )
-    assert retained[-1]["content"] == "latest"[:budget]
-    assert all(message["role"] == "user" for message in retained)
-    assert all(
-        not message["content"].startswith(SUMMARY_FRAMING) for message in retained
-    )
-    assert messages == before
-    assert retain_user_messages(retained, max_bytes=budget) == retained
-    if budget >= 1000:
-        assert retained[-2] == messages[-2]
+    assert ledger.windows[0].message_indices[0] == ledger.windows[1].message_indices[0]
 
 
 async def test_overflow_recovers_without_discovered_threshold(session):
