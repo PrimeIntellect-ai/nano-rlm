@@ -473,7 +473,6 @@ class RLMEngine:
                 "role": "user",
                 "content": f"Parent instruction:\n{event['content']}",
             }
-            self._messages.append(message)
             self.session.log(
                 {"type": "parent_message", "event_id": event["id"], "message": message},
                 in_context=True,
@@ -482,13 +481,12 @@ class RLMEngine:
             notification = self._supervisor.inbox_notification(self._invocation_id)
             if notification:
                 message = {"role": "user", "content": notification}
-                self._messages.append(message)
                 self.session.log(
                     {"type": "supervisor_notification", "message": message},
                     in_context=True,
                 )
         if instructions:
-            self._last_good = len(self._messages)
+            self._last_good = len(self.session.messages)
         return bool(instructions)
 
     async def _run_loop(self) -> RLMResult:
@@ -520,6 +518,7 @@ class RLMEngine:
                 )
                 break
             self._deliver_supervisor_input()
+            messages = self.session.messages
             self._turn = turn + 1
             try:
                 response, usage = await self._complete(messages, turn)
@@ -699,6 +698,7 @@ class RLMEngine:
 
             if tool_name == "wait":
                 self._deliver_supervisor_input(include_queue=True, notify=False)
+                messages = self.session.messages
             if self._should_compact(messages, usage, content):
                 try:
                     await self._compact_branch(messages, turn)
