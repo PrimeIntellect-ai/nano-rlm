@@ -135,7 +135,9 @@ class SemanticEdgeTracker:
                 inbound.append(_PendingEdge(session.last_request_id, "continuation"))
 
         request_id = uuid.uuid4().hex
-        self._requests[request_id] = _Request(session_id, inbound, compaction_id)
+        self._requests[request_id] = _Request(
+            session_id, list(dict.fromkeys(inbound)), compaction_id
+        )
         if compaction_id is not None:
             compaction.summary_request_id = request_id
         return request_id
