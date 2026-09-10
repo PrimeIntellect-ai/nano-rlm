@@ -75,7 +75,7 @@ def test_live_reader_ignores_unfinished_record_and_sees_it_on_next_read(tmp_path
     assert history(tmp_path).user_messages() == [{"role": "user", "content": "新"}]
 
 
-def test_parent_can_discover_and_read_live_child_history(tmp_path):
+def test_read_live_session_history_from_explicit_directory(tmp_path):
     parent = Session(tmp_path / "parent")
     child = Session(Session.child_dir(parent.dir))
     try:
@@ -85,11 +85,11 @@ def test_parent_can_discover_and_read_live_child_history(tmp_path):
             in_context=True,
         )
         root = history(parent.dir)
-        assert root.child_session_dirs == [child.dir]
+        assert root.events[0]["child_dir"] == child.dir.name
         assert root.events[0]["prompt"] == "research"
-        earlier = history(root.child_session_dirs[0])
+        earlier = history(session_dir=child.dir)
         child.log_assistant(0, None, {"role": "assistant", "content": "working"})
-        current = history(root.child_session_dirs[0])
+        current = history(session_dir=child.dir)
         assert len(earlier.windows[0].messages) == 1
         assert current.windows[0].messages[-1] == {
             "role": "assistant",

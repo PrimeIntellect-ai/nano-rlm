@@ -196,10 +196,14 @@ def estimated_tokens(chars: str) -> int:
 
 
 def compactable(messages: list[dict]) -> bool:
-    """Whether compaction can reclaim anything - some history beyond the task exists."""
-    first_user = next(
-        (i for i, m in enumerate(messages) if m.get("role") == "user"), None
-    )
-    return any(
-        m.get("role") != "system" and i != first_user for i, m in enumerate(messages)
-    )
+    """Whether working history contains more than the retained user-message floor."""
+    history = [
+        message
+        for message in messages
+        if message.get("role") != "system"
+        and not (
+            message.get("role") == "user"
+            and message.get("content", "").startswith(SUMMARY_FRAMING)
+        )
+    ]
+    return history != retain_user_messages(history)

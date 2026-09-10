@@ -130,7 +130,7 @@ The working conversation remains in the session's append-only `messages.jsonl`, 
 
 Each `context_window` record declares a zero-based `window` index, a `reason` (`start`, `compaction`, or `rollback`), and the ordered `message_indices` that seed that window. Subsequent message records with a `window` field append to it. Closed windows never change. Rollback opens a new window containing the restored context, preserving addresses in the failed window. The `turn` field is an execution-loop counter, not a message or window index.
 
-Each agent writes its own `messages.jsonl` in its session directory. Message and context-window indices are local to that agent. `h.child_session_dirs` contains paths to directly spawned child session directories, recorded at spawn time; it does not return agent handles or filter by current status.
+Each agent writes its own `messages.jsonl` in its session directory. Message and context-window indices are local to that agent. Agent discovery belongs to the supervisor; the history reader accepts an explicit session directory.
 
 The kernel can inspect its own history or a child's, including while the child is running:
 
@@ -141,7 +141,7 @@ h = history()                        # Defaults to $RLM_SESSION_DIR
 requests = h.user_messages()          # Original inputs, including rolled-back attempts
 message = h.messages[3]               # Session-wide message index
 earlier = h.windows[0].messages       # Initial working context
-child_history = history(h.child_session_dirs[0])
+child_history = history(session_dir="/path/to/child-session")
 message = child_history.windows[4].messages[2]  # If that child has reached window 4
 ```
 
