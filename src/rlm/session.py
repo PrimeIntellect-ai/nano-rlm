@@ -8,7 +8,6 @@ import time
 import uuid
 from pathlib import Path
 
-from rlm.history import read_records
 from rlm.types import ChildSessionAggregate, ProgrammaticToolCallStats
 
 
@@ -23,19 +22,29 @@ class Session:
         # REPL kernel restart in a different cwd, sandbox teardown, etc.).
         self.dir = Path(session_dir).resolve()
         self.dir.mkdir(parents=True, exist_ok=True)
-        self._msg_file = open(self.dir / "messages.jsonl", "a")
+        self._msg_file = open(self.dir / "messages.jsonl", "x", encoding="utf-8")
+        self._write_error: OSError | None = None
         self._message_count = 0
         self._window = -1
-        for entry in read_records(self.dir / "messages.jsonl"):
-            if "message_index" in entry:
-                self._message_count = max(
-                    self._message_count, entry["message_index"] + 1
-                )
-            if entry["type"] == "context_window":
-                self._window = max(self._window, entry["window"])
-        self._context_messages: list[dict] = []
-        self.context_indices: list[int] = []
+        self._context: list[tuple[int, dict]] = []
         self._context_started = False
+
+    @property
+    def messages(self) -> list[dict]:
+        """Snapshot of the active context, in model-request order."""
+        return [message for _, message in self._context]
+
+    @property
+    def context_indices(self) -> tuple[int, ...]:
+        return tuple(index for index, _ in self._context)
+
+    def check_writable(self) -> None:
+        if self._write_error is not None:
+            raise OSError(
+                "session ledger is unusable after a write failure"
+            ) from self._write_error
+        if self._msg_file.closed:
+            raise RuntimeError("session ledger is closed")
 
     def write_meta(self, **kwargs):
         """Write meta.json atomically."""
@@ -52,6 +61,7 @@ class Session:
 
     def log(self, entry: dict, *, in_context: bool = False) -> int | None:
         """Append a line to messages.jsonl."""
+        self.check_writable()
         if in_context and not self._context_started:
             self.replace_context([], reason="start")
         index = None
@@ -62,13 +72,17 @@ class Session:
                 entry["window"] = self._window
         entry.setdefault("timestamp", time.time())
         entry.setdefault("id", uuid.uuid4().hex)
-        self._msg_file.write(json.dumps(entry, default=str) + "\n")
-        self._msg_file.flush()
+        line = json.dumps(entry, default=str) + "\n"
+        try:
+            self._msg_file.write(line)
+            self._msg_file.flush()
+        except OSError as exc:
+            self._write_error = exc
+            raise
         if index is not None:
             self._message_count += 1
             if in_context:
-                self._context_messages.append(entry["message"])
-                self.context_indices.append(index)
+                self._context.append((index, entry["message"]))
         return index
 
     def replace_context(
@@ -76,30 +90,28 @@ class Session:
     ) -> int:
         """Start a new window without changing any previous window's addresses."""
         if indices is None:
-            known = {
-                id(message): index
-                for message, index in zip(
-                    self._context_messages, self.context_indices, strict=True
-                )
-            }
+            known = {id(message): index for index, message in self._context}
             indices = []
             for message in messages:
                 index = known.get(id(message))
                 if index is None:
                     index = self.log({"type": "context_message", "message": message})
                 indices.append(index)
-        self.log(
-            {
-                "type": "context_window",
-                "window": self._window + 1,
-                "reason": reason,
-                "message_indices": indices,
-            }
-        )
+        context = list(zip(indices, messages, strict=True))
+        try:
+            self.log(
+                {
+                    "type": "context_window",
+                    "window": self._window + 1,
+                    "reason": reason,
+                    "message_indices": indices,
+                }
+            )
+        finally:
+            # Restore memory even if recording a rollback poisons the writer.
+            self._context = context
         self._window += 1
         self._context_started = True
-        self._context_messages = list(messages)
-        self.context_indices = list(indices)
         return self._window
 
     def log_assistant(self, turn: int, tool_calls: list[dict] | None, message: dict):

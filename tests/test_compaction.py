@@ -241,7 +241,7 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     ledger = history(session.dir)
     assert ledger.windows[0].messages == client.calls[1]["messages"]
     assert ledger.windows[1].messages[:2] == retry_messages
-    assert ledger.windows[1].messages == engine._messages
+    assert ledger.windows[1].messages == session.messages
     assert ledger.windows[0].message_indices[0] == ledger.windows[1].message_indices[0]
 
 
