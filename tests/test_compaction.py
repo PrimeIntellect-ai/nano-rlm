@@ -367,10 +367,15 @@ async def test_subagent_recovers_from_context_overflow(tmp_path):
     scope = await supervisor.open_scope(supervisor.root_id)
     endpoint = supervisor.endpoint_for(supervisor.root_id)
     try:
-        task = await supervisor._start_child(
-            endpoint.capability, scope, "recover in the child"
+        child = supervisor._spawn(
+            supervisor._caller(endpoint.capability, scope),
+            scope,
+            "recover in the child",
+            None,
+            False,
         )
-        result = await task
+        await child.done.wait()
+        result = child.result
     finally:
         await supervisor.close_scope(scope)
         await supervisor.aclose()

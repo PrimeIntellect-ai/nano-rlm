@@ -361,7 +361,12 @@ class RLMEngine:
         local_skills = [name for name in self.skills if name != "search"]
         enable_builtin_skills(local_skills, self.session.dir)
         broker_endpoint = None
-        if self.depth < self.max_depth or self.mcp_servers or "search" in self.skills:
+        if (
+            self._supervisor is not None
+            or self.depth < self.max_depth
+            or self.mcp_servers
+            or "search" in self.skills
+        ):
             if self._supervisor is None:
                 self._supervisor = SessionTreeSupervisor(
                     root_session=self.session,
@@ -403,7 +408,18 @@ class RLMEngine:
             allow_git=self.allow_git,
         )
         try:
-            self._repl.start()
+            startup = asyncio.create_task(asyncio.to_thread(self._repl.start))
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(startup)
+                    break
+                except asyncio.CancelledError:
+                    if startup.done():
+                        raise
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
 
             system_prompt = self._load_system_prompt(self._active_tools)
 

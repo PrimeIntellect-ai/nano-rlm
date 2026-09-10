@@ -7,9 +7,10 @@ import os
 import secrets
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -51,6 +52,19 @@ class _Invocation:
     cwd: str
     mcp_servers: dict[str, MCPServer]
     spawned_by_request_id: str | None = None
+    name: str | None = None
+    task: str = ""
+    persistent: bool = False
+    status: str = "starting"
+    created_at: float = field(default_factory=time.time)
+    started_at: float = field(default_factory=time.monotonic)
+    finished_at: float | None = None
+    error: str | None = None
+    result: RLMResult | None = None
+    engine: RLMEngine | None = None
+    runner: asyncio.Task[None] | None = None
+    stop_task: asyncio.Task[None] | None = None
+    done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass
@@ -101,7 +115,7 @@ class SessionTreeSupervisor:
         self._total_turns = 0
         self._total_tokens = 0
         self._tasks: set[asyncio.Task[Any]] = set()
-        self._child_tasks: set[asyncio.Task[RLMResult]] = set()
+        self._child_tasks: set[asyncio.Task[None]] = set()
         self._connection_tasks: set[asyncio.Task[None]] = set()
         self._connection_writers: set[asyncio.StreamWriter] = set()
         self._scopes: dict[str, _Scope] = {}
@@ -143,6 +157,8 @@ class SessionTreeSupervisor:
             runtime_config=runtime_config,
             cwd=cwd,
             mcp_servers=dict(mcp_servers or {}),
+            status="running",
+            persistent=True,
         )
         self.root_id = root_id
         self.semantic_edges = semantic_edges or SemanticEdgeTracker()
@@ -258,7 +274,7 @@ class SessionTreeSupervisor:
         self, invocation_id: str, request_id: str | None = None
     ) -> str:
         async with self._lock:
-            if self._closed or invocation_id not in self._invocations:
+            if self._closed or invocation_id not in self._capabilities.values():
                 raise RuntimeError("recursive invocation is no longer active")
             scope_id = secrets.token_urlsafe(24)
             self._scopes[scope_id] = _Scope(invocation_id, set(), request_id)
@@ -273,50 +289,160 @@ class SessionTreeSupervisor:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _start_child(
-        self, capability: str, scope_id: str, prompt: str
-    ) -> asyncio.Task[RLMResult]:
-        async with self._lock:
-            parent_id = self._capabilities.get(capability)
-            scope = self._scopes.get(scope_id)
-            if parent_id is None or scope is None or scope.invocation_id != parent_id:
-                raise PermissionError("invalid recursive RLM capability")
-            parent = self._invocations[parent_id]
-            child_depth = parent.runtime_config.invocation.depth + 1
-            if child_depth > parent.runtime_config.policy.max_depth:
-                return asyncio.create_task(
-                    self._limit_result(parent, "depth limit reached")
-                )
-            if self._total_calls >= parent.runtime_config.policy.max_subagent_calls:
-                return asyncio.create_task(
-                    self._limit_result(parent, "recursive call limit reached")
-                )
-            policy = parent.runtime_config.policy
-            if (
-                policy.max_total_turns is not None
-                and self._total_turns >= policy.max_total_turns
-            ):
-                return asyncio.create_task(
-                    self._limit_result(parent, "turn budget reached")
-                )
-            if (
-                policy.max_total_tokens is not None
-                and self._total_tokens >= policy.max_total_tokens
-            ):
-                return asyncio.create_task(
-                    self._limit_result(parent, "token budget reached")
-                )
-            self._total_calls += 1
-            task = asyncio.create_task(
-                self._run_child(parent_id, prompt, scope.request_id)
+    def _caller(self, capability: str, scope_id: str) -> _Invocation:
+        parent_id = self._capabilities.get(capability)
+        scope = self._scopes.get(scope_id)
+        if (
+            self._closed
+            or parent_id is None
+            or scope is None
+            or scope.invocation_id != parent_id
+        ):
+            raise PermissionError("invalid agent capability or inactive cell")
+        return self._invocations[parent_id]
+
+    def _child(self, parent: _Invocation, name_or_id: str) -> _Invocation:
+        children = [
+            agent
+            for agent in self._invocations.values()
+            if agent.parent_id == parent.id
+        ]
+        for agent in children:
+            if agent.id == name_or_id:
+                return agent
+        for agent in children:
+            if agent.name == name_or_id:
+                return agent
+        raise PermissionError("agent is not a direct child of the caller")
+
+    def _info(self, agent: _Invocation) -> dict[str, Any]:
+        return {
+            "id": agent.id,
+            "parent_id": agent.parent_id,
+            "name": agent.name,
+            "task": agent.task,
+            "status": agent.status,
+            "persistent": agent.persistent,
+            "created_at": agent.created_at,
+            "elapsed_seconds": (agent.finished_at or time.monotonic())
+            - agent.started_at,
+            "session_dir": str(agent.session.dir),
+            "error": agent.error,
+        }
+
+    def _spawn(
+        self,
+        parent: _Invocation,
+        scope_id: str,
+        task: str,
+        name: str | None,
+        persistent: bool,
+    ) -> _Invocation:
+        policy = parent.runtime_config.policy
+        context = parent.runtime_config.invocation.child()
+        if name is not None and any(
+            agent.parent_id == parent.id and (agent.name == name or agent.id == name)
+            for agent in self._invocations.values()
+        ):
+            raise ValueError("agent name is already reserved among these siblings")
+        if context.depth > policy.max_depth:
+            raise RuntimeError("depth limit reached")
+        if self._total_calls >= policy.max_subagent_calls:
+            raise RuntimeError("subagent call limit reached")
+        if (
+            policy.max_total_turns is not None
+            and self._total_turns >= policy.max_total_turns
+        ):
+            raise RuntimeError("turn budget reached")
+        if (
+            policy.max_total_tokens is not None
+            and self._total_tokens >= policy.max_total_tokens
+        ):
+            raise RuntimeError("token budget reached")
+        child = _Invocation(
+            id=uuid.uuid4().hex,
+            parent_id=parent.id,
+            capability=secrets.token_urlsafe(32),
+            session=Session(Session.child_dir(parent.session.dir)),
+            runtime_config=parent.runtime_config.model_copy(
+                update={"invocation": context}
+            ),
+            cwd=parent.cwd,
+            mcp_servers=parent.mcp_servers,
+            spawned_by_request_id=self._scopes[scope_id].request_id,
+            name=name,
+            task=task,
+            persistent=persistent,
+        )
+        try:
+            child.session.write_meta(**self._info(child))
+            parent.session.log_sub_spawn(
+                child.session.dir.name, "rlm.agent.spawn", prompt=task
             )
-            self._tasks.add(task)
-            self._child_tasks.add(task)
-            scope.tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
-            task.add_done_callback(self._child_tasks.discard)
-            task.add_done_callback(scope.tasks.discard)
-            return task
+        except BaseException:
+            child.session.close()
+            raise
+        self._total_calls += 1
+        self._invocations[child.id] = child
+        self._parents[child.id] = parent.id
+        self._capabilities[child.capability] = child.id
+        self.semantic_edges.register_session(
+            child.id,
+            parent_session_id=parent.id,
+            spawned_by_request_id=child.spawned_by_request_id,
+        )
+        child.runner = asyncio.create_task(self._run_child(child))
+        self._tasks.add(child.runner)
+        self._child_tasks.add(child.runner)
+        child.runner.add_done_callback(self._tasks.discard)
+        child.runner.add_done_callback(self._child_tasks.discard)
+        return child
+
+    async def _agent_operation(self, request: dict) -> Any:
+        parent = self._caller(request["capability"], request["scope_id"])
+        op = request["op"]
+        if op == "agent.spawn":
+            return self._info(
+                self._spawn(
+                    parent,
+                    request["scope_id"],
+                    request["task"],
+                    request["name"],
+                    request["persistent"],
+                )
+            )
+        if op == "agent.list":
+            agents = []
+            for agent in self._invocations.values():
+                ancestor = agent.parent_id
+                while ancestor is not None:
+                    if ancestor == parent.id:
+                        agents.append(self._info(agent))
+                        break
+                    if not request["recursive"]:
+                        break
+                    ancestor = self._parents[ancestor]
+            return agents
+        child = self._child(parent, request.get("name_or_id", request.get("agent_id")))
+        if op == "agent.wait":
+            if not child.done.is_set() and request["timeout"] > 0:
+                try:
+                    await asyncio.wait_for(
+                        child.done.wait(), timeout=request["timeout"]
+                    )
+                except asyncio.TimeoutError:
+                    pass
+        elif op == "agent.cancel":
+            await self._terminate(child)
+        elif op == "agent.result":
+            if not child.done.is_set():
+                return None
+            # Publish return edges only when the parent actually retrieves the outcome.
+            self.semantic_edges.finish_subagent(child.id)
+            if child.status in {"failed", "cancelled"}:
+                raise RuntimeError(child.error or "agent cancelled")
+            return result_to_payload(child.result)
+        return self._info(child)
 
     async def _start_skill_call(
         self,
@@ -352,58 +478,16 @@ class SessionTreeSupervisor:
             task.add_done_callback(scope.tasks.discard)
             return task
 
-    async def _limit_result(self, parent: _Invocation, message: str) -> RLMResult:
-        return RLMResult(answer=f"[{message}]", session_dir=parent.session.dir)
-
-    async def _run_child(
-        self,
-        parent_id: str,
-        prompt: str,
-        spawned_by_request_id: str | None,
-    ) -> RLMResult:
-        parent = self._invocations[parent_id]
-        child_context = parent.runtime_config.invocation.child()
-        semaphore = self._semaphores[child_context.depth]
-        async with semaphore:
-            child_session = Session(Session.child_dir(parent.session.dir))
-            child_id = uuid.uuid4().hex
-            child_config = parent.runtime_config.model_copy(
-                update={"invocation": child_context},
-            )
-            child = _Invocation(
-                id=child_id,
-                parent_id=parent_id,
-                capability=secrets.token_urlsafe(32),
-                session=child_session,
-                runtime_config=child_config,
-                cwd=parent.cwd,
-                mcp_servers=parent.mcp_servers,
-                spawned_by_request_id=spawned_by_request_id,
-            )
-            self.semantic_edges.register_session(
-                child_id,
-                parent_session_id=parent_id,
-                spawned_by_request_id=spawned_by_request_id,
-            )
-            # Everything from session creation to here is synchronous; the try
-            # must start before the first await so a cancellation while waiting
-            # for the lock still closes the session and clears the registry.
-            try:
-                parent.session.log_sub_spawn(
-                    child_session.dir.name, "(brokered rlm())", prompt=prompt
-                )
-                async with self._lock:
-                    if self._closed:
-                        raise asyncio.CancelledError
-                    self._invocations[child_id] = child
-                    self._parents[child_id] = parent_id
-                    self._capabilities[child.capability] = child_id
+    async def _run_child(self, child: _Invocation) -> None:
+        try:
+            async with self._semaphores[child.runtime_config.invocation.depth]:
+                child.status = "running"
                 factory = self._engine_factory
                 if factory is None:
                     from rlm.engine import RLMEngine
 
                     factory = RLMEngine
-                engine = factory(
+                child.engine = factory(
                     cwd=child.cwd,
                     session=child.session,
                     mcp_servers=child.mcp_servers,
@@ -411,24 +495,64 @@ class SessionTreeSupervisor:
                     supervisor=self,
                     invocation_id=child.id,
                 )
-                try:
-                    result = await engine.run(prompt)
-                except Exception:
-                    # A failed child still returns an outcome to its caller. If it
-                    # committed any model requests before failing, link its last
-                    # request to the parent's request that consumes the error.
-                    self.semantic_edges.finish_subagent(child_id)
-                    raise
-                self.semantic_edges.finish_subagent(child_id)
-                return result
+                child.result = await child.engine.prompt(child.task)
+                child.status = "idle" if child.persistent else "completed"
+        except asyncio.CancelledError:
+            child.status = "cancelled"
+        except Exception as exc:
+            child.status = "failed"
+            child.error = str(exc)
+        finally:
+            try:
+                if child.status != "idle":
+                    await self._release_agent(child)
+                else:
+                    child.session.write_meta(**self._info(child))
+            except Exception as exc:
+                child.status = "failed"
+                child.error = f"agent cleanup failed: {exc}"
             finally:
-                # Close synchronously first: the lock acquisition below can be
-                # interrupted by a second cancellation, but the session handle
-                # must be released regardless.
-                child_session.close()
-                async with self._lock:
-                    self._capabilities.pop(child.capability, None)
-                    self._invocations.pop(child.id, None)
+                child.done.set()
+
+    async def _release_agent(self, child: _Invocation) -> None:
+        self._capabilities.pop(child.capability, None)
+        for scope_id, scope in list(self._scopes.items()):
+            if scope.invocation_id == child.id:
+                await self.close_scope(scope_id)
+        try:
+            for descendant in list(self._invocations.values()):
+                if descendant.parent_id == child.id:
+                    await self._terminate(descendant)
+        finally:
+            try:
+                if child.engine is not None:
+                    await child.engine.aclose()
+                    child.engine = None
+            finally:
+                child.finished_at = time.monotonic()
+                child.session.close()
+                child.session.write_meta(**self._info(child))
+
+    async def _terminate(self, child: _Invocation) -> None:
+        if child.done.is_set() and child.status != "idle":
+            return
+        if child.stop_task is None:
+            child.stop_task = asyncio.create_task(self._stop_agent(child))
+            self._tasks.add(child.stop_task)
+            child.stop_task.add_done_callback(self._tasks.discard)
+        await asyncio.shield(child.stop_task)
+
+    async def _stop_agent(self, child: _Invocation) -> None:
+        if child.runner is not None and not child.runner.done():
+            if child.status in {"starting", "running"}:
+                child.runner.cancel()
+            await asyncio.gather(child.runner, return_exceptions=True)
+        if not child.done.is_set() or child.status == "idle":
+            child.status = "cancelled"
+            try:
+                await self._release_agent(child)
+            finally:
+                child.done.set()
 
     async def _handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -443,19 +567,19 @@ class SessionTreeSupervisor:
             except asyncio.TimeoutError:
                 raise TimeoutError("broker request timed out") from None
             request = parse_request(request)
-            if request["op"] == "rlm.run":
-                operation_task = await self._start_child(
-                    request["capability"],
-                    request["scope_id"],
-                    request["prompt"],
-                )
-            else:
+            if request["op"] == "skill.call":
                 operation_task = await self._start_skill_call(
                     request["capability"],
                     request["scope_id"],
                     request["skill_capability"],
                     request["arguments"],
                 )
+            else:
+                self._caller(request["capability"], request["scope_id"])
+                operation_task = asyncio.create_task(self._agent_operation(request))
+                scope = self._scopes[request["scope_id"]]
+                scope.tasks.add(operation_task)
+                operation_task.add_done_callback(scope.tasks.discard)
             disconnect_task = asyncio.create_task(reader.read(1))
             done, _ = await asyncio.wait(
                 {operation_task, disconnect_task},
@@ -509,6 +633,9 @@ class SessionTreeSupervisor:
             self._server.close()
         for scope_id in list(self._scopes):
             await self.close_scope(scope_id)
+        for child in list(self._invocations.values()):
+            if child.parent_id == self.root_id:
+                await self._terminate(child)
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()

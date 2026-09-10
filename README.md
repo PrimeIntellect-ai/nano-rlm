@@ -8,7 +8,7 @@ For convenience, rlm ships built-in *skills* that can be enabled per session via
 
 Context compaction is on by default: the engine compacts when 16k tokens remain below an advertised model context window. Termination comes from the default tree-wide budget of 1M new tokens (`max_total_tokens`). The policy can set an explicit `summarize_at_tokens` threshold. The IPython kernel keeps running across compaction, so REPL state survives (see [Compaction](#compaction)).
 
-Inside the IPython session, a callable `rlm` is pre-injected into the namespace. When recursion is allowed, the model can call `await rlm(...)` to spawn sub-agents. Skills supplied by the host environment (see [Skills](#skills)) are importable directly by name, e.g. `import websearch`.
+Inside IPython, the `rlm` package is available in the namespace. When recursion is allowed, `await rlm.agent.spawn(task=...)` returns a handle to a supervisor-owned agent that continues across cells. Skills supplied by the host environment (see [Skills](#skills)) are importable directly by name, e.g. `import websearch`.
 
 ## Install
 
@@ -75,9 +75,7 @@ not understand the extension ignore it.
 
 ## Python API (inside a session)
 
-Inside a running session's IPython kernel, `rlm.run("sub-task")` (or the pre-injected
-`rlm(...)` callable) spawns a recursive sub-agent through the session's broker. There is
-no standalone entry point: outside a session the call raises.
+`rlm.agent` exposes `spawn`, `list`, and `get` inside a running session. These async calls contact the session supervisor; spawning waits only for registration, not task completion. `history()` also supports explicit session-directory loading outside a running session.
 
 ## Configuration
 
@@ -97,24 +95,36 @@ The process environment configures only process infrastructure:
 
 ## Recursion
 
-Each agent runs inside a persistent IPython kernel with an already-running event loop. A callable `rlm` is pre-injected into the kernel namespace, so recursive calls are just `await`:
+The supervisor owns each agent's identity, task, runtime, and lifetime. Python variables hold handles, so losing a variable or ending a cell does not stop its agent.
 
 ```python
-result = await rlm("verify the fix")
-```
-
-The result is an `RLMResult` with `.answer`, `.usage`, `.turns`, and `.session_dir`. For parallel sub-agents, use normal async Python:
-
-```python
-import asyncio
-
-results = await asyncio.gather(
-    rlm("check auth.py"),
-    rlm("check login.py"),
+researcher = await rlm.agent.spawn(
+    task="Check authentication behavior", name="researcher"
 )
+other = await rlm.agent.spawn(task="Check login behavior", name="login")
+
+agents = await rlm.agent.list()          # Direct children, including completed agents
+info = await researcher.info()          # Fresh metadata snapshot
+h = researcher.history()                # Fresh conversation snapshot
+researcher = await rlm.agent.get("researcher")  # Recover by sibling name or ID
 ```
 
-Recursive calls are created by a session-local supervisor rather than by the IPython kernel. The supervisor assigns depth and session ancestry, enforces the concurrency and total-call limits, and cancels descendants when their parent cell or session closes. When recursion is disabled by depth, the system prompt does not advertise these APIs and child runs beyond the depth limit fail immediately.
+Names are unique among siblings and remain reserved for the session, including after completion. Immutable IDs are shown alongside names. Metadata includes the parent ID, initial task, status, persistence flag, creation time, elapsed lifetime in seconds, session directory, and any failure. `list(recursive=True)` includes descendants, but only direct children can be retrieved as handles or controlled through the supervisor.
+
+```python
+status = await researcher.wait(timeout=30)
+result = await researcher.result()
+if result is not None:
+    print(result.answer)
+```
+
+`result()` returns `None` while pending, an `RLMResult` after success, and raises on failure or cancellation. `wait()` returns current metadata after an outcome or its timeout (default 30 seconds, range 0–300). It waits inside the Python cell and uses the cell's normal execution timeout. Cancelling or timing out a wait does not cancel the agent. Inference-level waiting and inbox notifications belong to a later change.
+
+`await researcher.cancel()` terminates the agent and its descendants and waits for cleanup. Ordinary agents release their kernels after answering. An agent spawned with `persistent=True` becomes idle after answering and retains its conversation and kernel; follow-up messaging is not available yet. Parent termination tears down all descendants, including persistent agents. Closing the ACP session tears down the tree. Cancelling an individual prompt or cell leaves its accepted children registered and recoverable.
+
+Status is `starting` while waiting for capacity, `running` during execution, `idle` for a persistent agent that has answered, or `completed`, `failed`, or `cancelled` after termination. Completed metadata, results, and history remain accessible for the supervisor's lifetime. Shared filesystem access is trusted; handle permissions are orchestration controls, not filesystem isolation.
+
+Depth, concurrency, total-spawn, and shared token/turn limits remain supervisor-enforced. Rejected spawns raise before registration. Persistent idle kernels release inference capacity but still count toward the session's total-spawn limit. A child return enters the ACP semantic trace when the parent retrieves its result, so background completion is not mistaken for result consumption.
 
 ## Compaction
 

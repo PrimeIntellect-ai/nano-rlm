@@ -192,8 +192,10 @@ def build_system_prompt(
         parts.extend(
             [
                 "",
-                "A callable `rlm` is already in your global namespace — call it directly with `await rlm('sub-task')` to spawn a recursive sub-agent. Returns an `RLMResult` with `.answer` (string), `.usage`, `.turns`, and `.session_dir`.",
-                "For parallel sub-agents, use normal Python async patterns such as `await asyncio.gather(rlm('task1'), rlm('task2'))`.",
+                "The `rlm` package is available in Python. `child = await rlm.agent.spawn(task='...', name='researcher')` registers a child and returns a handle immediately; the child continues across cells.",
+                "Use `await rlm.agent.list()` for child metadata, or `recursive=True` for descendants. Recover a direct child's handle with `await rlm.agent.get('researcher')` or its ID. Names are unique among siblings and reserved for this session.",
+                "`await child.info()` reads status/task/timing; `child.history()` reads its conversation. `await child.result()` returns an RLMResult with .answer, .usage, .turns, .session_dir, or None while pending; failed/cancelled agents raise. `await child.wait(timeout=30)` waits at most that many seconds and returns current metadata. Waits use the cell's normal timeout and never cancel the agent. Avoid busy polling.",
+                "`await child.cancel()` terminates the child and its descendants. An ordinary child releases its kernel after answering. `persistent=True` retains an idle kernel after answering; follow-up messaging is not available yet. Terminating a parent terminates all its descendants. Only direct children can be controlled; descendant listing grants no control.",
             ]
         )
 
