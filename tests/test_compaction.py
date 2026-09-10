@@ -189,18 +189,19 @@ async def test_compaction_requires_normal_termination(session, finish_reason, re
         {"role": "user", "content": "task"},
         {"role": "assistant", "content": "progress"},
     ]
-    original = deepcopy(messages)
+    session.replace_context(messages, reason="start")
+    original = deepcopy(session.messages)
     try:
         if recovers:
             await engine._compact_branch(messages, turn=0)
-            assert len(messages) == 2
-            assert "complete summary" in messages[1]["content"]
-            assert "unfinished summary" not in messages[1]["content"]
+            assert len(session.messages) == 2
+            assert "complete summary" in session.messages[1]["content"]
+            assert "unfinished summary" not in session.messages[1]["content"]
             assert engine._metrics.num_compactions == 1
         else:
             with pytest.raises(CompactionFailed, match="after 2 attempts"):
                 await engine._compact_branch(messages, turn=0)
-            assert messages == original
+            assert session.messages == original
             assert engine._metrics.num_compactions == 0
         assert len(client.calls) == 2
         assert client.calls[0]["messages"] == client.calls[1]["messages"]
@@ -229,8 +230,8 @@ async def test_compaction_retries_reasoning_without_final_content(session, conte
     ]
     try:
         await engine._compact_branch(messages, turn=0)
-        assert "complete summary" in messages[1]["content"]
-        assert "unfinished reasoning" not in messages[1]["content"]
+        assert "complete summary" in session.messages[1]["content"]
+        assert "unfinished reasoning" not in session.messages[1]["content"]
         assert len(client.calls) == 2
         assert engine._metrics.num_compactions == 1
     finally:
