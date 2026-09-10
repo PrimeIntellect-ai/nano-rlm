@@ -38,7 +38,7 @@ class History:
         self.events = list(read_records(self.session_dir / "messages.jsonl"))
         self.messages: list[dict] = []
         self.windows: list[ContextWindow] = []
-        self.children: list[Path] = []
+        self.child_session_dirs: list[Path] = []
         for event in self.events:
             if "message_index" in event:
                 index = event["message_index"]
@@ -59,7 +59,7 @@ class History:
                     )
                 )
             if event["type"] == "sub_spawn":
-                self.children.append(self.session_dir / event["child_dir"])
+                self.child_session_dirs.append(self.session_dir / event["child_dir"])
 
     def user_messages(self) -> list[dict]:
         """Original user inputs, including attempts identified by rollback events."""

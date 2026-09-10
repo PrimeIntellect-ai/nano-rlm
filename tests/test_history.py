@@ -85,11 +85,11 @@ def test_parent_can_discover_and_read_live_child_history(tmp_path):
             in_context=True,
         )
         root = history(parent.dir)
-        assert root.children == [child.dir]
+        assert root.child_session_dirs == [child.dir]
         assert root.events[0]["prompt"] == "research"
-        earlier = history(root.children[0])
+        earlier = history(root.child_session_dirs[0])
         child.log_assistant(0, None, {"role": "assistant", "content": "working"})
-        current = history(root.children[0])
+        current = history(root.child_session_dirs[0])
         assert len(earlier.windows[0].messages) == 1
         assert current.windows[0].messages[-1] == {
             "role": "assistant",
