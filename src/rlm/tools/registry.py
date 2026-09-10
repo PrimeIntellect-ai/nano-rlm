@@ -1,14 +1,15 @@
 """Builtin tool registry.
 
-rlm's default is the ``skills`` preset: the persistent IPython REPL as the sole
-tool, with shell and edits as pre-imported REPL skills (``await bash(...)``,
-``await edit(...)``). ``RLM_TOOLING`` selects ``tools`` or ``dual`` presets;
-``RLM_BUILTIN_TOOLS`` (comma-separated) overrides the tool set directly.
+rlm's default tool set is the persistent IPython REPL as the sole tool, with
+shell and edits available as pre-imported REPL skills (``await bash(...)``,
+``await edit(...)``). The runtime contract's ``builtin_tools`` list overrides
+the tool set directly (e.g. ``["bash", "edit", "ipython"]`` for a native tool
+agent).
 """
 
 from __future__ import annotations
 
-import os
+from collections.abc import Sequence
 
 from rlm.tools.base import BuiltinTool
 from rlm.tools.bash import BashTool, EditTool
@@ -16,82 +17,57 @@ from rlm.tools.fetch import FetchTool
 from rlm.tools.ipython import IpythonTool
 
 # All registered tools by name. Tests (and extensions) may add entries; names
-# listed in RLM_BUILTIN_TOOLS or the active preset become active.
+# listed in the contract's `builtin_tools` or the default set become active.
 _TOOLS_BY_NAME: dict[str, BuiltinTool] = {
     "bash": BashTool(),
     "edit": EditTool(),
     "fetch": FetchTool(),
     "ipython": IpythonTool(),
 }
-# NOT an activation list — activation comes from the RLM_TOOLING preset or
-# RLM_BUILTIN_TOOLS. _STOCK only marks the shipped tools so they are excluded from
-# the extras rule below, which auto-activates entries registered at runtime (test
-# fixtures/extensions). A stock tool outside every preset (`fetch` — network-capable)
-# therefore runs only when RLM_BUILTIN_TOOLS names it.
+# NOT an activation list — activation comes from the contract's `builtin_tools`
+# (None = DEFAULT_TOOLS). _STOCK only marks the shipped tools so they are excluded
+# from the extras rule below, which auto-activates entries registered at runtime
+# (test fixtures/extensions). A stock tool outside the default set (`fetch` —
+# network-capable) therefore runs only when `builtin_tools` names it.
 _STOCK = ("bash", "edit", "fetch", "ipython")
+DEFAULT_TOOLS = ("ipython",)
 
 
-_TOOLING_PRESETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    # preset -> (builtin tools, builtin skills)
-    "dual": (("bash", "edit", "ipython"), ("bash", "edit")),
-    "tools": (("bash", "edit", "ipython"), ()),
-    "skills": (("ipython",), ("bash", "edit")),
-}
-
-
-def tooling_preset() -> str:
-    """The RLM_TOOLING preset name: skills (default), tools, or dual."""
-    preset = os.environ.get("RLM_TOOLING", "skills").strip() or "skills"
-    if preset not in _TOOLING_PRESETS:
-        raise ValueError(
-            f"RLM_TOOLING must be one of {sorted(_TOOLING_PRESETS)}, got {preset!r}"
-        )
-    return preset
-
-
-def preset_tools() -> tuple[str, ...]:
-    return _TOOLING_PRESETS[tooling_preset()][0]
-
-
-def preset_skills() -> tuple[str, ...]:
-    return _TOOLING_PRESETS[tooling_preset()][1]
-
-
-def _selected() -> tuple[BuiltinTool, ...]:
-    spec = os.environ.get("RLM_BUILTIN_TOOLS", "").strip()
-    if spec:
-        names = [n.strip() for n in spec.split(",") if n.strip()]
+def _selected(names: Sequence[str] | None) -> tuple[BuiltinTool, ...]:
+    if names is not None:
         unknown = [n for n in names if n not in _TOOLS_BY_NAME]
         if unknown:
             raise ValueError(
-                f"RLM_BUILTIN_TOOLS: unknown tool(s) {unknown}; "
+                f"builtin_tools: unknown tool(s) {unknown}; "
                 f"available: {sorted(_TOOLS_BY_NAME)}"
             )
         return tuple(_TOOLS_BY_NAME[n] for n in names)
-    # default: the RLM_TOOLING preset's tools plus any extra registered tools
-    # (fixtures/extensions).
-    preset = preset_tools()
+    # default: ipython plus any extra registered tools (fixtures/extensions).
     extras = [n for n in _TOOLS_BY_NAME if n not in _STOCK]
-    return tuple(_TOOLS_BY_NAME[n] for n in [*preset, *extras])
+    return tuple(_TOOLS_BY_NAME[n] for n in [*DEFAULT_TOOLS, *extras])
 
 
-def get_active_builtin_tools(exec_timeout: int = 300) -> list[BuiltinTool]:
-    """Return the active tools (per RLM_TOOLING/RLM_BUILTIN_TOOLS), with an
-    engine-specific IPython schema."""
+def get_active_builtin_tools(
+    exec_timeout: int = 300, names: Sequence[str] | None = None
+) -> list[BuiltinTool]:
+    """Return the active tools (the contract's `builtin_tools`, else the
+    default set), with an engine-specific IPython schema."""
     return [
         IpythonTool(exec_timeout) if tool.name == "ipython" else tool
-        for tool in _selected()
+        for tool in _selected(names)
     ]
 
 
-def get_active_tools() -> list[dict]:
+def get_active_tools(names: Sequence[str] | None = None) -> list[dict]:
     """Return OpenAI tool schemas for the active builtins."""
-    return [tool.schema() for tool in _selected()]
+    return [tool.schema() for tool in _selected(names)]
 
 
-def get_builtin_tool(name: str) -> BuiltinTool | None:
-    """Look up a builtin tool handler by name (None if unknown)."""
-    for tool in _selected():
+def get_builtin_tool(
+    name: str, names: Sequence[str] | None = None
+) -> BuiltinTool | None:
+    """Look up an active builtin tool handler by name (None if unknown or inactive)."""
+    for tool in _selected(names):
         if tool.name == name:
             return tool
     return None
