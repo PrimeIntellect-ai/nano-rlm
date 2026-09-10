@@ -242,7 +242,7 @@ async def test_tool_result_overflow_compacts_and_retries(session):
         next(entry for entry in records if entry["type"] == "system")["message"]["role"]
         == "system"
     )
-    assert any(entry["type"] == "checkpoint_response" for entry in records)
+    assert not any(entry["type"].startswith("checkpoint_") for entry in records)
     ledger = history(session.dir)
     assert ledger.windows[0].messages == client.calls[1]["messages"]
     assert ledger.windows[1].messages[:3] == retry_messages

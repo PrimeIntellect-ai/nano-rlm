@@ -791,14 +791,6 @@ class RLMEngine:
                 request["parallel_tool_calls"] = False
 
         try:
-            if checkpoint:
-                self.session.log(
-                    {
-                        "type": "checkpoint_request",
-                        "request_id": request_id,
-                        "message": messages[-1],
-                    }
-                )
             response = await call_with_retries(
                 self.client.chat.completions.create, **request
             )
@@ -821,16 +813,6 @@ class RLMEngine:
         if not checkpoint:
             self._last_prompt_tokens = usage.prompt_tokens
             self._last_call_id = request_id
-        else:
-            self.session.log(
-                {
-                    "type": "checkpoint_response",
-                    "request_id": request_id,
-                    "message": response.choices[0].message.model_dump(
-                        exclude_none=True
-                    ),
-                }
-            )
         return response, usage
 
     async def _complete(
