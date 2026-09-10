@@ -322,6 +322,11 @@ class RLMEngine:
     async def _start(self, prompt: str) -> None:
         """Initialize the session, tools, conversation, and persistent kernel."""
 
+        self._active_tools = get_active_builtin_tools(
+            self.exec_timeout, self.builtin_tools
+        )
+        self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
+
         if self.compaction and self.summarize_at_tokens is None:
             self.summarize_at_tokens = await discover_threshold(self.client, self.model)
 
@@ -384,10 +389,6 @@ class RLMEngine:
         try:
             self._repl.start()
 
-            self._active_tools = get_active_builtin_tools(
-                self.exec_timeout, self.builtin_tools
-            )
-            self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
             system_prompt = self._load_system_prompt(self._active_tools)
 
             self._messages = [

@@ -157,6 +157,24 @@ class _Engine:
         }
 
 
+async def test_engine_rejects_unknown_tools_before_kernel_start(monkeypatch, session):
+    def unexpected_start(self):
+        pytest.fail("invalid tool selection must not start a kernel")
+
+    monkeypatch.setattr("rlm.engine.IPythonREPL.start", unexpected_start)
+    engine = RLMEngine(
+        client=DummyClient([]),
+        session=session,
+        runtime_config=make_runtime_config(builtin_tools=("unknown-tool",)),
+    )
+    try:
+        with pytest.raises(ValueError, match="unknown tool"):
+            await engine.prompt("hello")
+        assert engine._repl is None
+    finally:
+        await engine.aclose()
+
+
 async def test_engine_prompt_preserves_conversation(session):
     client = DummyClient(
         [DummyMessage(content="first"), DummyMessage(content="second")]
@@ -835,12 +853,23 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
     agent = RLMACPAgent()
     agent.on_connect(_Client())  # type: ignore[arg-type]
     runtime_metadata = _runtime_metadata()
+    runtime_metadata[RUNTIME_METADATA_KEY]["builtin_tools"] = ["add"]
     runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["compaction"] = True
     runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["summarize_at_tokens"] = 1
     created = await agent.new_session(str(tmp_path), **runtime_metadata)
 
     try:
         response = await agent.prompt(created.session_id, [text_block("compact")])
+        assert all(
+            [tool["function"]["name"] for tool in call["tools"]] == ["add"]
+            for call in client.calls
+        )
+        outputs = [
+            message["content"]
+            for message in client.calls[1]["messages"]
+            if message["role"] == "tool"
+        ]
+        assert outputs == ["3"]
         semantic_edges = response.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY]
         request_ids = [
             call["extra_headers"]["X-ACP-Model-Request-ID"] for call in client.calls
