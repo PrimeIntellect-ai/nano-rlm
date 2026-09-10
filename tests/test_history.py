@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import Mock
+
+import pytest
 
 from rlm.history import history
 from rlm.session import Session
@@ -70,9 +73,42 @@ def test_live_reader_ignores_unfinished_record_and_sees_it_on_next_read(tmp_path
     boundary = data.index("新".encode()) + 1
     path.write_bytes(data[:boundary])
     assert history(tmp_path).messages == []
+    with pytest.raises(FileExistsError):
+        Session(tmp_path)
+    assert path.read_bytes() == data[:boundary]
     with path.open("ab") as stream:
         stream.write(data[boundary:] + b"\n")
     assert history(tmp_path).user_messages() == [{"role": "user", "content": "新"}]
+
+
+@pytest.mark.parametrize("failure", ["write", "flush"])
+def test_failed_writer_rejects_further_appends(tmp_path, failure):
+    session = Session(tmp_path)
+    stream = session._msg_file
+    session._msg_file = Mock(wraps=stream)
+    session._msg_file.closed = False
+
+    def fail_write(text):
+        stream.write(text[:10])
+        stream.flush()
+        raise OSError("disk full")
+
+    def fail_flush():
+        stream.flush()
+        raise OSError("disk full")
+
+    getattr(session._msg_file, failure).side_effect = (
+        fail_write if failure == "write" else fail_flush
+    )
+    try:
+        with pytest.raises(OSError, match="disk full"):
+            session.log({"type": "user", "message": {"role": "user", "content": "a"}})
+        persisted = (tmp_path / "messages.jsonl").read_bytes()
+        with pytest.raises(OSError, match="unusable"):
+            session.log({"type": "user", "message": {"role": "user", "content": "b"}})
+        assert (tmp_path / "messages.jsonl").read_bytes() == persisted
+    finally:
+        stream.close()
 
 
 def test_read_live_session_history_from_explicit_directory(tmp_path):
