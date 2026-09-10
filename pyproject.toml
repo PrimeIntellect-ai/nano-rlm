@@ -27,6 +27,7 @@ dependencies = [
     "lxml",
     "pydantic",
     "typing-extensions",
+    "watchfiles>=1.1,<2",
 ]
 
 [project.scripts]

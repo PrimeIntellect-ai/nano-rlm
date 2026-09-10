@@ -41,9 +41,14 @@ class ShellJob:
 
 
 class ShellJobs:
-    def __init__(self, publish: Callable[[ShellJob], None]):
+    def __init__(
+        self,
+        publish: Callable[[ShellJob], None],
+        output: Callable[[ShellJob, int], None] | None = None,
+    ):
         self.jobs: dict[str, ShellJob] = {}
         self.publish = publish
+        self.output = output
 
     def start(
         self,
@@ -174,6 +179,8 @@ class ShellJobs:
                                 output_truncated=job.info.output_truncated
                                 or len(retained) < len(data),
                             )
+                            if retained and self.output is not None:
+                                self.output(job, job.info.output_bytes - len(retained))
                     code = process.poll()
                     if code is not None:
                         if exit_at is None:

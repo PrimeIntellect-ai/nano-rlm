@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,6 +32,7 @@ from rlm.mcp import (
     write_skill_modules,
 )
 from rlm.shell_jobs import ShellJob, ShellJobs
+from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.session import Session
@@ -137,7 +138,10 @@ class SessionTreeSupervisor:
                 Callable[[dict[str, Any]], Awaitable[str]],
             ],
         ] = {}
-        self._shell_jobs = ShellJobs(self._publish_job)
+        self._subscriptions = Subscriptions(
+            self._publish_subscription, self._record_subscription
+        )
+        self._shell_jobs = ShellJobs(self._publish_job, self._publish_job_output)
         self._root_config = runtime_config
         if "search" in runtime_config.skills:
             capability = secrets.token_urlsafe(24)
@@ -517,6 +521,61 @@ class SessionTreeSupervisor:
         finally:
             agent.status = "running"
 
+    def _record_subscription(self, sub: Subscription) -> None:
+        self._record_event(
+            self._invocations[sub.info.owner_id],
+            {"type": "subscription", "subscription": asdict(sub.info)},
+        )
+
+    def _publish_subscription(
+        self, sub: Subscription, kind: str, content: dict
+    ) -> None:
+        owner = self._invocations[sub.info.owner_id]
+        if self._closed or owner.capability not in self._capabilities:
+            return
+        if kind != "watch.failed" and len(owner.inbox) >= MAX_INBOX_EVENTS:
+            raise RuntimeError("inbox event limit reached; subscription stopped")
+        event = self._event(owner, kind, {"target": sub.info.target, **content}, None)
+        event["subscription_id"] = sub.info.id
+        self._publish(owner, event)
+
+    def agent_step(self, agent_id: str, start: int) -> None:
+        self._subscriptions.activity(
+            "agent", agent_id, start, self._invocations[agent_id].session.message_count
+        )
+
+    def _publish_job_output(self, job: ShellJob, start: int) -> None:
+        self._subscriptions.activity("job", job.info.id, start, job.info.output_bytes)
+
+    async def _watch_operation(self, parent: _Invocation, request: dict) -> Any:
+        op = request["op"]
+        if op == "watch.agent":
+            child = self._child(parent, request["agent_id"])
+            sub = self._subscriptions.register(
+                parent.id, "agent", child.id, cursor=child.session.message_count
+            )
+        elif op == "watch.job":
+            job = self._shell_jobs.get(parent.id, request["job_id"])
+            sub = self._subscriptions.register(
+                parent.id, "job", job.info.id, cursor=job.info.output_bytes
+            )
+        elif op == "watch.path":
+            target = (Path(parent.cwd) / request["path"]).resolve()
+            sub = await self._subscriptions.path(
+                parent.id, target, request["recursive"]
+            )
+        elif op == "watch.list":
+            return [
+                asdict(sub.info)
+                for sub in self._subscriptions.items.values()
+                if sub.info.owner_id == parent.id
+            ]
+        else:
+            sub = self._subscriptions.get(parent.id, request["subscription_id"])
+            if op == "watch.cancel":
+                return await self._subscriptions.cancel(sub)
+        return asdict(sub.info)
+
     def _publish_job(self, job: ShellJob) -> None:
         owner = self._invocations[job.info.owner_id]
         if self._closed or owner.capability not in self._capabilities:
@@ -574,6 +633,8 @@ class SessionTreeSupervisor:
     async def _agent_operation(self, request: dict) -> Any:
         parent = self._caller(request["capability"], request["scope_id"])
         op = request["op"]
+        if op.startswith("watch."):
+            return await self._watch_operation(parent, request)
         if op.startswith("shell."):
             return await self._shell_operation(parent, request)
         if op == "inbox.list":
@@ -777,6 +838,7 @@ class SessionTreeSupervisor:
 
     async def _release_agent(self, child: _Invocation) -> None:
         self._capabilities.pop(child.capability, None)
+        await self._subscriptions.close(child.id)
         await self._shell_jobs.close(child.id)
         for scope_id, scope in list(self._scopes.items()):
             if scope.invocation_id == child.id:
@@ -898,6 +960,7 @@ class SessionTreeSupervisor:
         for child in list(self._invocations.values()):
             if child.parent_id == self.root_id:
                 await self._terminate(child)
+        await self._subscriptions.close()
         await self._shell_jobs.close()
         tasks = list(self._tasks)
         for task in tasks:
