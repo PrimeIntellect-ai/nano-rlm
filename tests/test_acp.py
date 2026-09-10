@@ -301,6 +301,8 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
         client=client, session=session, runtime_config=make_runtime_config()
     )  # type: ignore[arg-type]
 
+    notice = "Supervisor: IPython restarted; Python state was lost."
+    engine._pending_kernel_notices.append(notice)
     pending = asyncio.create_task(engine.prompt("cancel me"))
     await prompt_started.wait()
     pending.cancel()
@@ -315,10 +317,15 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
 
     assert result.answer == "continued"
     assert result.turns == 1
-    assert session.messages[-2:] == [
+    assert session.messages[-3:] == [
         {"role": "user", "content": "continue"},
+        {"role": "user", "content": notice},
         {"role": "assistant", "content": "continued"},
     ]
+
+    assert any(
+        message.get("content") == notice for message in client.calls[-1]["messages"]
+    )
 
 
 async def test_model_call_idempotency_survives_retry_and_compaction(

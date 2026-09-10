@@ -218,6 +218,8 @@ class RLMEngine:
 
         # IPython REPL (started lazily in single-agent execution)
         self._repl: IPythonREPL | None = None
+        self._pending_kernel_notices: list[str] = []
+        self._prompt_kernel_notices: list[str] = []
 
         # Turn index (0-based) at the start of the current branch. Used to
         # report "turns since last compaction" when a compaction fires.
@@ -277,6 +279,7 @@ class RLMEngine:
             )
 
         self._has_result = False
+        self._prompt_kernel_notices = []
 
         if not self._started:
             try:
@@ -314,6 +317,7 @@ class RLMEngine:
             self._last_good = len(self.session.messages)
             result = await self._run_loop()
         except BaseException as exc:
+            self._pending_kernel_notices.extend(self._prompt_kernel_notices)
             attempted_turns = self._turn - turn_before
             try:
                 try:
@@ -464,7 +468,9 @@ class RLMEngine:
     def _deliver_kernel_notices(self) -> None:
         if self._repl is None:
             return
-        for notice in self._repl.take_recovery_notices():
+        notices = self._pending_kernel_notices + self._repl.take_recovery_notices()
+        self._pending_kernel_notices = []
+        for notice in notices:
             self.session.log(
                 {
                     "type": "kernel_recovery",
@@ -472,6 +478,7 @@ class RLMEngine:
                 },
                 in_context=True,
             )
+            self._prompt_kernel_notices.append(notice)
 
     def _deliver_supervisor_input(
         self, *, include_queue: bool = False, notify: bool = True
