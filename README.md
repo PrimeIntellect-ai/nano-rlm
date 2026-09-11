@@ -2,7 +2,7 @@
 
 A minimal CLI coding agent with a persistent IPython execution environment and optional recursive sub-agents. For a full-fledged coding agent built on the same RLM principles, see [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, shell commands via `!command`, and multi-line shell scripts via `%%bash`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
+By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, Bash commands via `rlm.shell.run`, and background jobs via `rlm.shell.start`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
 
 For convenience, rlm ships built-in *skills* that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via the contract's `builtin_tools`).
 
@@ -342,12 +342,26 @@ Agent execution status and cleanup are separate: `info.cleanup_error` reports fa
 
 `send()` and `steer()` return acceptance IDs, not processing acknowledgements. They reject instructions when the tree budget is already exhausted. If an accepted instruction cannot be delivered because the budget runs out or the child terminates, the supervisor records `instruction_failed` in the child's inbox journal and sends the parent an `agent.delivery_failed` event containing `agent_id`, `message_id`, and `reason`. Failed instructions are removed from the pending queue.
 
-### Background Bash jobs
+### Bash commands and background jobs
 
-Inside IPython, register a supervisor-owned Bash job and keep working:
+For quick commands, wait for the result in the current cell:
 
 ```python
-job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project")
+result = await rlm.shell.run("git status --short")
+print(result.text, result.exit_code)
+```
+
+`run()` returns combined stdout/stderr (up to 16 KiB), `exit_code`, `job_id`,
+`truncated`, and `error`. Nonzero exit codes are returned; startup/capture errors
+populate `error`. If output is truncated, recover the job with
+`await rlm.shell.get(result.job_id)` to read more or inspect its metadata.
+Cancelling the waiting cell leaves the job running and discoverable with `shell.list()`.
+Both calls run Bash under the supervisor and publish completion events.
+
+For long commands or work that should run alongside other tasks, use `start()`:
+
+```python
+job = await rlm.shell.start("uv run pytest tests/", cwd="/workspace/project")
 job_id = job.id
 await job.info()
 

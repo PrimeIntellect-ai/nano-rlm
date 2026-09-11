@@ -48,7 +48,7 @@ child = await rlm.agent.spawn('keep state', name='worker', persistent=True)
 await child.wait(timeout=10)
 events = await rlm.inbox.list()
 await rlm.inbox.read(events[0]['id'])
-job = await rlm.shell.run('sleep 0.2; printf SURVIVED')
+job = await rlm.shell.start('sleep 0.2; printf SURVIVED')
 with Path('side-effect').open('a') as stream:
     stream.write('once')
 import os

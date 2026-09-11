@@ -663,7 +663,7 @@ class SessionTreeSupervisor:
 
     async def _shell_operation(self, parent: _Invocation, request: dict) -> Any:
         op = request["op"]
-        if op == "shell.run":
+        if op in ("shell.run", "shell.start"):
             command = request["command"]
             if not command.strip():
                 raise ValueError("empty command")
@@ -673,7 +673,7 @@ class SessionTreeSupervisor:
             if blocked:
                 raise PermissionError(refusal(blocked))
             cwd = Path(parent.cwd) / (request["cwd"] or ".")
-            return self._shell_jobs.start(
+            info = self._shell_jobs.start(
                 owner_id=parent.id,
                 command=command,
                 cwd=str(cwd.resolve()),
@@ -681,6 +681,18 @@ class SessionTreeSupervisor:
                 env=build_kernel_env(dict(parent.runtime_config.kernel_env)),
                 source_request_id=self._scopes[request["scope_id"]].request_id,
             )
+            if op == "shell.start":
+                return info
+            job = self._shell_jobs.get(parent.id, info["id"])
+            await asyncio.shield(job.task)
+            output = self._shell_jobs.read(job, 0, 16_384)
+            return {
+                "text": output["text"],
+                "exit_code": job.info.exit_code,
+                "job_id": job.info.id,
+                "truncated": output["truncated"] or not output["done"],
+                "error": job.info.error,
+            }
         if op == "shell.list":
             return [
                 job.snapshot()

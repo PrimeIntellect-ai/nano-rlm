@@ -41,7 +41,7 @@ PROJECT_ENV_PROMPT = (
     "(tests, repros, imports) goes through bash with the project's interpreter."
 )
 IPYTHON_CONTROL_PROMPT = (
-    "Use blocking shell commands for quick results and `rlm.shell.run` for background work. "
+    "Use `rlm.shell.run` for quick Bash results and `rlm.shell.start` for background work. "
     + PROJECT_ENV_PROMPT
 )
 KERNEL_PACKAGES_PROMPT = (
@@ -53,7 +53,7 @@ BASH_SKILL_PROMPT = (
     "For short, blocking shell work, use `out = await bash('''command here''')` — always "
     "triple-quote the command so shell quotes and multi-line scripts never "
     "need escaping. It returns the output as a string, useful for further Python processing. "
-    "Use rlm.shell.run for supervisor-owned background work."
+    "Use rlm.shell.start for supervisor-owned background work."
 )
 BASH_SKILL_WITH_TOOL_PROMPT = (
     "Inside ipython you can also run shell with `await bash(command=...)` — "
@@ -110,25 +110,25 @@ Reconstruct them and recover handles through the registries below. Never blindly
 an interrupted cell: file writes and accepted spawn/send/job requests may already have
 happened. Compaction alone preserves the kernel and supervisor resources.
 
-## Blocking commands and background Bash jobs
-For quick commands whose results you need immediately, use `!command` in an IPython cell,
-for example `!git status --short`. Python can appear before and after a `!` command.
-For multiline scripts or Bash-specific syntax, put `%%bash` on the first line of a cell:
-```bash
-%%bash
-pwd
-git status --short
+## Bash commands and background jobs
+Use `result = await rlm.shell.run(command, cwd=...)` for quick commands whose results you
+need immediately. It waits for Bash and output capture to finish. For example:
+```python
+result = await rlm.shell.run("git status --short")
+print(result.text, result.exit_code)
 ```
-The entire rest of that cell is Bash; there is no closing marker. Resume Python in a new
-IPython call. Both forms block the cell until completion and display output. `!` uses the
-system shell and does not guarantee Bash. These commands belong to the kernel's lifecycle
-and may be interrupted by kernel recovery.
+Commands can contain multiline Bash scripts. The result has .text (combined stdout/stderr,
+up to 16 KiB), .exit_code, .job_id, .truncated, and .error. Nonzero exit codes are returned;
+startup/capture failures populate .error. If .truncated is true, recover the job with
+`await rlm.shell.get(result.job_id)` to read more captured output or inspect metadata.
 
-Use `job = await rlm.shell.run(command, cwd=...)` for longer commands, work that should run
-alongside other tasks, or work needing cancellation, output subscriptions, or survival
-across a kernel restart. Choose based on the work; quick commands need no background job.
-It returns promptly; the command need not have finished. Default cwd is this agent's
-working directory; relative cwd resolves against it. Bash has no stdin/PTY support.
+Use `job = await rlm.shell.start(command, cwd=...)` for long commands or work you want to
+run alongside other tasks. It returns a JobHandle promptly, before completion. Use job
+handles for output subscriptions, reading progress, and cancellation.
+Both calls run supervisor-owned Bash, with no stdin/PTY. Default cwd is this agent's
+working directory; relative cwd resolves against it. Cancelling a cell awaiting run()
+stops waiting but leaves the job running. Jobs survive kernel restarts; recover their IDs
+with shell.list(). Both calls publish shell.completed inbox events.
 `await rlm.shell.list()` returns JobInfo objects; `await rlm.shell.get(job_id)` recovers
 a handle. `job.id` is stable. `await job.info()` returns metadata with .status,
 .exit_code, .output_complete, .output_truncated, and .error. Status is starting, running, completed, failed, or cancelled. Nonzero exit codes are
@@ -162,7 +162,7 @@ Bash completion arrives automatically as type `shell.completed`, with
 `event["content"]["job_id"]`; recover the job to read output and inspect its outcome.
 For example, start a job in one cell:
 ```python
-job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project")
+job = await rlm.shell.start("uv run pytest tests/", cwd="/workspace/project")
 ```
 Continue other work, or call native `wait`. In a later cell, inspect relevant arrivals:
 ```python
@@ -196,7 +196,7 @@ Cancellation stops future events and drops an unpublished batch, retaining publi
 inbox events. Owner termination cancels subscriptions. Limits are 64 active / 1024 total
 subscriptions per tree; oversized path batches report truncation explicitly.
 
-Use `help(rlm.shell.run)`, `help(rlm.watch.path)`, or `help(type(handle))` for signatures
+Use `help(rlm.shell.start)`, `help(rlm.watch.path)`, or `help(type(handle))` for signatures
 and details. Objects use attributes; inbox events and history messages are dictionaries.
 """
 
