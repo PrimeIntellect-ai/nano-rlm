@@ -124,6 +124,29 @@ The engine asks the model for a plain-text handoff summary and resumes the task 
 
 The IPython kernel keeps running across the compaction, so all variables, imports, and in-memory data are preserved. The model is told to mention important variable names in its summary so the resumed branch knows what is available. The same policy applies to the main agent and all recursive agents.
 
+A session creates a fresh ledger and refuses to reopen an existing `messages.jsonl` for writing. Existing histories remain readable. The session owns active messages and their indices; the engine uses context snapshots. A ledger write or flush failure makes the writer unusable and prevents further prompts. Rollback restores in-memory context and counters even if its ledger write fails. Supervisor crash recovery is not supported.
+
+The working conversation remains in the session's append-only `messages.jsonl`, which the model can search and process from Python. Message records have stable event `id` fields, zero-based `message_index` values, and a `message` object containing the role, content, and tool-call fields. Full tool outputs and shortened context versions have separate indices; the shortened tool record links to its `source_message_index`. System messages and installed summaries are also logged. Checkpoint prompts and raw checkpoint responses are omitted: this ledger serves agent context recovery. Verifiers, the ACP consumer, records model requests/responses through its interception endpoint and receives semantic links and metrics over ACP, independently of this file. A `user` record begins a prompt attempt; `prompt_rollback.prompt_id` identifies a failed or cancelled attempt, whose records remain available as history.
+
+Each `context_window` record declares a zero-based `window` index, a `reason` (`start`, `compaction`, or `rollback`), and the ordered `message_indices` that seed that window. Subsequent message records with a `window` field append to it. Closed windows never change. Rollback opens a new window containing the restored context, preserving addresses in the failed window. The `turn` field is an execution-loop counter, not a message or window index.
+
+Each agent writes its own `messages.jsonl` in its session directory. Message and context-window indices are local to that agent. Agent discovery belongs to the supervisor; the history reader accepts an explicit session directory.
+
+The kernel can inspect its own history or a child's, including while the child is running:
+
+```python
+from rlm import history
+
+h = history()                        # Defaults to $RLM_SESSION_DIR
+requests = h.user_messages()          # Original inputs, including rolled-back attempts
+message = h.messages[3]               # Session-wide message index
+earlier = h.windows[0].messages       # Initial working context
+child_history = history(session_dir="/path/to/child-session")
+message = child_history.windows[4].messages[2]  # If that child has reached window 4
+```
+
+Snapshots contain complete records as of the read; call `history(...)` again to observe new activity. `h.events` exposes lifecycle records, including each child's spawn prompt and rollback markers. The compacted context points to this API so the model can retrieve omitted details without putting the whole transcript back in context.
+
 ## Session Directory
 
 Every invocation writes to `$RLM_HOME/sessions/<id>/`. Nested session directories mirror the call tree.

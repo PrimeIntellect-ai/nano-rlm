@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
@@ -16,7 +17,11 @@ from conftest import (
     DummyToolCall,
     DummyUsage,
 )
-from rlm.compaction import CompactionFailed, is_context_overflow
+from rlm.compaction import (
+    SUMMARY_FRAMING,
+    CompactionFailed,
+    is_context_overflow,
+)
 from rlm.config import (
     ExecutionPolicy,
     InvocationContext,
@@ -24,6 +29,7 @@ from rlm.config import (
     RuntimeConfig,
 )
 from rlm.engine import RLMEngine
+from rlm.history import history
 from rlm.session import Session
 from rlm.supervisor import SessionTreeSupervisor
 
@@ -183,18 +189,19 @@ async def test_compaction_requires_normal_termination(session, finish_reason, re
         {"role": "user", "content": "task"},
         {"role": "assistant", "content": "progress"},
     ]
-    original = deepcopy(messages)
+    session.replace_context(messages, reason="start")
+    original = deepcopy(session.messages)
     try:
         if recovers:
             await engine._compact_branch(messages, turn=0)
-            assert len(messages) == 2
-            assert "complete summary" in messages[1]["content"]
-            assert "unfinished summary" not in messages[1]["content"]
+            assert len(session.messages) == 2
+            assert "complete summary" in session.messages[1]["content"]
+            assert "unfinished summary" not in session.messages[1]["content"]
             assert engine._metrics.num_compactions == 1
         else:
             with pytest.raises(CompactionFailed, match="after 2 attempts"):
                 await engine._compact_branch(messages, turn=0)
-            assert messages == original
+            assert session.messages == original
             assert engine._metrics.num_compactions == 0
         assert len(client.calls) == 2
         assert client.calls[0]["messages"] == client.calls[1]["messages"]
@@ -223,8 +230,8 @@ async def test_compaction_retries_reasoning_without_final_content(session, conte
     ]
     try:
         await engine._compact_branch(messages, turn=0)
-        assert "complete summary" in messages[1]["content"]
-        assert "unfinished reasoning" not in messages[1]["content"]
+        assert "complete summary" in session.messages[1]["content"]
+        assert "unfinished reasoning" not in session.messages[1]["content"]
         assert len(client.calls) == 2
         assert engine._metrics.num_compactions == 1
     finally:
@@ -236,12 +243,32 @@ async def test_tool_result_overflow_compacts_and_retries(session):
         [
             _response(
                 DummyMessage(
-                    tool_calls=[DummyToolCall("ipython", {"code": "print('x' * 4000)"})]
+                    tool_calls=[
+                        DummyToolCall("ipython", {"code": "print('x' * 40000)"})
+                    ]
                 )
             ),
             _overflow(),
             _overflow(),
             _response(DummyMessage(content="summary")),
+            _response(
+                DummyMessage(
+                    tool_calls=[
+                        DummyToolCall(
+                            "ipython",
+                            {
+                                "code": (
+                                    "from rlm import history\n"
+                                    "h = history()\n"
+                                    "print(h.user_messages()[0]['content'])\n"
+                                    "print(len(next(r['message']['content'] for r in h.events if r['type'] == 'tool_result')))\n"
+                                    "print(h.windows[0].messages[1]['content'])"
+                                )
+                            },
+                        )
+                    ]
+                )
+            ),
             _response(DummyMessage(content="done")),
         ],
         max_model_len=32_768,
@@ -260,10 +287,37 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 1
     assert client.calls[3]["tool_choice"] == "none"
-    # The retried work call runs on the rebuilt branch: system + framed summary.
     retry_messages = client.calls[4]["messages"]
     assert len(retry_messages) == 2
-    assert "summary" in retry_messages[1]["content"]
+    assert retry_messages[1]["content"].startswith(SUMMARY_FRAMING)
+    assert str(session.dir / "messages.jsonl") in retry_messages[1]["content"]
+    records = [
+        json.loads(line)
+        for line in (session.dir / "messages.jsonl").read_text().splitlines()
+    ]
+    tool_records = [entry for entry in records if entry["type"] == "tool_result"]
+    assert tool_records[0]["message"] == {
+        "role": "tool",
+        "tool_call_id": "call_0",
+        "content": "x" * 40000 + "\n",
+    }
+    assistant = next(entry for entry in records if entry["type"] == "assistant")
+    assert (
+        assistant["message"]["tool_calls"][0]["id"]
+        == tool_records[0]["message"]["tool_call_id"]
+    )
+    assert "40001" in tool_records[1]["content"]
+    assert "produce a large tool result" in tool_records[1]["content"]
+    assert (
+        next(entry for entry in records if entry["type"] == "system")["message"]["role"]
+        == "system"
+    )
+    assert not any(entry["type"].startswith("checkpoint_") for entry in records)
+    ledger = history(session.dir)
+    assert ledger.windows[0].messages == client.calls[1]["messages"]
+    assert ledger.windows[1].messages[:2] == retry_messages
+    assert ledger.windows[1].messages == session.messages
+    assert ledger.windows[0].message_indices[0] == ledger.windows[1].message_indices[0]
 
 
 async def test_overflow_recovers_without_discovered_threshold(session):

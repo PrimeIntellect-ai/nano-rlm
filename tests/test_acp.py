@@ -196,7 +196,7 @@ async def test_engine_prompt_preserves_conversation(session):
     assert first.usage == TokenUsage(prompt_tokens=1, completion_tokens=1)
     assert second.usage == TokenUsage(prompt_tokens=1, completion_tokens=1)
     assert engine._total_usage == TokenUsage(prompt_tokens=2, completion_tokens=2)
-    assert client.calls[1]["messages"][-4:] == [
+    assert session.messages[-4:] == [
         {"role": "user", "content": "one"},
         {"role": "assistant", "content": "first"},
         {"role": "user", "content": "two"},
@@ -307,6 +307,7 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
     with pytest.raises(asyncio.CancelledError):
         await pending
 
+    assert [message["role"] for message in session.messages] == ["system"]
     try:
         result = await engine.prompt("continue")
     finally:
@@ -314,7 +315,7 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
 
     assert result.answer == "continued"
     assert result.turns == 1
-    assert client.calls[-1]["messages"][-2:] == [
+    assert session.messages[-2:] == [
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
     ]
@@ -452,6 +453,49 @@ async def test_compaction_counts_seed_prompt(session):
     assert engine._metrics.compaction_chars_dropped_mean == len("original promptwork")
 
 
+async def test_engine_rollback_write_failure_is_fatal(monkeypatch, session):
+    engine = RLMEngine(
+        client=DummyClient([]), session=session, runtime_config=make_runtime_config()
+    )
+    session.log(
+        {"type": "system", "message": {"role": "system", "content": "system"}},
+        in_context=True,
+    )
+    engine._started = True
+    engine._last_good = 1
+    before = session.messages
+    indices = session.context_indices
+    write = session._msg_file.write
+
+    def fail_rollback(line):
+        if '"reason": "rollback"' in line:
+            raise OSError("disk full during rollback")
+        return write(line)
+
+    async def fail_prompt():
+        engine._turn = 7
+        engine._last_good = 3
+        engine._compacted = True
+        engine._branch_start_turn = 6
+        raise RuntimeError("model failed")
+
+    monkeypatch.setattr(session._msg_file, "write", fail_rollback)
+    monkeypatch.setattr(engine, "_run_loop", fail_prompt)
+    try:
+        with pytest.raises(OSError, match="disk full during rollback"):
+            await engine.prompt("fail")
+        assert session.messages == before
+        assert session.context_indices == indices
+        assert engine._turn == 0
+        assert engine._last_good == 1
+        assert engine._branch_start_turn == 0
+        assert not engine._compacted
+        with pytest.raises(OSError, match="unusable"):
+            await engine.prompt("retry")
+    finally:
+        await engine.aclose()
+
+
 async def test_engine_failed_prompt_can_be_retried(session):
     client = DummyClient(
         [
@@ -466,6 +510,7 @@ async def test_engine_failed_prompt_can_be_retried(session):
     with pytest.raises(RuntimeError, match="boom"):
         await engine.prompt("fail")
 
+    assert [message["role"] for message in session.messages] == ["system"]
     try:
         result = await engine.prompt("continue")
     finally:
@@ -478,16 +523,24 @@ async def test_engine_failed_prompt_can_be_retried(session):
     log = [
         json.loads(line)
         for line in (Path(session.dir) / "messages.jsonl").read_text().splitlines()
+        if json.loads(line)["type"] != "context_window"
     ]
     assert [entry["type"] for entry in log] == [
+        "system",
+        "user",
         "assistant",
         "prompt_rollback",
+        "user",
         "assistant",
         "done",
     ]
-    assert log[1]["attempted_turns"] == 1
-    assert log[1]["reason"] == "error"
-    assert client.calls[-1]["messages"][-2:] == [
+    assert log[1]["message"] == {"role": "user", "content": "fail"}
+    assert log[3]["prompt_id"] == log[1]["id"]
+    assert log[3]["attempted_turns"] == 1
+    assert log[3]["reason"] == "error"
+    assert log[4]["message"] == {"role": "user", "content": "continue"}
+    assert len({entry["id"] for entry in log}) == len(log)
+    assert session.messages[-2:] == [
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
     ]
@@ -581,7 +634,10 @@ async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
     )  # type: ignore[arg-type]
     repl = FakeREPL()
     engine._started = True
-    engine._messages = [{"role": "system", "content": "system"}]
+    session.log(
+        {"type": "system", "message": {"role": "system", "content": "system"}},
+        in_context=True,
+    )
     engine._repl = repl  # type: ignore[assignment]
 
     pending = asyncio.create_task(engine.prompt("cancel"))
@@ -603,7 +659,7 @@ async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
     assert result.answer == "continued"
     assert repl.finished is True
     assert repl.stopped is True
-    assert client.calls[-1]["messages"][-2:] == [
+    assert session.messages[-2:] == [
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "continued"},
     ]
