@@ -40,8 +40,8 @@ PROJECT_ENV_PROMPT = (
     "(tests, repros, imports) goes through bash with the project's interpreter."
 )
 IPYTHON_CONTROL_PROMPT = (
-    "Run shell commands with `%%bash` as the very first line of a code cell "
-    "(no comments, imports, or statements before it). " + PROJECT_ENV_PROMPT
+    "Run background Bash commands with `job = await rlm.shell.run(command, cwd=...)`. "
+    + PROJECT_ENV_PROMPT
 )
 KERNEL_PACKAGES_PROMPT = (
     "Pre-installed in the kernel venv: " + ", ".join(BASE_TOOLKIT) + ". "
@@ -199,12 +199,22 @@ def build_system_prompt(
             ]
         )
 
-    if has_ipython and (allow_recursion or depth > 0):
+    if has_ipython:
         parts.extend(
             [
                 "",
                 "Supervisor inbox: `await rlm.inbox.list()` lists unread event metadata without reading payloads. `await rlm.inbox.read(event_id)` retrieves a payload and marks it read; `list(unread_only=False)` includes read events. Child completion is automatic; reports use `await rlm.agent.send_to_parent(message)`. Children cannot steer parents or message siblings.",
                 "Call the native `wait` tool when you have no work until a new event arrives. It suspends inference without occupying IPython. Already-announced unread events do not wake it repeatedly. Parent instructions are pushed automatically; reports and completion events require inbox reads. Notifications contain only an unread count. A final answer ends this ACP prompt; use wait to remain available. Queued instructions are delivered at an answer or wait boundary, steering at the next model/tool boundary; active tools are not interrupted.",
+            ]
+        )
+
+    if has_ipython:
+        parts.extend(
+            [
+                "",
+                "`rlm.shell.run(command, cwd=...)` registers a supervisor-owned Bash job and returns a handle promptly. Default cwd is the agent working directory. No stdin/PTY is available. Jobs survive cells and lost Python variables; recover with `await rlm.shell.get(job_id)` or discover with `await rlm.shell.list()`.",
+                "Use `await job.info()` for status/exit_code and `await job.read(cursor=0, max_bytes=16384)` for combined stdout/stderr. The result has .text, .next_cursor, .done, and .truncated. Save next_cursor for subsequent reads. Reads are repeatable; .done means all retained output was read after job termination. Capture is capped at 16 MiB. Check info.output_complete and info.output_truncated before treating output as exhaustive.",
+                "Job termination posts a shell.completed inbox event containing job_id, status and exit_code. Use native wait when idle. `await job.cancel()` terminates the process group; agent termination cancels its jobs. Descendants must not outlive their Bash job: keep Bash alive until its work finishes. Prefer these handles for background commands over Python subprocess management or shell &.",
             ]
         )
 

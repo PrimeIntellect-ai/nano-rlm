@@ -323,3 +323,46 @@ uv run pytest tests/
 Agent execution status and cleanup are separate: `info.cleanup_error` reports failed resource cleanup without hiding a completed result. Calling `cancel()` again retries unfinished cleanup.
 
 `send()` and `steer()` return acceptance IDs, not processing acknowledgements. They reject instructions when the tree budget is already exhausted. If an accepted instruction cannot be delivered because the budget runs out or the child terminates, the supervisor records `instruction_failed` in the child's inbox journal and sends the parent an `agent.delivery_failed` event containing `agent_id`, `message_id`, and `reason`. Failed instructions are removed from the pending queue.
+
+### Background Bash jobs
+
+Inside IPython, register a supervisor-owned Bash job and keep working:
+
+```python
+job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project")
+job_id = job.id
+await job.info()
+
+# In a later cell, recover the same job and inspect its output.
+job = await rlm.shell.get(job_id)
+chunk = await job.read(cursor=0, max_bytes=16384)
+print(chunk.text)
+# Continue from chunk.next_cursor; reading is repeatable.
+await rlm.shell.list()
+```
+
+Use the native `wait` tool when there is no other work. Termination produces a
+`shell.completed` inbox event with the job ID, status, exit code, and output
+completeness flags. Read it with `rlm.inbox.read(event_id)`. A nonzero Bash exit
+code is a completed process; startup/capture errors have status `failed`.
+
+`await job.cancel()` terminates its process group. Jobs survive cell completion
+and lost handle variables; owner termination cancels them. Commands run in
+`/bin/bash --noprofile --norc -c`, with closed stdin and combined stdout/stderr.
+Relative working directories resolve against the agent's working directory.
+The task environment and Git-history policy also apply to these commands.
+
+The supervisor permits 32 active jobs and 1,024 total jobs per session tree.
+Each job retains up to 16 MiB in `<session>/jobs/<id>/output.bin`; excess output
+is drained and discarded. Reads default to 16 KiB and allow at most 64 KiB.
+Cursors count bytes, and text decodes as UTF-8 with replacement. Terminal metadata
+is saved alongside output in `meta.json`. Output files remain after job cleanup.
+
+Normal completion waits for stdout/stderr EOF. If descendants keep the pipe open
+more than two seconds after Bash exits, capture stops and reports
+`output_complete=False` and `output_truncated=True`. Remaining processes in the
+job's process group are killed when the job ends. Keep Bash alive until its work
+finishes; detached processes that escape the process group are not managed.
+
+Automatic kernel restart and subscriptions are separate implementation slices.
+There is no PTY, stdin API, or redirection of IPython's `!` / `%%bash` magics.

@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+
+from conftest import DummyClient, DummyMessage, DummyToolCall
+from rlm.engine import RLMEngine
+from rlm.shell_jobs import ShellJobs
+from test_supervisor import _config
+
+
+async def test_bash_capture_limits_failure_and_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setattr("rlm.shell_jobs.MAX_OUTPUT_BYTES", 8)
+    monkeypatch.setattr("rlm.shell_jobs.DRAIN_SECONDS", 0.05)
+    events = []
+    jobs = ShellJobs(events.append)
+
+    def start(command, cwd=None):
+        info = jobs.start(
+            owner_id="owner",
+            command=command,
+            cwd=str(cwd or tmp_path),
+            directory=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+            source_request_id=None,
+        )
+        return jobs.get("owner", info["id"])
+
+    try:
+        job = start(
+            "a=(hello world); [[ ${#a[@]} == 2 ]] && printf '%s' \"${a[*]}\"; printf '!'; exit 7"
+        )
+        await asyncio.wait_for(asyncio.shield(job.task), 5)
+        assert job.info.exit_code == 7
+        assert job.info.output_complete
+        assert job.info.output_truncated
+        assert jobs.read(job, 0, 4)["text"] == "hell"
+        assert jobs.read(job, 4, 4) == {
+            "text": "o wo",
+            "next_cursor": 8,
+            "done": True,
+            "truncated": True,
+        }
+        with pytest.raises(PermissionError):
+            jobs.get("another-agent", job.info.id)
+        failed = start("true", tmp_path / "missing")
+        await failed.task
+        assert failed.info.status == "failed"
+        assert failed.info.error
+        held = start("sleep 30 & echo $! > descendant.pid")
+        await asyncio.wait_for(asyncio.shield(held.task), 5)
+        assert not held.info.output_complete
+        assert held.info.output_truncated
+        cancelled = start("sleep 30")
+        await asyncio.sleep(0.05)
+        await asyncio.wait_for(jobs.cancel(cancelled), 5)
+        assert cancelled.info.status == "cancelled"
+        assert len(events) == 4
+        metadata = json.loads(
+            (tmp_path / "jobs" / job.info.id / "meta.json").read_text()
+        )
+        assert metadata["exit_code"] == 7
+    finally:
+        await jobs.close()
+
+
+async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch):
+    monkeypatch.setenv("SHELL_TEST_PRIVATE_KEY", "must-not-leak")
+
+    def tool(code):
+        return DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})])
+
+    client = DummyClient(
+        [
+            tool(
+                "job = await rlm.shell.run('sleep 0.2; [[ -z ${SHELL_TEST_PRIVATE_KEY+x} ]] || exit 90; values=(one two); [[ ${#values[@]} == 2 ]] && printf BASH_OK'); saved_id = job.id"
+            ),
+            tool(
+                "del job; job = await rlm.shell.get(saved_id); assert len(await rlm.shell.list()) == 1"
+            ),
+            DummyMessage(tool_calls=[DummyToolCall("wait", {"timeout": 5})]),
+            tool("""
+events = await rlm.inbox.list()
+assert len(events) == 1
+event = await rlm.inbox.read(events[0]['id'])
+assert event['type'] == 'shell.completed'
+assert event['content']['job_id'] == saved_id
+assert (await job.info()).exit_code == 0
+output = await job.read()
+assert output.text == 'BASH_OK' and output.done
+assert (await job.read()).text == output.text
+try:
+    await rlm.shell.run('git log --all')
+except RuntimeError:
+    pass
+else:
+    raise AssertionError('Git policy was bypassed')
+await rlm.shell.run('sleep 30')
+print('SHELL_OK')
+"""),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config(max_depth=0),
+        cwd=str(session.dir),
+    )
+    try:
+        await engine.prompt("Exercise Bash jobs")
+        records = [
+            json.loads(line)
+            for line in (session.dir / "messages.jsonl").read_text().splitlines()
+        ]
+        assert any(
+            r.get("type") == "tool_result"
+            and r.get("content", "").strip() == "SHELL_OK"
+            for r in records
+        )
+    finally:
+        supervisor = engine._supervisor
+        await engine.aclose()
+    jobs = list(supervisor._shell_jobs.jobs.values())
+    assert jobs[-1].info.status == "cancelled"
+    assert all(job.task.done() for job in jobs)
+
+
+@pytest.mark.parametrize("failure", ["metadata", "publication"])
+async def test_job_failure_does_not_skip_tree_cleanup(session, monkeypatch, failure):
+    from pathlib import Path
+
+    from rlm.supervisor import SessionTreeSupervisor
+    from test_supervisor import _SometimesBlockingEngine
+
+    _SometimesBlockingEngine.started = asyncio.Event()
+
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=_config(),
+        cwd=str(session.dir),
+        engine_factory=_SometimesBlockingEngine,
+    )
+    await supervisor.start()
+    scope = await supervisor.open_scope(supervisor.root_id)
+    parent = supervisor._invocations[supervisor.root_id]
+    child = supervisor._spawn(parent, scope, "child", "child", True)
+    await asyncio.wait_for(child.done.wait(), 5)
+    child_scope = await supervisor.open_scope(child.id)
+    grandchild = supervisor._spawn(child, child_scope, "wait", "nested", True)
+    await asyncio.wait_for(_SometimesBlockingEngine.started.wait(), 5)
+    broker_dir = supervisor._broker_dir
+    jobs = supervisor._shell_jobs
+    for owner in (parent, child):
+        jobs.start(
+            owner_id=owner.id,
+            command="sleep 30",
+            cwd=str(session.dir),
+            directory=owner.session.dir,
+            env={"PATH": "/usr/bin:/bin"},
+            source_request_id=None,
+        )
+    await asyncio.sleep(0.05)
+
+    if failure == "metadata":
+        write_text = Path.write_text
+
+        def fail_metadata(path, *args, **kwargs):
+            if path.name == "meta.json" and path.parent.parent.name == "jobs":
+                raise OSError("job metadata failed")
+            return write_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", fail_metadata)
+    else:
+
+        def fail_publication(job):
+            raise OSError("job publication failed")
+
+        monkeypatch.setattr(jobs, "publish", fail_publication)
+
+    await supervisor._terminate(child)
+    assert child.engine is None and grandchild.engine is None
+    assert child.session._msg_file.closed and grandchild.session._msg_file.closed
+    await supervisor.aclose()
+    assert all(f"job {failure} failed" in job.info.error for job in jobs.jobs.values())
+    assert all(job.task.done() for job in jobs.jobs.values())
+    assert not broker_dir.exists()
+    assert supervisor._server is None
+    assert not supervisor._capabilities
+
+
+async def test_job_metadata_failure_still_publishes_completion(tmp_path, monkeypatch):
+    from pathlib import Path
+    from rlm.shell_jobs import ShellJobs
+
+    published = []
+    jobs = ShellJobs(lambda job: published.append(job.snapshot()))
+    info = jobs.start(
+        owner_id="owner",
+        command="printf done",
+        cwd=str(tmp_path),
+        directory=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        source_request_id=None,
+    )
+    job = jobs.jobs[info["id"]]
+    Path(job.info.output_path).with_name("meta.json").mkdir()
+    with pytest.raises(OSError):
+        await job.task
+    assert job.finished is not None
+    assert published[0]["status"] == "completed"
+    assert "Metadata persistence failed" in published[0]["error"]
+    assert jobs.read(job, 0, 1024)["text"] == "done"

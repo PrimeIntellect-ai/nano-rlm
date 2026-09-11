@@ -115,6 +115,40 @@ class BrokerInboxReadRequest(TypedDict):
     event_id: Annotated[str, Field(min_length=1)]
 
 
+class BrokerShellRunRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["shell.run"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    command: Annotated[str, Field(min_length=1, max_length=65_536)]
+    cwd: str | None
+
+
+class BrokerShellListRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["shell.list"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerShellHandleRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["shell.info", "shell.cancel"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    job_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerShellReadRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["shell.read"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    job_id: Annotated[str, Field(min_length=1)]
+    cursor: Annotated[int, Field(ge=0)]
+    max_bytes: Annotated[int, Field(ge=1, le=65_536)]
+
+
 class BrokerSkillRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid")
     op: Literal["skill.call"]
@@ -134,7 +168,11 @@ BrokerRequest = Annotated[
     | BrokerAgentMessageRequest
     | BrokerAgentReportRequest
     | BrokerInboxListRequest
-    | BrokerInboxReadRequest,
+    | BrokerInboxReadRequest
+    | BrokerShellRunRequest
+    | BrokerShellListRequest
+    | BrokerShellHandleRequest
+    | BrokerShellReadRequest,
     Field(discriminator="op"),
 ]
 _REQUEST_ADAPTER = TypeAdapter(BrokerRequest)
