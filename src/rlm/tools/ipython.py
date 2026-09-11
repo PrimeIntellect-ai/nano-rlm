@@ -31,12 +31,12 @@ IPYTHON_SCHEMA = {
     "function": {
         "name": "ipython",
         "description": (
-            "Execute code in a persistent IPython session. Variables, imports, "
-            "and function definitions persist across calls. "
-            "Use !command for shell commands (e.g. !ls -la, !cat file.py, !pip install foo). "
-            "Use !python3 to run code with the project's own packages "
-            "(e.g. !python3 -m pytest, !python3 -c 'import numpy'). "
-            "Use %%bash for multi-line shell scripts."
+            "Execute Python in a persistent kernel, including top-level await. "
+            "Use the pre-imported rlm API to manage agents, Bash jobs, inboxes, and subscriptions "
+            "as described in the runtime guide. For supervisor-owned Bash work use rlm.shell.run; "
+            "IPython ! and %%bash magics run inside the kernel's lifecycle. "
+            "Variables persist across cells and compaction, but are lost on kernel restart. "
+            "Read recovery notices and reconstruct state before retrying interrupted work."
         ),
         "parameters": {
             "type": "object",

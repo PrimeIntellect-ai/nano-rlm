@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,7 +26,7 @@ BASE_TOOLKIT = (
     "pydantic",
 )
 
-SHELL_TOOL_NAMES = frozenset({"ipython"})
+SHELL_TOOL_NAMES = frozenset({"ipython", "bash"})
 GIT_HISTORY_GUARD_PROMPT = (
     "Do not cheat by using online solutions or hints specific to this task, or "
     "by copying or inferring solutions from other branches, tags, remotes, "
@@ -49,10 +50,10 @@ KERNEL_PACKAGES_PROMPT = (
     "targets the kernel venv (a uv-managed venv with no pip module)."
 )
 BASH_SKILL_PROMPT = (
-    "Run shell with `out = await bash('''command here''')` — always "
+    "For short, blocking shell work, use `out = await bash('''command here''')` — always "
     "triple-quote the command so shell quotes and multi-line scripts never "
     "need escaping. It returns the output as a string; no need for "
-    "`subprocess` or `%%bash`. Chain related commands with && in one call."
+    "`subprocess` or `%%bash`. Use rlm.shell.run for supervisor-owned background work."
 )
 BASH_SKILL_WITH_TOOL_PROMPT = (
     "Inside ipython you can also run shell with `await bash(command=...)` — "
@@ -86,6 +87,134 @@ BUILTIN_SKILL_PROMPTS: dict[str, str] = {
 }
 
 
+RUNTIME_PROMPT = """## Runtime and ownership
+`rlm` is already imported in IPython. Execute API calls there with top-level `await`.
+Python variables persist between cells. Agents, Bash jobs, inbox state, and subscriptions
+belong to the supervisor: finishing or cancelling a cell, losing a handle variable, or
+restarting IPython does not cancel them. Agents initially share a filesystem as trusted
+collaborators; handles enforce orchestration ownership, not filesystem isolation.
+
+A kernel recovery notice means Python variables/imports/in-kernel tasks were lost.
+Reconstruct them and recover handles through the registries below. Never blindly repeat
+an interrupted cell: file writes and accepted spawn/send/job requests may already have
+happened. Compaction alone preserves the kernel and supervisor resources.
+
+## Bash jobs
+Use `job = await rlm.shell.run(command, cwd=...)` for supervisor-owned Bash work.
+It returns promptly; the command need not have finished. Default cwd is this agent's
+working directory; relative cwd resolves against it. Bash has no stdin/PTY support.
+`await rlm.shell.list()` returns JobInfo objects; `await rlm.shell.get(job_id)` recovers
+a handle. `job.id` is stable. `await job.info()` returns metadata with .status,
+.exit_code, .output_complete, .output_truncated, and .error. Status is starting, running, completed, failed, or cancelled. Nonzero exit codes are
+completed processes; failed means startup/capture failure. `await job.cancel()` stops
+the process group. Owner termination cancels its jobs, including background descendants.
+Keep Bash alive until its work finishes; detached processes are outside this guarantee.
+
+`chunk = await job.read(cursor=0, max_bytes=16384)` returns .text, .next_cursor, .done,
+and .truncated. Reads are repeatable, not consuming; save next_cursor for the next read.
+Cursors count bytes, not characters. Reads allow at most 65536 bytes and capture retains
+16 MiB per job. .done means the job ended and this read reached the retained output's end;
+it does not imply success or exhaustive output. Check the job's exit code and capture flags.
+IPython `!`/`%%bash` and any enabled blocking bash skill/tool are not supervisor-owned jobs.
+
+## Inbox and waiting
+`await rlm.inbox.list()` returns unread event dictionaries: ["id"], ["type"],
+["sender_id"], ["created_at"], ["read"]. Listing does not mark events read.
+`event = await rlm.inbox.read(event_id)` returns a dictionary with ["content"] and
+marks it read. `list(unread_only=False)` includes read events; reads are repeatable.
+A read flag means retrieved, not completed or acted upon.
+
+Supervisor notifications show only an unread count. You choose when to inspect payloads.
+When work remains but nothing is actionable, call the native `wait` tool (outside Python),
+with timeout at most 300 seconds. It suspends inference without holding a cell open.
+New arrivals wake it; already-announced unread events do not. Inspect existing unread
+events before waiting for more. Avoid polling/sleep loops in Python to wait for agents/jobs.
+
+Bash completion arrives automatically as type `shell.completed`, with
+`event["content"]["job_id"]`; recover the job to read output and inspect its outcome.
+For example, start a job in one cell:
+```python
+job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project")
+```
+Continue other work, or call native `wait`. In a later cell, inspect relevant arrivals:
+```python
+for item in await rlm.inbox.list():
+    if item["type"] == "shell.completed":
+        event = await rlm.inbox.read(item["id"])
+        job = await rlm.shell.get(event["content"]["job_id"])
+        info = await job.info()
+        chunk = await job.read()
+        print(info.status, info.exit_code, chunk.text)
+```
+Adapt the command and cwd to the actual task. Continue reading with next_cursor if needed.
+
+## Subscriptions
+`await rlm.watch.job(job)` observes newly captured output from an owned job.
+`await rlm.watch.path(path, recursive=False)` observes an existing file/directory;
+relative paths use this agent's cwd. Recursion is opt-in. Both return handles with .id
+and async .cancel(). `await rlm.watch.list()` returns SubscriptionInfo objects with
+.id, .kind, .target, .status, .error; `await rlm.watch.get(id)` recovers a handle.
+No events selector is needed. Completion notifications require no subscription.
+
+Watches observe future activity, batching arrivals over 200 ms. An inbox event carries
+["subscription_id"] and ["content"]["target"]. `watch.job` content has an exclusive
+start:end byte range; `watch.path` content has paths and truncated. Read the referenced
+output/files when useful. `watch.failed` explains failure in `event["content"]["error"]`; inspect
+metadata and register again after fixing the cause. Observed path removal stops its watch.
+Cancellation stops future events and drops an unpublished batch, retaining published
+inbox events. Owner termination cancels subscriptions. Limits are 64 active / 1024 total
+subscriptions per tree; oversized path batches report truncation explicitly.
+
+Use `help(rlm.shell.run)`, `help(rlm.watch.path)`, or `help(type(handle))` for signatures
+and details. Objects use attributes; inbox events and history messages are dictionaries.
+"""
+
+AGENT_PROMPT = """## Delegation
+`child = await rlm.agent.spawn(task, name="researcher", persistent=False)` returns
+an AgentHandle immediately. Give the child a self-contained task, relevant constraints,
+and an expected result. Names are unique among siblings and reserved for the session.
+`await rlm.agent.list()` returns AgentInfo objects with .id, .parent_id, .name, .task,
+.status, .persistent, .session_dir, and timing. `recursive=True` also lists descendants;
+only direct children can be controlled. Finished children remain discoverable. Recover a direct child with
+`await rlm.agent.get(name_or_id)`. Reassigning/deleting a Python handle does not stop it.
+
+`await child.info()` reads metadata. `await child.result()` returns an RLMResult
+(.answer, .usage, .turns, .session_dir), None while pending, or raises for failure/cancellation.
+Child completion/failure posts `agent.completed` automatically;
+`event["content"]["agent_id"]` identifies the child and ["status"] gives its state. Inspect the event and recover the handle rather than assuming success.
+`child.history()` returns a fresh history snapshot. `await child.cancel()` terminates
+that child and its descendants. Terminating a parent ends its whole subtree.
+
+Use persistent=True for follow-up work: the child becomes idle after answering and retains
+its kernel/conversation. `await child.send(message)` queues work until an answer or native
+wait boundary; `await child.steer(message)` delivers at the next model/tool boundary during
+ongoing work. Neither interrupts running code. These return message IDs, not answers.
+`await child.wait(timeout=30)` waits inside the Python cell and returns AgentInfo, not the
+result; prefer native wait when you have no other work. Cell timeouts still apply.
+
+`await rlm.watch.agent(child)` watches a direct child's conversation after complete
+assistant/tool steps, including final answers. Its `watch.agent` event content identifies
+the child via target and gives start:end indices for
+`child.history().messages[start:end]`. It observes progress without waiting for an explicit
+report. Read history, then steer if needed; the subscription itself does not direct the child.
+"""
+
+HISTORY_PROMPT = """## Conversation history
+`from rlm import history; h = history()` reads a snapshot of your ledger.
+`h.messages[i]` addresses a session-wide message; `h.windows[w].messages[i]` addresses
+one within a context window. Indices are zero-based. Messages are dictionaries with
+role/content/tool fields. `h.user_messages()` returns original user inputs, distinct
+from generated summaries and supervisor notices. `history(session_dir=path)` reads an
+explicit session; use a child handle's .history() when available. Reload for fresh state.
+
+Compaction and rollback start new windows; earlier records remain addressable. Full tool
+outputs and shortened context versions have separate indices. `h.events` contains spawn
+and rollback records; prompt_rollback.prompt_id identifies a rolled-back user attempt.
+History records what happened, not proof that side effects were undone. Recover exact
+instructions and evidence by searching/selectively printing records, not the entire ledger.
+"""
+
+
 def build_system_prompt(
     cwd: str,
     skills_dir: str | None,
@@ -97,144 +226,114 @@ def build_system_prompt(
     allow_git: bool,
     active_tools: list[BuiltinTool],
     shell_skills: list[str] | None = None,
+    task_instructions: str | None = None,
+    extra_instructions: str | None = None,
+    agent_info: dict | None = None,
 ) -> str:
-    """Build the system prompt.
-
-    Layout: role → environment (cwd, log path, skills, kernel venv) →
-    capabilities (recursion) → guards. Keep it tight: the model also receives
-    the per-tool schemas, so redundant tool guidance here just inflates
-    every request.
-    """
-    has_bash = _has_tool(active_tools, "bash")
-    has_edit = _has_tool(active_tools, "edit")
+    """Compose task instructions with the guide for this agent's actual runtime."""
     has_ipython = _has_tool(active_tools, "ipython")
-    if depth > 0:
-        role = (
-            "You are a coding agent, spawned as a sub-agent: your caller "
-            "delegated a task to you and can inspect your history. Do "
-            "exactly that task; don't widen the scope."
-        )
-    else:
-        role = "You are a coding agent."
-    if has_bash:
-        role += " You have access to a bash tool for running shell commands."
-    if has_edit:
-        role += (
-            " You also have an edit tool for single-occurrence string "
-            "replacement in a file."
-        )
-    if has_ipython:
-        role += (
-            " You also have an ipython tool: a persistent Python REPL "
-            "(variables, imports, and function definitions persist across calls)."
-        )
-    if depth > 0:
-        done_line = (
-            "When the task is done, stop calling tools and state your final "
-            "answer. Make it a "
-            "complete, self-contained result — the answer plus the evidence "
-            "needed to trust it (sources, file paths, values)."
-        )
-    else:
-        done_line = "When you are done, stop calling tools and state your final answer."
-    log_dir = session_dir or "$RLM_SESSION_DIR"
-    parts: list[str] = [
-        role,
-        done_line,
-        "",
-        f"Working directory: {cwd}",
-        f"Conversation log: {log_dir}/messages.jsonl",
-        "Read the live conversation ledger with `from rlm import history; h = history()`. "
-        "`h.messages[i]` addresses a session-wide message; `h.windows[w].messages[i]` addresses "
-        "a message within a context window. Indices are zero-based. Compaction and rollback "
-        "start new windows; earlier windows remain available. `h.user_messages()` returns "
-        "original user inputs. `history(session_dir=path)` reads another session directory. "
-        "Call `history(...)` again for a "
-        "fresh snapshot. `h.events` includes spawn prompts and rollback markers. "
-        "Full tool outputs and their shortened context versions have separate message indices. "
-        "Search or print selected records to recover missing context; avoid printing the whole ledger. "
-        "Failed attempts remain as history: `prompt_rollback.prompt_id` identifies their user record.",
+    can_delegate = has_ipython and allow_recursion
+    parts = [
+        task_instructions
+        if task_instructions is not None
+        else "You are an agent. Complete the user's task using the available tools."
     ]
-
-    skill_lines: list[str] = []
-    if skills_dir:
-        skill_lines.append(
-            f"Local skills live under {skills_dir}. Read their SKILL.md files when helpful."
+    if extra_instructions:
+        parts.append(extra_instructions)
+    parts.append("## Agent context")
+    if agent_info:
+        parts.append(
+            "Supervisor identity: "
+            + json.dumps(
+                {
+                    key: agent_info[key]
+                    for key in ("id", "parent_id", "name", "persistent")
+                }
+            )
         )
-    if installed_skills:
-        installed = ", ".join(f"`{skill}`" for skill in installed_skills)
-        skill_lines.append(f"Installed skills (pre-imported): {installed}.")
-        skill_lines.append(
-            "Each skill is an async function by the same name; "
-            "inspect one with `help(<skill>)`."
+    if depth > 0:
+        parts.append(
+            "You are a sub-agent. Work on the task delegated by your immediate parent; do not widen its scope. Return a self-contained answer with relevant evidence, sources, paths, and uncertainties."
         )
-        shell_skill_set = set(shell_skills or [])
-        if shell_skill_set:
-            names = ", ".join(f"`{name}`" for name in sorted(shell_skill_set))
-            skill_lines.append(
-                f"Shell-enabled installed skills: {names}. Discover CLI usage with "
-                "`<skill> --help`. Other listed skills are IPython-only."
+        if agent_info and agent_info["persistent"]:
+            parts.append(
+                "After answering, you become idle and retain your kernel for follow-up instructions or inbox arrivals. You do not need to wait merely to keep your persistent session alive."
             )
         else:
-            skill_lines.append("The listed skills are IPython-only.")
+            parts.append(
+                "After your final answer, your runtime and descendants are terminated. Finish necessary child/job work before answering."
+            )
+    else:
+        parts.append(
+            "You are the root agent. A final answer returns control to the caller. Do not claim completion while required work remains pending."
+        )
+    parts.extend(
+        [
+            f"Working directory: {cwd}",
+            f"Conversation log: {session_dir or '$RLM_SESSION_DIR'}/messages.jsonl",
+        ]
+    )
+    parts.append(
+        "Available native tools: "
+        + ", ".join(
+            [tool.name for tool in active_tools] + (["wait"] if has_ipython else [])
+        )
+        + ". Call at most one native tool per model step."
+    )
+    if has_ipython:
+        parts.extend(
+            [
+                RUNTIME_PROMPT,
+                HISTORY_PROMPT,
+                IPYTHON_CONTROL_PROMPT,
+                KERNEL_PACKAGES_PROMPT,
+            ]
+        )
+        if can_delegate:
+            parts.append(AGENT_PROMPT)
+        else:
+            parts.append(
+                "Delegation is disabled at this depth. Work directly with your available tools."
+            )
+        if depth > 0:
+            parts.append(
+                "Use `await rlm.agent.send_to_parent(message)` to put a report in your immediate parent's inbox; it returns an event ID. Your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
+            )
+        else:
+            parts.append(
+                "You have no parent: rlm.agent.send_to_parent is unavailable. Child reports arrive as agent.message inbox events; read their content when useful."
+            )
+    if _has_tool(active_tools, "bash"):
+        parts.append(
+            "The native bash tool executes a command to completion or timeout and returns text. It does not return a background-job handle."
+        )
+    if _has_tool(active_tools, "edit"):
+        parts.append(
+            "Use the native edit tool for exact single-occurrence string replacement; its schema describes the arguments."
+        )
+    if skills_dir:
+        parts.append(
+            f"Local skills live under {skills_dir}. Read their SKILL.md files when helpful."
+        )
+    shell_skill_set = set(shell_skills or [])
+    if installed_skills and has_ipython:
+        parts.append(
+            "Installed skills (pre-imported): "
+            + ", ".join(f"`{name}`" for name in installed_skills)
+            + ". Each is async; use help(skill) for its signature."
+        )
         for name in installed_skills:
-            if prompt := _builtin_skill_prompt(name, active_tools):
-                skill_lines.append(prompt)
-    if skill_lines:
-        parts.extend(["", *skill_lines])
-
-    if has_ipython and not has_bash and "bash" not in (installed_skills or []):
-        parts.extend(["", IPYTHON_CONTROL_PROMPT, KERNEL_PACKAGES_PROMPT])
-    elif has_ipython:
-        parts.extend(["", PROJECT_ENV_PROMPT, KERNEL_PACKAGES_PROMPT])
-
-    if allow_recursion:
-        parts.extend(
-            [
-                "",
-                "The `rlm` package is available in Python. `child = await rlm.agent.spawn(task='...', name='researcher')` registers a child and returns a handle immediately; the child continues across cells.",
-                "Use `await rlm.agent.list()` for child metadata, or `recursive=True` for descendants. Recover a direct child's handle with `await rlm.agent.get('researcher')` or its ID. Names are unique among siblings and reserved for this session.",
-                "`await child.info()` reads status/task/timing; `child.history()` reads its conversation. `await child.result()` returns an RLMResult with .answer, .usage, .turns, .session_dir, or None while pending; failed/cancelled agents raise. `await child.wait(timeout=30)` waits at most that many seconds and returns current metadata. Waits use the cell's normal timeout and never cancel the agent. Avoid busy polling.",
-                "`await child.cancel()` terminates the child and its descendants. An ordinary child releases its kernel after answering. `persistent=True` retains an idle kernel after answering; Use `await child.send(message)` to queue an instruction until an answer or explicit wait, and `await child.steer(message)` for the next model/tool boundary. Terminating a parent terminates all its descendants. Only direct children can be controlled; descendant listing grants no control.",
-            ]
+            if guidance := _builtin_skill_prompt(name, active_tools):
+                parts.append(guidance)
+    if shell_skill_set and (has_ipython or _has_tool(active_tools, "bash")):
+        parts.append(
+            "Shell-enabled installed skills: "
+            + ", ".join(f"`{name}`" for name in sorted(shell_skill_set))
+            + ". Discover CLI usage with `<skill> --help`. Other listed skills are IPython-only."
         )
-
-    if has_ipython:
-        parts.extend(
-            [
-                "",
-                "Supervisor inbox: `await rlm.inbox.list()` lists unread event metadata without reading payloads. `await rlm.inbox.read(event_id)` retrieves a payload and marks it read; `list(unread_only=False)` includes read events. Child completion is automatic; reports use `await rlm.agent.send_to_parent(message)`. Children cannot steer parents or message siblings.",
-                "Call the native `wait` tool when you have no work until a new event arrives. It suspends inference without occupying IPython. Already-announced unread events do not wake it repeatedly. Parent instructions are pushed automatically; reports and completion events require inbox reads. Notifications contain only an unread count. A final answer ends this ACP prompt; use wait to remain available. Queued instructions are delivered at an answer or wait boundary, steering at the next model/tool boundary; active tools are not interrupted.",
-            ]
-        )
-
-    if has_ipython:
-        parts.extend(
-            [
-                "",
-                "`rlm.shell.run(command, cwd=...)` registers a supervisor-owned Bash job and returns a handle promptly. Default cwd is the agent working directory. No stdin/PTY is available. Jobs survive cells and lost Python variables; recover with `await rlm.shell.get(job_id)` or discover with `await rlm.shell.list()`.",
-                "Use `await job.info()` for status/exit_code and `await job.read(cursor=0, max_bytes=16384)` for combined stdout/stderr. The result has .text, .next_cursor, .done, and .truncated. Save next_cursor for subsequent reads. Reads are repeatable; .done means all retained output was read after job termination. Capture is capped at 16 MiB. Check info.output_complete and info.output_truncated before treating output as exhaustive.",
-                "Job termination posts a shell.completed inbox event containing job_id, status and exit_code. Use native wait when idle. `await job.cancel()` terminates the process group; agent termination cancels its jobs. Descendants must not outlive their Bash job: keep Bash alive until its work finishes. Prefer these handles for background commands over Python subprocess management or shell &.",
-            ]
-        )
-
-    if has_ipython:
-        parts.extend(
-            [
-                "",
-                "Subscriptions: `await rlm.watch.agent(child)` watches a direct child's conversation after complete assistant/tool steps; `await rlm.watch.job(job)` watches new captured Bash output; `await rlm.watch.path(path, recursive=False)` watches an existing file/directory. They return handles with .id and async .cancel(). There is no events parameter. Child/job completion notifications remain automatic.",
-                "Subscriptions observe future activity, batch arrivals over 200 ms, and publish watch.agent/job/path events into your inbox. Each event has subscription_id; its content has target. Agent events carry an exclusive start:end history-message range; job events carry start:end output byte cursors; path events carry paths and truncated. Retrieve details through child.history(), job.read(), or files. No event payload is pushed into the conversation.",
-                "Use `await rlm.watch.list()` for metadata/status or `await rlm.watch.get(subscription_id)` to recover a handle after kernel restart. Cancellation stops future events and drops an unpublished batch; inbox events already published remain readable. Owner termination cancels its subscriptions. A removed path or watcher failure stops that subscription and posts watch.failed; register again after recreation. Limits: 64 active / 1024 total subscriptions per tree; oversized path batches are truncated explicitly.",
-            ]
-        )
-
     if _should_include_git_history_guard(active_tools, allow_git):
-        parts.extend(["", GIT_HISTORY_GUARD_PROMPT])
-
-    if active_tools:
-        parts.extend(["", "Call at most one built-in tool per turn."])
-
-    return "\n".join(parts)
+        parts.append(GIT_HISTORY_GUARD_PROMPT)
+    return "\n\n".join(parts)
 
 
 def _should_include_git_history_guard(

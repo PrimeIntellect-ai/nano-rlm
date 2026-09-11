@@ -330,6 +330,16 @@ class SessionTreeSupervisor:
                 return agent
         raise PermissionError("agent is not a direct child of the caller")
 
+    def agent_context(self, invocation_id: str) -> dict[str, Any]:
+        """Runtime identity for this agent's prompt, without broker credentials."""
+        agent = self._invocations[invocation_id]
+        return {
+            "id": agent.id,
+            "parent_id": agent.parent_id,
+            "name": agent.name,
+            "persistent": agent.persistent,
+        }
+
     def _info(self, agent: _Invocation) -> dict[str, Any]:
         return {
             "id": agent.id,

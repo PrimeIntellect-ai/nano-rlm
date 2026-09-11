@@ -87,6 +87,24 @@ environment, search credential). Prompt configuration is role-aware: optional
 for sub-agents, each falling back to the next-more-general tier. Recursive children inherit the parent's configuration
 in-memory (`model_copy`); nothing is re-read from the process environment.
 
+`system_prompt_path` supplies task instructions in place of the default task role.
+The runtime guide is always appended, including when a custom prompt file is used.
+The role-appropriate append instructions are included between the task instructions
+and runtime guide. This keeps tool/API documentation and lifecycle rules available
+to root agents, persistent children, and leaves. Credentials are not included in
+agent identity metadata.
+
+The generated guide distinguishes Python state from supervisor-owned resources,
+shows inbox dictionaries versus handle/metadata objects, and explains waiting,
+completion, history recovery, jobs, and subscriptions. Delegation instructions are
+shown only when IPython and recursion are available. Tool descriptions follow the
+same shell execution guidance.
+
+Checkpoint prompts preserve task requirements, evidence, outstanding assignments,
+jobs, subscriptions, event actions, output cursors, and history references. Commands
+and edits are included only when relevant. Compaction thresholds, summary validation,
+and context retention policy are unchanged.
+
 The process environment configures only process infrastructure:
 
 | Variable | Default | Description |

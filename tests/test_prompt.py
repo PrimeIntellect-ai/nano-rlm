@@ -98,3 +98,53 @@ def test_prompt_only_advertises_actual_shell_skills():
 
     assert "Shell-enabled installed skills: `uploaded`" in prompt
     assert "Other listed skills are IPython-only" in prompt
+
+
+def test_runtime_guidance_matches_agent_capabilities():
+    leaf = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        depth=1,
+        allow_recursion=False,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+        agent_info={
+            "id": "leaf",
+            "parent_id": "root",
+            "name": "researcher",
+            "persistent": True,
+        },
+    )
+    assert "rlm.agent.send_to_parent(message)" in leaf
+    assert "rlm.agent.spawn(" not in leaf
+    assert "rlm.watch.agent(" not in leaf
+    assert "become idle" in leaf
+    assert '"parent_id": "root"' in leaf
+    assert "rlm.shell.run" in leaf
+
+    native = build_system_prompt(
+        "/repo",
+        None,
+        ["search"],
+        allow_recursion=True,
+        allow_git=False,
+        active_tools=[_Tool("bash")],
+    )
+    assert "rlm.agent.spawn(" not in native
+    assert "rlm.shell.run" not in native
+    assert "await search" not in native
+    assert "native bash tool" in native
+    assert GIT_HISTORY_GUARD_PROMPT in native
+
+    root = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        allow_recursion=True,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+    )
+    assert "rlm.agent.spawn(" in root
+    assert "rlm.watch.agent(" in root
+    assert "You have no parent" in root
