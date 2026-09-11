@@ -460,3 +460,38 @@ async def test_subagent_recovers_from_context_overflow(tmp_path):
     assert engines[0].depth == 1
     assert engines[0]._metrics.num_compactions == 1
     assert len(clients[0].calls) == 4
+
+
+async def test_checkpoint_fallback_preserves_kernel_warning_without_large_output(
+    session,
+):
+    client = _ScriptedClient(
+        [_overflow(), _response(DummyMessage(content="recovered summary"))]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config(max_compaction_attempts=2),
+    )
+    session.replace_context(
+        [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "oversized output" * 5000},
+        ],
+        reason="start",
+    )
+    engine._last_good = 2
+    warning = "Supervisor: IPython restarted; variables were lost. Do not replay the interrupted cell."
+    engine._repl = SimpleNamespace(take_recovery_notices=lambda: [warning])
+    engine._deliver_kernel_notices()
+    engine._repl = None
+    try:
+        await engine._compact_branch(session.messages, turn=0)
+        assert len(client.calls) == 2
+        fallback = client.calls[1]["messages"]
+        assert warning in fallback[-1]["content"]
+        assert all("oversized output" not in m.get("content", "") for m in fallback)
+        assert engine._metrics.num_compactions == 1
+    finally:
+        engine.close()
