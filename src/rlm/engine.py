@@ -1179,9 +1179,9 @@ class RLMEngine:
             )
         compaction = self._semantic_edges.begin_compaction(self._invocation_id)
         try:
-            # A rejected checkpoint falls back to the last good snapshot (which has a
-            # full reserve of room, so it fits); an incomplete, empty, or
-            # tool-calling reply is resampled. Reasoning is never part of the summary.
+            # Context overflow or truncation above the context threshold falls back
+            # to the last good snapshot. Other rejected replies are resampled.
+            # Reasoning is never part of the summary.
             base = messages
             summary_text = ""
             for _ in range(self.max_compaction_attempts):
@@ -1210,6 +1210,12 @@ class RLMEngine:
                     summary_text = text
                     break
                 self._semantic_edges.release_summary_request(compaction.compaction_id)
+                if (
+                    choice.finish_reason == "length"
+                    and self.summarize_at_tokens is not None
+                    and usage.prompt_tokens >= self.summarize_at_tokens
+                ):
+                    base = messages[: self._last_good]
             if not summary_text:
                 raise CompactionFailed(
                     f"no usable summary after {self.max_compaction_attempts} attempts"

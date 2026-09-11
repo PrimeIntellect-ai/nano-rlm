@@ -167,9 +167,14 @@ async def test_compaction_attempt_limit_is_configurable(session):
     "finish_reason", ["length", "content_filter", "tool_calls", None]
 )
 @pytest.mark.parametrize("recovers", [False, True])
-async def test_compaction_requires_normal_termination(session, finish_reason, recovers):
+@pytest.mark.parametrize("threshold", [None, 8, 32])
+async def test_compaction_requires_normal_termination(
+    session, finish_reason, recovers, threshold
+):
     rejected = _response(
-        DummyMessage(content="unfinished summary"), finish_reason=finish_reason
+        DummyMessage(content="unfinished summary"),
+        finish_reason=finish_reason,
+        prompt_tokens=10,
     )
     client = _ScriptedClient(
         [
@@ -191,6 +196,8 @@ async def test_compaction_requires_normal_termination(session, finish_reason, re
     ]
     session.replace_context(messages, reason="start")
     original = deepcopy(session.messages)
+    engine._last_good = 2
+    engine.summarize_at_tokens = threshold
     try:
         if recovers:
             await engine._compact_branch(messages, turn=0)
@@ -204,7 +211,13 @@ async def test_compaction_requires_normal_termination(session, finish_reason, re
             assert session.messages == original
             assert engine._metrics.num_compactions == 0
         assert len(client.calls) == 2
-        assert client.calls[0]["messages"] == client.calls[1]["messages"]
+        if finish_reason == "length" and threshold == 8:
+            assert client.calls[1]["messages"] == [
+                *original[:2],
+                client.calls[0]["messages"][-1],
+            ]
+        else:
+            assert client.calls[0]["messages"] == client.calls[1]["messages"]
     finally:
         engine.close()
 
