@@ -87,142 +87,67 @@ BUILTIN_SKILL_PROMPTS: dict[str, str] = {
 }
 
 
-RUNTIME_PROMPT = """## Runtime and ownership
-You have a persistent IPython REPL as your execution environment. Each `ipython` tool call
-runs a cell in the same kernel, so variables, imports, and functions remain available to
-later cells. Use Python to program over tools and coordinate concurrent work.
+RUNTIME_PROMPT = """## Runtime
+Your execution environment is a persistent IPython REPL: each `ipython` call runs a cell in
+the same kernel, so variables, imports and functions persist. Run quick shell commands (ls,
+grep, cat, sed, git, a single test file — anything under about a minute) inline with
+`!command` or a `%%bash` cell; the output comes back in the same turn. Do not wrap shell in
+Python `subprocess`.
 
-A supervisor runs outside your IPython kernel. It manages agents, background Bash jobs,
-message delivery, and subscriptions. The pre-imported `rlm` Python API lets you ask it to
-create, inspect, and control these resources; execute async API calls with top-level `await`.
-Handles stored in Python variables are references to supervisor-owned resources.
-Finishing or cancelling a cell, losing a handle variable, or restarting IPython does not
-cancel those resources. Recover handles through their registries. Terminating an agent
-cleans up its children, jobs, and subscriptions.
+A supervisor outside the kernel owns background Bash jobs, agents, your inbox and
+subscriptions, driven through the pre-imported async `rlm` API (top-level `await`). Handles
+are references to supervisor-owned resources: ending a cell, losing a variable or a kernel
+restart does not cancel them — recover them with `rlm.shell.get/list`, `rlm.agent.get/list`,
+`rlm.watch.get/list`. After a kernel recovery notice your Python state is gone but jobs,
+agents and inbox survive; never blindly re-run the interrupted cell.
 
-Parent instructions are delivered automatically. Child reports and watcher events enter
-your inbox; lightweight notifications let you choose when to read them. Agents share a
-filesystem as trusted collaborators; handles enforce orchestration ownership, not
-filesystem isolation.
-
-A kernel recovery notice means Python variables/imports/in-kernel tasks were lost.
-Reconstruct them and recover handles through the registries below. Never blindly repeat
-an interrupted cell: file writes and accepted spawn/send/job requests may already have
-happened. Compaction alone preserves the kernel and supervisor resources.
-
-## Bash jobs
-Use `job = await rlm.shell.run(command, cwd=...)` for supervisor-owned Bash work.
-It returns promptly; the command need not have finished. Default cwd is this agent's
-working directory; relative cwd resolves against it. Bash has no stdin/PTY support.
-`await rlm.shell.list()` returns JobInfo objects; `await rlm.shell.get(job_id)` recovers
-a handle. `job.id` is stable. `await job.info()` returns metadata with .status,
-.exit_code, .output_complete, .output_truncated, and .error. Status is starting, running, completed, failed, or cancelled. Nonzero exit codes are
-completed processes; failed means startup/capture failure. `await job.cancel()` stops
-the process group. Owner termination cancels its jobs, including background descendants.
-Keep Bash alive until its work finishes; detached processes are outside this guarantee.
-
-`chunk = await job.read(cursor=0, max_bytes=16384)` returns .text, .next_cursor, .done,
-and .truncated. Reads are repeatable, not consuming; save next_cursor for the next read.
-Cursors count bytes, not characters. Reads allow at most 65536 bytes and capture retains
-16 MiB per job. .done means the job ended and this read reached the retained output's end;
-it does not imply success or exhaustive output. Check the job's exit code and capture flags.
-IPython `!`/`%%bash` and any enabled blocking bash skill/tool are not supervisor-owned jobs.
+## Background Bash jobs
+`job = await rlm.shell.run(command, cwd=...)` starts a supervisor-owned Bash job and returns
+at once. Use it only for genuinely long work (full test suites, builds, long repro loops) and
+keep working while it runs. `info = await job.info()` gives .status (starting, running,
+completed, failed, cancelled), .exit_code, .output_complete, .output_truncated, .error.
+`chunk = await job.read(cursor=0, max_bytes=16384)` gives .text, .next_cursor, .done,
+.truncated (cursors are bytes; at most 65536 bytes per read; 16 MiB retained per job).
+`await job.cancel()` kills the process group. `await rlm.shell.list()` returns JobInfo
+records, not handles — use `await rlm.shell.get(info.id)` to get a handle. No stdin/PTY.
+Jobs die with their owner, so keep Bash alive until its work is finished.
 
 ## Inbox and waiting
-`await rlm.inbox.list()` returns unread event dictionaries: ["id"], ["type"],
-["sender_id"], ["created_at"], ["read"]. Listing does not mark events read.
-`event = await rlm.inbox.read(event_id)` returns a dictionary with ["content"] and
-marks it read. `list(unread_only=False)` includes read events; reads are repeatable.
-A read flag means retrieved, not completed or acted upon.
-
-Supervisor notifications show only an unread count. You choose when to inspect payloads.
-When work remains but nothing is actionable, call the native `wait` tool (outside Python),
-with timeout at most 300 seconds. It suspends inference without holding a cell open.
-New arrivals wake it; already-announced unread events do not. Inspect existing unread
-events before waiting for more. Avoid polling/sleep loops in Python to wait for agents/jobs.
-
-Bash completion arrives automatically as type `shell.completed`, with
-`event["content"]["job_id"]`; recover the job to read output and inspect its outcome.
-For example, start a job in one cell:
-```python
-job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project")
-```
-Continue other work, or call native `wait`. In a later cell, inspect relevant arrivals:
-```python
-for item in await rlm.inbox.list():
-    if item["type"] == "shell.completed":
-        event = await rlm.inbox.read(item["id"])
-        job = await rlm.shell.get(event["content"]["job_id"])
-        info = await job.info()
-        chunk = await job.read()
-        print(info.status, info.exit_code, chunk.text)
-```
-Adapt the command and cwd to the actual task. Continue reading with next_cursor if needed.
+Job completion arrives as an inbox event of type `shell.completed` whose content carries
+job_id, status and exit_code. `await rlm.inbox.list()` returns unread events as dicts (id,
+type, sender_id, created_at, read); `event = await rlm.inbox.read(event_id)` returns the
+dict with ["content"] and marks it read. Notifications only show an unread count. When
+nothing is actionable until a job or agent finishes, call the native `wait` tool (timeout at
+most 300 s) — never sleep-poll in Python. Typical loop: start the job → do other work →
+`wait` → read the shell.completed event → `job = await rlm.shell.get(job_id)` → info/read.
 
 ## Subscriptions
-`await rlm.watch.job(job)` observes newly captured output from an owned job.
-`await rlm.watch.path(path, recursive=False)` observes an existing file/directory;
-relative paths use this agent's cwd. Recursion is opt-in. Both return handles with .id
-and async .cancel(). `await rlm.watch.list()` returns SubscriptionInfo objects with
-.id, .kind, .target, .status, .error; `await rlm.watch.get(id)` recovers a handle.
-No events selector is needed. Completion notifications require no subscription.
-
-Watches observe future activity, batching arrivals over 200 ms. An inbox event carries
-["subscription_id"] and ["content"]["target"]. `watch.job` content has an exclusive
-start:end byte range; `watch.path` content has paths and truncated. Read the referenced
-output/files when useful. `watch.failed` explains failure in `event["content"]["error"]`; inspect
-metadata and register again after fixing the cause. Observed path removal stops its watch.
-Cancellation stops future events and drops an unpublished batch, retaining published
-inbox events. Owner termination cancels subscriptions. Limits are 64 active / 1024 total
-subscriptions per tree; oversized path batches report truncation explicitly.
-
-Use `help(rlm.shell.run)`, `help(rlm.watch.path)`, or `help(type(handle))` for signatures
-and details. Objects use attributes; inbox events and history messages are dictionaries.
+`await rlm.watch.job(job)` and `await rlm.watch.path(path, recursive=False)` post inbox
+events (`watch.job` with a start:end byte range, `watch.path` with changed paths) for new
+output or file changes; `rlm.watch.list()`, `rlm.watch.get(id)`, `await handle.cancel()`.
+Completion notifications need no subscription. `help(rlm.shell.run)` etc. give details.
 """
 
 AGENT_PROMPT = """## Delegation
-`child = await rlm.agent.spawn(task, name="researcher", persistent=False)` returns
-an AgentHandle immediately. Give the child a self-contained task, relevant constraints,
-and an expected result. Names are unique among siblings and reserved for the session.
-`await rlm.agent.list()` returns AgentInfo objects with .id, .parent_id, .name, .task,
-.status, .persistent, .session_dir, and timing. `recursive=True` also lists descendants;
-only direct children can be controlled. Finished children remain discoverable. Recover a direct child with
-`await rlm.agent.get(name_or_id)`. Reassigning/deleting a Python handle does not stop it.
-
-`await child.info()` reads metadata. `await child.result()` returns an RLMResult
-(.answer, .usage, .turns, .session_dir), None while pending, or raises for failure/cancellation.
-Child completion/failure posts `agent.completed` automatically;
-`event["content"]["agent_id"]` identifies the child and ["status"] gives its state. Inspect the event and recover the handle rather than assuming success.
-`child.history()` returns a fresh history snapshot. `await child.cancel()` terminates
-that child and its descendants. Terminating a parent ends its whole subtree.
-
-Use persistent=True for follow-up work: the child becomes idle after answering and retains
-its kernel/conversation. `await child.send(message)` queues work until an answer or native
-wait boundary; `await child.steer(message)` delivers at the next model/tool boundary during
-ongoing work. Neither interrupts running code. These return message IDs, not answers.
-`await child.wait(timeout=30)` waits inside the Python cell and returns AgentInfo, not the
-result; prefer native wait when you have no other work. Cell timeouts still apply.
-
-`await rlm.watch.agent(child)` watches a direct child's conversation after complete
-assistant/tool steps, including final answers. Its `watch.agent` event content identifies
-the child via target and gives start:end indices for
-`child.history().messages[start:end]`. It observes progress without waiting for an explicit
-report. Read history, then steer if needed; the subscription itself does not direct the child.
+`child = await rlm.agent.spawn(task, name="researcher", persistent=False)` returns an
+AgentHandle immediately; give the child a self-contained task and expected result. Names are
+unique among siblings. `await rlm.agent.list()` returns AgentInfo records (.id, .name, .status,
+...); recover a handle with `await rlm.agent.get(name_or_id)`. `await child.info()`,
+`await child.result()` (RLMResult with .answer/.usage/.turns, None while pending, raises on
+failure), `child.history()`, `await child.cancel()`. Completion posts an `agent.completed`
+inbox event (content.agent_id, content.status). `persistent=True` keeps an idle child for
+follow-ups: `await child.send(message)` queues work, `await child.steer(message)` redirects
+at the next model/tool boundary. `await child.wait(timeout=30)` blocks inside the cell;
+prefer the native `wait` tool. `await rlm.watch.agent(child)` posts `watch.agent` events
+with start:end indices into `child.history().messages`. Only direct children can be
+controlled; terminating a parent ends its subtree.
 """
 
 HISTORY_PROMPT = """## Conversation history
-`from rlm import history; h = history()` reads a snapshot of your ledger.
-`h.messages[i]` addresses a session-wide message; `h.windows[w].messages[i]` addresses
-one within a context window. Indices are zero-based. Messages are dictionaries with
-role/content/tool fields. `h.user_messages()` returns original user inputs, distinct
-from generated summaries and supervisor notices. `history(session_dir=path)` reads an
-explicit session; use a child handle's .history() when available. Reload for fresh state.
-
-Compaction and rollback start new windows; earlier records remain addressable. Full tool
-outputs and shortened context versions have separate indices. `h.events` contains spawn
-and rollback records; prompt_rollback.prompt_id identifies a rolled-back user attempt.
-History records what happened, not proof that side effects were undone. Recover exact
-instructions and evidence by searching/selectively printing records, not the entire ledger.
+`from rlm import history; h = history()` snapshots your ledger: `h.messages[i]` (session-wide
+index), `h.windows[w].messages[i]` (within a context window), `h.user_messages()` (original
+inputs), `h.events` (spawn and rollback records). Compaction and rollback open new windows;
+earlier records stay addressable. Search or print selected records, not the whole ledger.
 """
 
 
