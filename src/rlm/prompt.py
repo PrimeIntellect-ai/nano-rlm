@@ -88,11 +88,22 @@ BUILTIN_SKILL_PROMPTS: dict[str, str] = {
 
 
 RUNTIME_PROMPT = """## Runtime and ownership
-`rlm` is already imported in IPython. Execute API calls there with top-level `await`.
-Python variables persist between cells. Agents, Bash jobs, inbox state, and subscriptions
-belong to the supervisor: finishing or cancelling a cell, losing a handle variable, or
-restarting IPython does not cancel them. Agents initially share a filesystem as trusted
-collaborators; handles enforce orchestration ownership, not filesystem isolation.
+You have a persistent IPython REPL as your execution environment. Each `ipython` tool call
+runs a cell in the same kernel, so variables, imports, and functions remain available to
+later cells. Use Python to program over tools and coordinate concurrent work.
+
+A supervisor runs outside your IPython kernel. It manages agents, background Bash jobs,
+message delivery, and subscriptions. The pre-imported `rlm` Python API lets you ask it to
+create, inspect, and control these resources; execute async API calls with top-level `await`.
+Handles stored in Python variables are references to supervisor-owned resources.
+Finishing or cancelling a cell, losing a handle variable, or restarting IPython does not
+cancel those resources. Recover handles through their registries. Terminating an agent
+cleans up its children, jobs, and subscriptions.
+
+Parent instructions are delivered automatically. Child reports and watcher events enter
+your inbox; lightweight notifications let you choose when to read them. Agents share a
+filesystem as trusted collaborators; handles enforce orchestration ownership, not
+filesystem isolation.
 
 A kernel recovery notice means Python variables/imports/in-kernel tasks were lost.
 Reconstruct them and recover handles through the registries below. Never blindly repeat
