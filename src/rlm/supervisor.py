@@ -34,7 +34,7 @@ from rlm.mcp import (
 from rlm.shell_jobs import ShellJob, ShellJobs
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
-from rlm.tools.git_block import find_blocked_command, refusal
+from rlm.tools.git_block import find_blocked_command, guarded_git_environment, refusal
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
 from rlm.types import ProgrammaticToolCallStats, RLMResult
@@ -678,7 +678,11 @@ class SessionTreeSupervisor:
                 command=command,
                 cwd=str(cwd.resolve()),
                 directory=parent.session.dir,
-                env=build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                env=guarded_git_environment(
+                    build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                    self._broker_dir / parent.id / "git-bin",
+                    allow_git=parent.runtime_config.policy.allow_git,
+                ),
                 source_request_id=self._scopes[request["scope_id"]].request_id,
             )
             if op == "shell.start":

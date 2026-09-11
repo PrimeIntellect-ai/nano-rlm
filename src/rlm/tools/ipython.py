@@ -17,7 +17,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
-from rlm.tools.git_block import find_blocked_in_ipython, refusal
+from rlm.tools.git_block import (
+    find_blocked_in_ipython,
+    guarded_git_environment,
+    refusal,
+)
 from rlm.tools.skills import discover_skills
 from rlm.types import IpythonExecuted
 
@@ -241,6 +245,9 @@ class IPythonREPL:
         path_entries = kernel_env.get("PATH", "").split(os.pathsep)
         if launcher_dir not in path_entries:
             kernel_env["PATH"] = os.pathsep.join([launcher_dir, *path_entries])
+        kernel_env = guarded_git_environment(
+            kernel_env, Path(self._ipc_dir) / "git-bin", allow_git=self.allow_git
+        )
         self._km.start_kernel(
             cwd=self.cwd,
             env=kernel_env,
