@@ -41,7 +41,7 @@ PROJECT_ENV_PROMPT = (
     "(tests, repros, imports) goes through bash with the project's interpreter."
 )
 IPYTHON_CONTROL_PROMPT = (
-    "Run background Bash commands with `job = await rlm.shell.run(command, cwd=...)`. "
+    "Use blocking shell commands for quick results and `rlm.shell.run` for background work. "
     + PROJECT_ENV_PROMPT
 )
 KERNEL_PACKAGES_PROMPT = (
@@ -52,8 +52,8 @@ KERNEL_PACKAGES_PROMPT = (
 BASH_SKILL_PROMPT = (
     "For short, blocking shell work, use `out = await bash('''command here''')` — always "
     "triple-quote the command so shell quotes and multi-line scripts never "
-    "need escaping. It returns the output as a string; no need for "
-    "`subprocess` or `%%bash`. Use rlm.shell.run for supervisor-owned background work."
+    "need escaping. It returns the output as a string, useful for further Python processing. "
+    "Use rlm.shell.run for supervisor-owned background work."
 )
 BASH_SKILL_WITH_TOOL_PROMPT = (
     "Inside ipython you can also run shell with `await bash(command=...)` — "
@@ -110,8 +110,23 @@ Reconstruct them and recover handles through the registries below. Never blindly
 an interrupted cell: file writes and accepted spawn/send/job requests may already have
 happened. Compaction alone preserves the kernel and supervisor resources.
 
-## Bash jobs
-Use `job = await rlm.shell.run(command, cwd=...)` for supervisor-owned Bash work.
+## Blocking commands and background Bash jobs
+For quick commands whose results you need immediately, use `!command` in an IPython cell,
+for example `!git status --short`. Python can appear before and after a `!` command.
+For multiline scripts or Bash-specific syntax, put `%%bash` on the first line of a cell:
+```bash
+%%bash
+pwd
+git status --short
+```
+The entire rest of that cell is Bash; there is no closing marker. Resume Python in a new
+IPython call. Both forms block the cell until completion and display output. `!` uses the
+system shell and does not guarantee Bash. These commands belong to the kernel's lifecycle
+and may be interrupted by kernel recovery.
+
+Use `job = await rlm.shell.run(command, cwd=...)` for longer commands, work that should run
+alongside other tasks, or work needing cancellation, output subscriptions, or survival
+across a kernel restart. Choose based on the work; quick commands need no background job.
 It returns promptly; the command need not have finished. Default cwd is this agent's
 working directory; relative cwd resolves against it. Bash has no stdin/PTY support.
 `await rlm.shell.list()` returns JobInfo objects; `await rlm.shell.get(job_id)` recovers

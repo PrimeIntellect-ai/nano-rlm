@@ -33,8 +33,10 @@ IPYTHON_SCHEMA = {
         "description": (
             "Execute Python in a persistent kernel, including top-level await. "
             "Use the pre-imported rlm API to manage agents, Bash jobs, inboxes, and subscriptions "
-            "as described in the runtime guide. For supervisor-owned Bash work use rlm.shell.run; "
-            "IPython ! and %%bash magics run inside the kernel's lifecycle. "
+            "as described in the runtime guide. For quick blocking shell commands use !command; "
+            "for multiline Bash use %%bash on the first line, with Bash through the end of the cell. "
+            "Resume Python in a new cell. Use rlm.shell.run for background Bash jobs. "
+            "The blocking magics belong to the kernel's lifecycle; supervisor jobs survive its restart. "
             "Variables persist across cells and compaction, but are lost on kernel restart. "
             "Read recovery notices and reconstruct state before retrying interrupted work."
         ),
