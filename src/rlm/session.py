@@ -30,6 +30,11 @@ class Session:
         self._context_started = False
 
     @property
+    def message_count(self) -> int:
+        """Number of recorded messages; the next stable message index."""
+        return self._message_count
+
+    @property
     def messages(self) -> list[dict]:
         """Snapshot of the active context, in model-request order."""
         return [message for _, message in self._context]

@@ -364,7 +364,6 @@ more than two seconds after Bash exits, capture stops and reports
 job's process group are killed when the job ends. Keep Bash alive until its work
 finishes; detached processes that escape the process group are not managed.
 
-Automatic kernel restart and subscriptions are separate implementation slices.
 There is no PTY, stdin API, or redirection of IPython's `!` / `%%bash` magics.
 
 ### IPython crash recovery
@@ -392,3 +391,54 @@ budget. Exhausting the budget leaves IPython unavailable, while the agent can
 still respond or use native waiting. Supervisor crash recovery is not supported.
 Kernel death is detected during execution or at the next IPython call; this does
 not introduce a background kernel-health subscription.
+
+### Subscriptions
+
+Watch future activity without keeping a Python cell running:
+
+```python
+activity = await rlm.watch.agent(researcher)
+output = await rlm.watch.job(job)
+files = await rlm.watch.path("/workspace/results", recursive=False)
+
+subscriptions = await rlm.watch.list()
+watch = await rlm.watch.get(subscriptions[0].id)
+await watch.cancel()
+```
+
+Agent watches observe direct children after complete assistant/tool steps,
+including final answers. Job watches observe newly captured stdout/stderr from
+jobs owned by the caller. Path watches observe existing files or directories;
+relative paths resolve against the agent's working directory. Hidden files are
+included, and directory recursion is opt-in. Child/job completion already
+notifies the owner automatically and needs no subscription.
+
+Events enter the same pull-based inbox and carry `subscription_id`. Their
+`content` contains a `target` (agent ID, job ID, or absolute path) plus:
+
+| Event | References |
+| --- | --- |
+| `watch.agent` | `start` and exclusive `end` message indices: `researcher.history().messages[start:end]` |
+| `watch.job` | `start` and exclusive `end` byte cursors for `job.read(cursor=start)` |
+| `watch.path` | Changed `paths` and a `truncated` flag |
+| `watch.failed` | An `error` explaining why the subscription stopped |
+
+Subscriptions start with future activity, not historical replay. Agent and job
+ranges can be coalesced across several steps/chunks; changes are batched over
+200 ms. Agent ranges exclude records written before registration. Filesystem
+registration waits until the backend is watching before returning the handle.
+Observed removal of the watched path ends the subscription with a failure event;
+register a new watch after recreating it.
+
+Handles and subscriptions survive kernel restart. Cancellation stops future
+events and drops any unpublished batch; existing inbox events remain readable.
+Owner termination cancels its subscriptions. Registration and state transitions
+are journaled in the owner's `inbox.jsonl`; supervisor restart recovery remains
+out of scope.
+
+The tree permits 64 active subscriptions and 1,024 total registrations. Changed
+path lists are capped at 32 KiB of JSON with explicit truncation. A subscription
+stops with a failure event when the inbox event limit is reached. There are no
+model-authored callbacks, event selectors, or output predicates.
+
+Activity subscriptions become `completed` after their target permanently terminates, flushing pending activity and releasing their active slot. Watches of idle persistent agents remain active. Watching an already-finished target returns a completed subscription.
