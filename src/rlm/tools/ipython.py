@@ -242,12 +242,6 @@ class IPythonREPL:
         depth = (
             int(os.environ.get("RLM_DEPTH", "0")) if self.depth is None else self.depth
         )
-        max_depth = (
-            int(os.environ.get("RLM_MAX_DEPTH", "0"))
-            if self.max_depth is None
-            else self.max_depth
-        )
-        allow_recursion = depth < max_depth and self.broker_endpoint is not None
         # Pip-installed skills + the MCP-tool modules generated into the session dir (rlm.mcp);
         # the session dir goes on the kernel's sys.path so those import by name.
         skill_names = discover_skills(self.session.dir if self.session else None)
@@ -296,7 +290,7 @@ class _CallableModule(types.ModuleType):
 
 def _wrap_callable(mod, log_source, register=True):
     # log_source: 'python' for skills (logged to programmatic_tool_calls.jsonl),
-    # None for rlm (already aggregated via Session.aggregate_child_metrics).
+    # Brokered skills are counted by the supervisor.
     wrapped = _CallableModule(mod.__name__)
     wrapped.__dict__.update(mod.__dict__)
     if log_source is not None:
@@ -329,9 +323,7 @@ for _name in {skill_names!r}:
     _source = None if getattr(_module, '__rlm_brokered__', False) else 'python'
     globals()[_name] = _wrap_callable(_module, _source)
 
-if {allow_recursion!r}:
-    import rlm as _rlm_package
-    globals()['rlm'] = _wrap_callable(_rlm_package, None)
+import rlm
 """
         self._execute_silent(setup_code)
 
