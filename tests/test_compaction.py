@@ -20,6 +20,7 @@ from conftest import (
 from rlm.compaction import (
     SUMMARY_FRAMING,
     CompactionFailed,
+    checkpoint_rejection_reason,
     is_context_overflow,
 )
 from rlm.config import (
@@ -122,6 +123,8 @@ def _config(
     summarize_at_tokens: int | None = None,
     compaction: bool = True,
     max_compaction_attempts: int = 5,
+    require_compaction_completion_status: bool = False,
+    max_total_tokens: int | None = 1_000_000,
 ):
     return RuntimeConfig(
         model="test-model",
@@ -133,6 +136,8 @@ def _config(
             compaction=compaction,
             summarize_at_tokens=summarize_at_tokens,
             max_compaction_attempts=max_compaction_attempts,
+            require_compaction_completion_status=require_compaction_completion_status,
+            max_total_tokens=max_total_tokens,
         ),
     )
 
@@ -455,3 +460,204 @@ async def test_subagent_recovers_from_context_overflow(tmp_path):
     assert engines[0].depth == 1
     assert engines[0]._metrics.num_compactions == 1
     assert len(clients[0].calls) == 4
+
+
+@pytest.mark.parametrize(
+    "metadata,finish,text,strict,reason",
+    [
+        (
+            {"version": 1, "status": "complete", "reason": None},
+            "stop",
+            "summary",
+            True,
+            None,
+        ),
+        (
+            {"version": 1, "status": "incomplete", "reason": "unfinished_reasoning"},
+            "stop",
+            "misparsed reasoning",
+            False,
+            "unfinished_reasoning",
+        ),
+        (
+            {"version": 1, "status": "invalid", "reason": "malformed_tool_call"},
+            "stop",
+            "text",
+            False,
+            "malformed_tool_call",
+        ),
+        (
+            {"version": 1, "status": "complete", "reason": None},
+            "length",
+            "partial",
+            True,
+            "output_truncated",
+        ),
+        (
+            {"version": 1, "status": "complete", "reason": None},
+            "stop",
+            "",
+            True,
+            "missing_final_output",
+        ),
+        (None, "stop", "summary", False, None),
+        (None, "stop", "summary", True, "missing_completion_status"),
+        (None, "length", "partial", False, "output_truncated"),
+        (None, None, "summary", False, "non_final_termination"),
+        (
+            {"version": 1, "status": "unknown", "reason": "parser_unavailable"},
+            "stop",
+            "summary",
+            False,
+            None,
+        ),
+        (
+            {"version": 1, "status": "unknown", "reason": "parser_unavailable"},
+            "stop",
+            "summary",
+            True,
+            "parser_unavailable",
+        ),
+        (
+            {"version": 1, "status": "unknown", "reason": "unknown_termination"},
+            "stop",
+            "summary",
+            False,
+            "unknown_termination",
+        ),
+        (
+            {"version": 2, "status": "complete"},
+            "stop",
+            "summary",
+            False,
+            "unsupported_completion_metadata",
+        ),
+        (
+            {"version": True, "status": "complete"},
+            "stop",
+            "summary",
+            False,
+            "invalid_completion_metadata",
+        ),
+        (
+            {"version": 1, "status": []},
+            "stop",
+            "summary",
+            False,
+            "invalid_completion_metadata",
+        ),
+        ([], "stop", "summary", False, "invalid_completion_metadata"),
+    ],
+)
+def test_checkpoint_completion_contract(metadata, finish, text, strict, reason):
+    choice = SimpleNamespace(
+        vf_completion=metadata,
+        finish_reason=finish,
+        message=SimpleNamespace(content=text, tool_calls=None),
+    )
+    assert (
+        checkpoint_rejection_reason(choice, require_completion_status=strict) == reason
+    )
+
+
+@pytest.mark.parametrize("succeeds", [False, True])
+async def test_rejected_checkpoint_preserves_history_budget_and_edges(
+    session, succeeds
+):
+    bad = _response(
+        DummyMessage(content="unfinished reasoning"),
+        prompt_tokens=10,
+        completion_tokens=3,
+    )
+    bad.choices[0].vf_completion = {
+        "version": 1,
+        "status": "incomplete",
+        "reason": "unfinished_reasoning",
+    }
+    good = _response(
+        DummyMessage(content="validated summary"), prompt_tokens=10, completion_tokens=4
+    )
+    good.choices[0].vf_completion = {"version": 1, "status": "complete", "reason": None}
+    client = _ScriptedClient(
+        [
+            _response(DummyMessage(content="work")),
+            bad,
+            good if succeeds else bad,
+            *([_response(DummyMessage(content="resumed"))] if succeeds else []),
+        ]
+    )
+    config = _config(
+        max_compaction_attempts=2, require_compaction_completion_status=True
+    )
+    engine = RLMEngine(client=client, session=session, runtime_config=config)
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "original task"},
+        {"role": "assistant", "content": "work"},
+    ]
+    original = deepcopy(messages)
+    try:
+        await engine._call_model(messages)
+        if succeeds:
+            await engine._compact_branch(messages, turn=1)
+            assert len(session.messages) == 2
+            assert "validated summary" in session.messages[1]["content"]
+            assert "unfinished reasoning" not in session.messages[1]["content"]
+            await engine._call_model(session.messages)
+        else:
+            with pytest.raises(CompactionFailed):
+                await engine._compact_branch(messages, turn=1)
+            assert messages == original
+        assert engine._metrics.num_compaction_attempts == 2
+        assert engine._metrics.num_failed_compaction_attempts == (1 if succeeds else 2)
+        assert engine._own_new_tokens == (31 if succeeds else 28)
+        assert client.calls[1]["messages"] == client.calls[2]["messages"]
+        snapshot = engine.execution_snapshot()
+        edges = snapshot["semantic_edges"]["edges"]
+        assert sum(e["type"] == "compaction_attempt" for e in edges) == 2
+        assert sum(e["type"] == "compaction" for e in edges) == int(succeeds)
+        rejected_id = client.calls[1]["extra_headers"]["X-ACP-Model-Request-ID"]
+        assert not any(e["source_request_id"] == rejected_id for e in edges)
+        events = [
+            json.loads(line)
+            for line in (session.dir / "messages.jsonl").read_text().splitlines()
+        ]
+        assert snapshot["metrics"]["num_compaction_attempts"] == 2
+        assert snapshot["metrics"]["num_failed_compaction_attempts"] == (
+            1 if succeeds else 2
+        )
+        assert not any(
+            e["type"]
+            in {"checkpoint_request", "checkpoint_response", "compaction_attempt"}
+            for e in events
+        )
+        assert "unfinished reasoning" not in json.dumps(events)
+        assert sum(e["type"] == "compaction" for e in events) == int(succeeds)
+    finally:
+        engine.close()
+
+
+async def test_compaction_does_not_retry_after_spending_tree_budget(session):
+    client = _ScriptedClient(
+        [
+            _response(DummyMessage(content=None), prompt_tokens=2, completion_tokens=3),
+        ]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=_config(max_total_tokens=5)
+    )
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+    ]
+    original = deepcopy(messages)
+    try:
+        with pytest.raises(CompactionFailed, match="max_total_tokens"):
+            await engine._compact_branch(messages, turn=0)
+        assert messages == original
+        assert len(client.calls) == 1
+        assert engine._own_new_tokens == 5
+        assert engine._metrics.num_compaction_attempts == 1
+        assert engine._metrics.num_failed_compaction_attempts == 1
+    finally:
+        engine.close()

@@ -27,6 +27,7 @@ from rlm.compaction import (
     CompactionFailed,
     REPL_NOTE,
     SUMMARY_FRAMING,
+    checkpoint_rejection_reason,
     compactable,
     discover_threshold,
     estimated_tokens,
@@ -886,6 +887,9 @@ class RLMEngine:
             base = messages
             summary_text = ""
             for _ in range(self.max_compaction_attempts):
+                if cap := self._spent_tree_cap():
+                    raise CompactionFailed(f"{cap} reached before checkpoint attempt")
+                self._metrics.num_compaction_attempts += 1
                 checkpoint = [
                     *base,
                     {"role": "user", "content": checkpoint_prompt},
@@ -897,18 +901,23 @@ class RLMEngine:
                         compaction_id=compaction.compaction_id,
                     )
                 except APIStatusError as e:
+                    self._metrics.num_failed_compaction_attempts += 1
                     if not is_context_overflow(e):
                         raise
                     base = messages[: self._last_good]
                     continue
+                except BaseException:
+                    self._metrics.num_failed_compaction_attempts += 1
+                    raise
                 choice = response.choices[0]
-                message = choice.message
-                # Reasoning never enters the summary: only the reply's final text
-                # counts, so a reply that lives entirely in the reasoning channel
-                # is resampled like an empty one.
-                text = (message.content or "").strip()
-                if choice.finish_reason == "stop" and not message.tool_calls and text:
-                    summary_text = text
+                rejection = checkpoint_rejection_reason(
+                    choice,
+                    require_completion_status=self.runtime_config.policy.require_compaction_completion_status,
+                )
+                if rejection:
+                    self._metrics.num_failed_compaction_attempts += 1
+                if rejection is None:
+                    summary_text = choice.message.content.strip()
                     break
                 self._semantic_edges.release_summary_request(compaction.compaction_id)
             if not summary_text:
@@ -1017,6 +1026,7 @@ class RLMEngine:
                 "summarize_at_tokens": self.summarize_at_tokens,
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "max_compaction_attempts": self.max_compaction_attempts,
+                "require_compaction_completion_status": self.runtime_config.policy.require_compaction_completion_status,
                 "allow_git": self.runtime_config.policy.allow_git,
             },
             "semantic_edges": self._semantic_edges.snapshot(),
