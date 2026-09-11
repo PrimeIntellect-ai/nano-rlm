@@ -10,6 +10,15 @@ from rlm import broker
 
 
 @dataclass(frozen=True)
+class ShellResult:
+    text: str
+    exit_code: int | None
+    job_id: str
+    truncated: bool
+    error: str | None
+
+
+@dataclass(frozen=True)
 class JobInfo:
     id: str
     owner_id: str
@@ -58,13 +67,26 @@ class JobHandle:
         return JobInfo(**await broker.agent_request("shell.cancel", job_id=self.id))
 
 
-async def run(command: str, *, cwd: str | None = None) -> JobHandle:
+async def run(command: str, *, cwd: str | None = None) -> ShellResult:
+    """Wait for Bash and return combined output (up to 16 KiB) and its exit code.
+
+    Nonzero exit codes are returned; startup/capture failures populate error.
+    truncated indicates omitted output; get(result.job_id) can read more.
+    Cancelling the cell stops waiting, not the job; list() can recover its ID.
+    Both run() and start() publish completion events to the inbox.
+    """
+    return ShellResult(
+        **await broker.agent_request("shell.run", command=command, cwd=cwd)
+    )
+
+
+async def start(command: str, *, cwd: str | None = None) -> JobHandle:
     """Register a Bash job and return immediately. Defaults to the agent's cwd.
 
     Jobs survive cell completion. Completion posts an inbox event. No interactive
     stdin is provided; stdout and stderr share one captured stream.
     """
-    info = await broker.agent_request("shell.run", command=command, cwd=cwd)
+    info = await broker.agent_request("shell.start", command=command, cwd=cwd)
     return JobHandle(info["id"])
 
 

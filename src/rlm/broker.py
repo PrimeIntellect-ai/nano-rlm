@@ -117,7 +117,7 @@ class BrokerInboxReadRequest(TypedDict):
 
 class BrokerShellRunRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
-    op: Literal["shell.run"]
+    op: Literal["shell.run", "shell.start"]
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
     command: Annotated[str, Field(min_length=1, max_length=65_536)]

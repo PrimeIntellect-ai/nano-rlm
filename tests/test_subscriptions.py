@@ -110,7 +110,7 @@ child = await rlm.agent.spawn('initial', name='worker', persistent=True)
 await child.wait(timeout=10)
 activity = await rlm.watch.agent(child)
 files = await rlm.watch.path('watched')
-job = await rlm.shell.run('sleep 0.5; printf output; printf changed > watched/result')
+job = await rlm.shell.start('sleep 0.5; printf output; printf changed > watched/result')
 output = await rlm.watch.job(job)
 await child.send('continue')
 import os

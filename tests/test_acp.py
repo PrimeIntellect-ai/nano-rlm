@@ -777,7 +777,7 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
 
     prompt = client.calls[-1]["messages"][0]["content"]
     assert prompt.startswith("system\n\ntask-specific guidance")
-    assert "rlm.shell.run" in prompt
+    assert "rlm.shell.start" in prompt
     assert "Supervisor identity:" in prompt
     assert result.answer == "continued"
     assert len(repls) == 2
