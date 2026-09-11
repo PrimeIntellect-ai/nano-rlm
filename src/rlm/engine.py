@@ -403,7 +403,8 @@ class RLMEngine:
             try:
                 await self._supervisor.start()
                 broker_endpoint = self._supervisor.endpoint_for(self._invocation_id)
-                self._active_tool_schemas.append(WAIT_SCHEMA)
+                if any(tool.name == "ipython" for tool in self._active_tools):
+                    self._active_tool_schemas.append(WAIT_SCHEMA)
                 if self.mcp_servers or "search" in self.skills:
                     reserved_names = {"rlm", *local_skills, *discover_skills()}
                     brokered_skills = self._supervisor.write_brokered_skill_modules(
@@ -1164,9 +1165,7 @@ class RLMEngine:
         return snapshot
 
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
-        if self.system_prompt_path:
-            return Path(self.system_prompt_path).read_text()
-        system_prompt = build_system_prompt(
+        return build_system_prompt(
             self.cwd,
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
@@ -1176,10 +1175,14 @@ class RLMEngine:
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
+            task_instructions=Path(self.system_prompt_path).read_text()
+            if self.system_prompt_path
+            else None,
+            extra_instructions=self.append_to_system_prompt,
+            agent_info=self._supervisor.agent_context(self._invocation_id)
+            if self._supervisor
+            else None,
         )
-        if self.append_to_system_prompt:
-            system_prompt += "\n\n" + self.append_to_system_prompt
-        return system_prompt
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:
         return ToolContext(
