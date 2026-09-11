@@ -460,3 +460,12 @@ stops with a failure event when the inbox event limit is reached. There are no
 model-authored callbacks, event selectors, or output predicates.
 
 Activity subscriptions become `completed` after their target permanently terminates, flushing pending activity and releasing their active slot. Watches of idle persistent agents remain active. Watching an already-finished target returns a completed subscription.
+
+### Git history guard
+
+The runtime combines literal-command checks with a PATH-based Git launcher for
+IPython, native Bash, and supervisor-owned jobs. The launcher checks expanded
+arguments and Git aliases; normal Git operations remain available. This enforces
+the restricted `git log` policy on those paths, not filesystem isolation. See
+[Git guard scope and demonstrated bypasses](docs/git-guard.md) before relying on
+it to prevent access to repository history.

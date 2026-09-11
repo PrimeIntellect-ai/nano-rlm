@@ -1,15 +1,8 @@
-"""Restrict history-wide ``git log`` access at the tool-call level.
+"""Best-effort broad-history policy checks and a PATH-based Git execution guard.
 
-Ordinary git commands are allowed. The guard refuses ``git log`` invocations
-that ask for non-current-branch history, such as ``git log --all``. This keeps
-the agent's visibility close to current-branch history while preserving useful
-commands like ``git status`` and ``git diff``.
-
-- split a bash command on ``&&``, ``||``, ``;`` and ``|``
-- if a segment invokes ``git log`` with a restricted history flag, refuse
-
-Standalone execution can disable the guard with ``RLM_ALLOW_GIT=1``. Managed
-execution passes the resolved policy explicitly.
+The text checks provide early feedback. The execution guard checks expanded Git
+arguments and aliases. Neither is a security boundary against arbitrary code or
+filesystem access; see docs/git-guard.md for the precise scope and bypasses.
 """
 
 from __future__ import annotations
@@ -18,13 +11,16 @@ import ast
 import os
 import re
 import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 REFUSAL_TEMPLATE = (
     "Git history option '{cmd}' is not allowed. Use current-branch history only."
 )
 
-# Reuse the mini_swe_agent_plus separators verbatim so behavior matches.
-_SEPARATORS = re.compile(r"&&|\|\||;|\|")
 
 _RESTRICTED_LOG_OPTIONS = {
     "--all",
@@ -61,30 +57,69 @@ def _git_allowed(explicit: bool | None) -> bool:
 
 
 def find_blocked_command(command: str, *, allow_git: bool | None = None) -> str | None:
-    """Return the offending token if ``command`` asks for broad git history.
-
-    Splits on ``&&``, ``||``, ``;``, ``|`` so chained calls like
-    ``cd /repo && git log --all`` are caught. Returns ``None`` if nothing is
-    blocked or if the resolved policy allows unrestricted history.
-    """
+    """Check literal commands, shell boundaries, prefixes, and nested shell scripts."""
     if _git_allowed(allow_git):
         return None
-    for segment in _SEPARATORS.split(command):
-        blocked = find_blocked_git_log_option(_split_segment(segment))
-        if blocked is not None:
-            return blocked
+    lexer = shlex.shlex(
+        command.replace("\\\n", ""), posix=True, punctuation_chars=";&|()\n"
+    )
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    segment: list[str] = []
+    try:
+        for token in lexer:
+            if token and all(c in ";&|()\n" for c in token):
+                blocked = _check_shell_segment(segment)
+                if blocked:
+                    return blocked
+                segment = []
+            else:
+                segment.append(token)
+    except ValueError:
+        # Incomplete shell fragments are checked by the execution guard if run.
+        return _check_shell_segment(segment)
+    return _check_shell_segment(segment)
+
+
+def _check_shell_segment(argv: list[str]) -> str | None:
+    while argv:
+        name = argv[0].rsplit("/", 1)[-1]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]) or name in {
+            "if",
+            "then",
+            "elif",
+            "else",
+            "do",
+            "while",
+            "until",
+            "!",
+            "{",
+            "command",
+            "builtin",
+            "exec",
+            "time",
+            "env",
+            "nohup",
+        }:
+            argv = argv[1:]
+            if name in {"command", "exec", "env", "time"}:
+                while argv and argv[0].startswith("-"):
+                    option, *argv = argv
+                    if option in {"-u", "--unset", "-C", "--chdir", "-a"} and argv:
+                        argv = argv[1:]
+            continue
+        if name in {"bash", "sh", "zsh", "dash"}:
+            for i, option in enumerate(argv[1:], 1):
+                if option.startswith("-") and "c" in option and i + 1 < len(argv):
+                    return find_blocked_command(argv[i + 1], allow_git=False)
+                if not option.startswith("-"):
+                    break
+        return find_blocked_git_log_option(argv)
     return None
 
 
 def refusal(cmd: str) -> str:
     return REFUSAL_TEMPLATE.format(cmd=cmd)
-
-
-def _split_segment(segment: str) -> list[str]:
-    try:
-        return shlex.split(segment)
-    except ValueError:
-        return segment.strip().split()
 
 
 def _is_git_binary(token: str) -> bool:
@@ -109,6 +144,13 @@ def _skip_git_global_options(argv: list[str], index: int) -> int:
 
 def _is_restricted_log_option(token: str) -> bool:
     if token in _RESTRICTED_LOG_OPTIONS:
+        return True
+    option = token.split("=", 1)[0]
+    if option.startswith("--") and len(option) > 2:
+        restricted = _RESTRICTED_LOG_OPTIONS | set(_RESTRICTED_LOG_OPTION_PREFIXES)
+        if any(flag.startswith(option) for flag in restricted):
+            return True
+    if re.fullmatch(r"-[pug]+", token) and "g" in token:
         return True
     return any(
         token == option or token.startswith(f"{option}=")
@@ -163,16 +205,11 @@ def find_blocked_in_ipython(code: str, *, allow_git: bool | None = None) -> str 
         return None
 
     lines = code.splitlines()
-    in_bash_cell = False
-    for line in lines:
-        if in_bash_cell:
-            blocked = find_blocked_command(line, allow_git=allow_git)
-            if blocked is not None:
-                return blocked
-            continue
+    for index, line in enumerate(lines):
         if _SHELL_CELL_MAGIC_RE.match(line):
-            in_bash_cell = True
-            continue
+            return find_blocked_command(
+                "\n".join(lines[index + 1 :]), allow_git=allow_git
+            )
         m = _SHELL_ESCAPE_RE.match(line) or _SHELL_LINE_MAGIC_RE.match(line)
         if m:
             blocked = find_blocked_command(m.group("rest"), allow_git=allow_git)
@@ -333,3 +370,78 @@ def find_blocked_python(code: str, *, allow_git: bool | None = None) -> str | No
     finder = _GitCallFinder(allow_git)
     finder.visit(tree)
     return finder.found
+
+
+def guarded_git_environment(
+    env: dict[str, str], directory: Path, *, allow_git: bool | None = None
+) -> dict[str, str]:
+    """Put an argument-checking Git launcher first on PATH for this runtime."""
+    env = dict(env)
+    if _git_allowed(allow_git):
+        return env
+    real_git = shutil.which("git", path=env.get("PATH", os.defpath))
+    if real_git is None:
+        return env
+    if (Path(real_git).parent / ".rlm-git-guard").is_file():
+        return env
+    directory.mkdir(parents=True, exist_ok=True)
+    launcher = (
+        "#!/bin/sh\nexec "
+        + shlex.join([sys.executable, "-I", str(Path(__file__).resolve()), real_git])
+        + ' "$@"\n'
+    )
+    with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as stream:
+        stream.write(launcher)
+        temporary = Path(stream.name)
+    temporary.chmod(0o755)
+    temporary.replace(directory / "git")
+    (directory / ".rlm-git-guard").touch()
+    env["PATH"] = str(directory.resolve()) + os.pathsep + env.get("PATH", os.defpath)
+    return env
+
+
+def _check_git_execution(real_git: str, arguments: list[str]) -> str | None:
+    """Check expanded arguments and ordinary Git aliases before invoking Git."""
+    argv = [real_git, *arguments]
+    builtins = None
+    for _ in range(10):
+        blocked = find_blocked_git_log_option(argv)
+        if blocked:
+            return refusal(blocked)
+        index = _skip_git_global_options(argv, 1)
+        if index >= len(argv):
+            return None
+        command = argv[index]
+        if builtins is None:
+            result = subprocess.run(
+                [real_git, "--list-cmds=builtins"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            builtins = set(result.stdout.splitlines())
+        if command in builtins:
+            return None
+        config = subprocess.run(
+            [real_git, *argv[1:index], "config", "--get", "alias." + command],
+            capture_output=True,
+            text=True,
+        )
+        if config.returncode == 1:
+            return None
+        if config.returncode != 0:
+            return "Cannot validate Git alias: " + config.stderr.strip()
+        alias = config.stdout.strip()
+        if alias.startswith("!"):
+            return "Shell Git aliases are disabled by the history guard; run an explicit command."
+        argv = [real_git, *argv[1:index], *shlex.split(alias), *argv[index + 1 :]]
+    return "Git alias expansion exceeded the history guard limit."
+
+
+if __name__ == "__main__":
+    real_git, *arguments = sys.argv[1:]
+    error = _check_git_execution(real_git, arguments)
+    if error:
+        print(error, file=sys.stderr)
+        sys.exit(126)
+    os.execv(real_git, [real_git, *arguments])

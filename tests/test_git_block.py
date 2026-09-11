@@ -327,3 +327,180 @@ def test_ipython_tool_uses_explicit_execution_policy(monkeypatch):
             "description"
         ]
     )
+
+
+def test_shell_boundaries_and_literal_data():
+    blocked = [
+        "pwd\ngit log --all",
+        "pwd & git log --all",
+        "if git log --all; then :; fi",
+        "for x in one; do git log --all; done",
+        "(git log --all)",
+        "env X=1 git log --all",
+        "command git log --all",
+        "exec git log --all",
+        "bash -lc 'git log --all'",
+        "git log \\\n --all",
+        "git log --al",
+        "git log -pg",
+        "echo $(git log --all)",
+    ]
+    for command in blocked:
+        assert find_blocked_command(command, allow_git=False), command
+    for command in [
+        "echo 'git log --all'",
+        "printf '%s' 'x; git log --all'",
+        "git log -- --all",
+        "# git log --all\ngit status",
+    ]:
+        assert find_blocked_command(command, allow_git=False) is None, command
+
+
+def _private_git_repo(tmp_path):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        )
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.name", "Guard test")
+    git("config", "user.email", "guard@example.invalid")
+    git("config", "commit.gpgsign", "false")
+    (repo / "--all").write_text("ordinary file")
+    git("add", ".")
+    git("commit", "-qm", "ordinary commit")
+    git("checkout", "-qb", "hidden")
+    (repo / "hidden.txt").write_text("PRIVATE_HISTORY_SENTINEL")
+    git("add", ".")
+    git("commit", "-qm", "PRIVATE_HISTORY_SENTINEL")
+    git("checkout", "-q", "main")
+    return repo
+
+
+def test_execution_guard_expansion_aliases_and_normal_git(tmp_path):
+    import os
+    import shlex
+    import subprocess
+    import sys
+    from rlm.tools.git_block import guarded_git_environment
+
+    repo = _private_git_repo(tmp_path)
+    env = guarded_git_environment(dict(os.environ), tmp_path / "guard", allow_git=False)
+    blocked = [
+        "pwd\ngit log --all",
+        'g=git; option=--all; "$g" log "$option"',
+        "for x in one; do git log --all; done",
+        "env git log --all",
+        "bash -c 'git log --all'",
+        "printf '%s\\n' 'git log --all' | bash",
+        "git log $(printf -- --all)",
+        "git -c alias.rlm-test-history='log --all' rlm-test-history",
+        "git -c alias.rlm-test-history='!git log --all' rlm-test-history",
+        "git log --al",
+        "git log -pg",
+        shlex.join(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess; a=['g'+'it','log','--'+'all']; raise SystemExit(subprocess.call(a))",
+            ]
+        ),
+    ]
+    for command in blocked:
+        result = subprocess.run(
+            ["/bin/bash", "-c", command],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode != 0, command
+        assert "not allowed" in result.stderr or "disabled" in result.stderr, (
+            command,
+            result.stderr,
+        )
+        assert "PRIVATE_HISTORY_SENTINEL" not in result.stdout, command
+    allowed = [
+        "git status --short",
+        "git -c alias.status='log --all' status --short",
+        "git diff",
+        "git log --oneline",
+        "git log -- --all",
+        "git -c alias.rlm-test-history='log --oneline' rlm-test-history",
+        "git add -- --all",
+        "git commit --allow-empty -qm 'another ordinary commit'",
+    ]
+    for command in allowed:
+        result = subprocess.run(
+            ["/bin/bash", "-c", command],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, (command, result.stderr)
+        assert "PRIVATE_HISTORY_SENTINEL" not in result.stdout, command
+    # A trusted explicit opt-out does not install the wrapper.
+    assert guarded_git_environment(
+        dict(os.environ), tmp_path / "allowed", allow_git=True
+    ) == dict(os.environ)
+
+
+async def test_execution_guard_in_kernel_jobs_and_native_bash(tmp_path):
+    import json
+    from conftest import DummyClient, DummyMessage, DummyToolCall
+    from rlm.engine import RLMEngine
+    from rlm.session import Session
+    from rlm.tools.bash import run_bash
+    from test_supervisor import _config
+
+    repo = _private_git_repo(tmp_path)
+    command = 'g=git; flag=--all; "$g" log "$flag"'
+    assert "not allowed" in run_bash(command, 10, cwd=str(repo), allow_git=False)
+    session = Session(tmp_path / "session")
+    code = """
+import subprocess
+argv = ['g' + 'it', 'log', '--' + 'all']
+p = subprocess.run(argv, capture_output=True, text=True)
+assert p.returncode == 126 and 'not allowed' in p.stderr
+job = await rlm.shell.run('g=git; flag=--all; "$g" log "$flag"')
+"""
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})]),
+            DummyMessage(tool_calls=[DummyToolCall("wait", {"timeout": 10})]),
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": "assert (await job.info()).exit_code == 126; assert 'not allowed' in (await job.read()).text; print('GUARD_OK')"
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        cwd=str(repo),
+        runtime_config=_config(max_depth=0),
+    )
+    try:
+        await engine.prompt("exercise guarded commands")
+        records = [
+            json.loads(line)
+            for line in (session.dir / "messages.jsonl").read_text().splitlines()
+        ]
+        assert any(r.get("content", "").strip() == "GUARD_OK" for r in records)
+    finally:
+        await engine.aclose()

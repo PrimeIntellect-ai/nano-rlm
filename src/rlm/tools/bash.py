@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
-from rlm.tools.git_block import find_blocked_command, refusal
+from rlm.tools.git_block import find_blocked_command, guarded_git_environment, refusal
 
 BASH_SCHEMA = {
     "type": "function",
@@ -69,14 +71,18 @@ def run_bash(
     if blocked:
         return refusal(blocked)
     try:
-        proc = subprocess.run(
-            ["bash", "-c", command],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout,
-            cwd=cwd or None,
-        )
+        with TemporaryDirectory(prefix="rlm-git-") as directory:
+            proc = subprocess.run(
+                ["bash", "-c", command],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=timeout,
+                cwd=cwd or None,
+                env=guarded_git_environment(
+                    dict(os.environ), Path(directory), allow_git=allow_git
+                ),
+            )
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {timeout}s"
     out = proc.stdout + (("\n" + proc.stderr) if proc.stderr else "")
