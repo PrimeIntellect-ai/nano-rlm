@@ -75,13 +75,13 @@ async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch)
     client = DummyClient(
         [
             tool(
-                "job = await rlm.shell.run('sleep 0.2; [[ -z ${SHELL_TEST_PRIVATE_KEY+x} ]] || exit 90; values=(one two); [[ ${#values[@]} == 2 ]] && printf BASH_OK'); saved_id = job.id"
+                "job = await rlm.shell.start('sleep 0.2; [[ -z ${SHELL_TEST_PRIVATE_KEY+x} ]] || exit 90; values=(one two); [[ ${#values[@]} == 2 ]] && printf BASH_OK'); saved_id = job.id"
             ),
             tool(
                 "del job; job = await rlm.shell.get(saved_id); assert len(await rlm.shell.list()) == 1"
             ),
             DummyMessage(tool_calls=[DummyToolCall("wait", {"timeout": 5})]),
-            tool("""
+            tool(r"""
 events = await rlm.inbox.list()
 assert len(events) == 1
 event = await rlm.inbox.read(events[0]['id'])
@@ -92,12 +92,30 @@ output = await job.read()
 assert output.text == 'BASH_OK' and output.done
 assert (await job.read()).text == output.text
 try:
-    await rlm.shell.run('git log --all')
+    await rlm.shell.start('git log --all')
 except RuntimeError:
     pass
 else:
     raise AssertionError('Git policy was bypassed')
-await rlm.shell.run('sleep 30')
+result = await rlm.shell.run("values=(one two); printf '%s' \"${values[*]}\"; exit 7")
+assert result.text == 'one two' and result.exit_code == 7
+assert not result.truncated and result.error is None
+assert (await (await rlm.shell.get(result.job_id)).read()).text == result.text
+result = await rlm.shell.run("printf '%20000s' x")
+assert len(result.text) == 16384 and result.truncated
+failed = await rlm.shell.run('true', cwd='missing-directory')
+assert failed.exit_code is None and failed.error
+import asyncio
+waiting = asyncio.create_task(rlm.shell.run('sleep 30'))
+while len(await rlm.shell.list()) < 5:
+    await asyncio.sleep(0.01)
+waiting.cancel()
+try:
+    await waiting
+except asyncio.CancelledError:
+    pass
+jobs = await rlm.shell.list()
+assert jobs[-1].status in ('starting', 'running')
 print('SHELL_OK')
 """),
             DummyMessage(content="done"),
