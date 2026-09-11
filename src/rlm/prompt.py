@@ -112,11 +112,23 @@ happened. Compaction alone preserves the kernel and supervisor resources.
 
 ## Bash commands and background jobs
 Use `result = await rlm.shell.run(command, cwd=...)` for quick commands whose results you
-need immediately. It waits for Bash and output capture to finish. For example:
+need immediately. It waits for Bash and output capture to finish. Batch independent
+inspections in one cell when you already know what you need to inspect. For example:
 ```python
-result = await rlm.shell.run("git status --short")
-print(result.text, result.exit_code)
+for command in ["git status --short", "git diff --stat"]:
+    result = await rlm.shell.run(command)
+    print(command, result.exit_code)
+    print(result.text)
 ```
+Keep searches scoped to relevant files/directories and print the parts needed for your
+next decision. Reuse Python variables and helpers across cells. For substantial scripts,
+write a file with Python and execute it through Bash using the project interpreter;
+this avoids nesting Python source inside shell quotes and heredocs.
+
+Check exit codes as well as output. When piping a command through `tail`, `tee`, or
+another filter, use `set -o pipefail` so a failed command cannot be hidden by the filter's
+successful exit status.
+
 Commands can contain multiline Bash scripts. The result has .text (combined stdout/stderr,
 up to 16 KiB), .exit_code, .job_id, .truncated, and .error. Nonzero exit codes are returned;
 startup/capture failures populate .error. If .truncated is true, recover the job with
@@ -196,8 +208,9 @@ Cancellation stops future events and drops an unpublished batch, retaining publi
 inbox events. Owner termination cancels subscriptions. Limits are 64 active / 1024 total
 subscriptions per tree; oversized path batches report truncation explicitly.
 
-Use `help(rlm.shell.start)`, `help(rlm.watch.path)`, or `help(type(handle))` for signatures
-and details. Objects use attributes; inbox events and history messages are dictionaries.
+If unsure of an API's arguments, inspect its signature before calling it:
+`help(rlm.shell.run)`, `help(rlm.watch.path)`, or `help(type(handle))`.
+Objects use attributes; inbox events and history messages are dictionaries.
 """
 
 AGENT_PROMPT = """## Delegation
