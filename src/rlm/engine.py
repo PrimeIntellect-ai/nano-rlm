@@ -131,6 +131,13 @@ WAIT_SCHEMA = {
 }
 
 
+MAX_EMPTY_REPLY_NUDGES = 2
+EMPTY_REPLY_NUDGE = (
+    "Your last reply was empty (no text and no tool call). Continue the task: call a "
+    "tool, or state your final answer in plain text."
+)
+
+
 class RLMEngine:
     def __init__(
         self,
@@ -228,6 +235,7 @@ class RLMEngine:
         self._active_tools: list[BuiltinTool] = []
         self._active_tool_schemas: list[dict] = []
         self._turn = 0
+        self._empty_reply_nudges = 0
         self._last_answer = ""
         self._has_result = False
         self._started = False
@@ -620,9 +628,28 @@ class RLMEngine:
             if not msg.tool_calls:
                 if self._deliver_supervisor_input(include_queue=True, notify=False):
                     continue
+                # An empty, tool-less reply that stopped normally is almost always a
+                # glitch (the model meant to call a tool and the call was lost), not a
+                # deliberate final answer: nudge it to continue, a bounded number of
+                # times, before accepting the empty answer.
+                if (
+                    not (msg.content or "").strip()
+                    and response.choices[0].finish_reason == "stop"
+                    and self._empty_reply_nudges < MAX_EMPTY_REPLY_NUDGES
+                ):
+                    self._empty_reply_nudges += 1
+                    self.session.log(
+                        {
+                            "type": "empty_reply_nudge",
+                            "message": {"role": "user", "content": EMPTY_REPLY_NUDGE},
+                        },
+                        in_context=True,
+                    )
+                    continue
                 self._metrics.stop_reason = "done"
                 final_text = msg.content or ""
                 break
+            self._empty_reply_nudges = 0
 
             tc = msg.tool_calls[0]
             tool_name = tc.function.name

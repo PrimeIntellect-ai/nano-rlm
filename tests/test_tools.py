@@ -52,7 +52,7 @@ async def test_multiple_tool_calls(session):
                 DummyToolCall("add", {"a": 3, "b": 4}, id="call_1"),
             ]
         ),
-        DummyMessage(content=""),
+        DummyMessage(content="done"),
     ]
 
     client = DummyClient(messages)
