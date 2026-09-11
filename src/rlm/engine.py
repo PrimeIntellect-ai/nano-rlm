@@ -351,7 +351,12 @@ class RLMEngine:
         local_skills = [name for name in self.skills if name != "search"]
         enable_builtin_skills(local_skills, self.session.dir)
         broker_endpoint = None
-        if self.depth < self.max_depth or self.mcp_servers or "search" in self.skills:
+        if (
+            self._supervisor is not None
+            or self.depth < self.max_depth
+            or self.mcp_servers
+            or "search" in self.skills
+        ):
             if self._supervisor is None:
                 self._supervisor = SessionTreeSupervisor(
                     root_session=self.session,
@@ -393,7 +398,18 @@ class RLMEngine:
             allow_git=self.allow_git,
         )
         try:
-            self._repl.start()
+            startup = asyncio.create_task(asyncio.to_thread(self._repl.start))
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(startup)
+                    break
+                except asyncio.CancelledError:
+                    if startup.done():
+                        raise
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
 
             system_prompt = self._load_system_prompt(self._active_tools)
 
@@ -619,6 +635,10 @@ class RLMEngine:
 
     async def aclose(self) -> None:
         """Finalize artifacts and stop the complete recursive session tree."""
+        if self._close_task is not None and self._close_task.done():
+            if self._close_task.cancelled() or self._close_task.exception() is not None:
+                self._close_task = None
+                self._closed = False
         if self._closed and self._close_task is None:
             return
         if self._close_task is None:
@@ -663,35 +683,35 @@ class RLMEngine:
         self._close_local()
 
     def _close_local(self) -> None:
-        if self._repl is not None:
-            try:
+        try:
+            if self._repl is not None:
                 self._repl.shutdown()
-            except Exception:
-                logger.warning("rlm: failed to stop IPython kernel", exc_info=True)
-            self._repl = None
-        if self.session is not None:
-            if self._has_result:
-                direct_tool_stats = None
-                child_tool_stats = None
-                if self._supervisor is not None and self._invocation_id is not None:
-                    direct_tool_stats, child_tool_stats = (
-                        self._supervisor.programmatic_tool_call_stats(
-                            self._invocation_id
+                self._repl = None
+        finally:
+            if self.session is not None:
+                if self._has_result:
+                    direct_tool_stats = None
+                    child_tool_stats = None
+                    if self._supervisor is not None and self._invocation_id is not None:
+                        direct_tool_stats, child_tool_stats = (
+                            self._supervisor.programmatic_tool_call_stats(
+                                self._invocation_id
+                            )
                         )
+                    self.session.finalize(
+                        self._last_answer,
+                        usage={
+                            "prompt_tokens": self._total_usage.prompt_tokens,
+                            "completion_tokens": self._total_usage.completion_tokens,
+                        },
+                        turns=self._turn,
+                        metrics=self._metrics,
+                        trusted_direct_tool_stats=direct_tool_stats,
+                        trusted_child_tool_stats=child_tool_stats,
                     )
-                self.session.finalize(
-                    self._last_answer,
-                    usage={
-                        "prompt_tokens": self._total_usage.prompt_tokens,
-                        "completion_tokens": self._total_usage.completion_tokens,
-                    },
-                    turns=self._turn,
-                    metrics=self._metrics,
-                    trusted_direct_tool_stats=direct_tool_stats,
-                    trusted_child_tool_stats=child_tool_stats,
-                )
-            else:
-                self.session.close()
+                    self._has_result = False
+                else:
+                    self.session.close()
 
     def _programmatic_tool_call_stats(
         self,
