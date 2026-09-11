@@ -169,6 +169,15 @@ class IpythonTool:
         return sum(1 for line in code.splitlines() if line.strip())
 
 
+class _KernelDied(RuntimeError):
+    def __init__(self, output: str = ""):
+        self.output = output
+        super().__init__("IPython kernel exited")
+
+
+MAX_RECOVERY_ATTEMPTS = 3
+
+
 class IPythonREPL:
     """Persistent IPython kernel communicating via Jupyter protocol."""
 
@@ -196,6 +205,11 @@ class IPythonREPL:
         self._ipc_dir = None
         self._lock = threading.Lock()
         self._interrupt_requested = threading.Event()
+        self._scope_id: str | None = None
+        self._recovery_attempts = 0
+        self._recovery_failed = False
+        self._cell_submitted = False
+        self._recovery_notices: list[str] = []
 
     def start(self):
         """Start the IPython kernel."""
@@ -206,7 +220,7 @@ class IPythonREPL:
         # (macOS caps Unix socket paths at 104 bytes), hence a temp dir.
         self._ipc_dir = tempfile.mkdtemp(prefix="rlm-ipc-")
         self._km = KernelManager(
-            transport="ipc", ip=os.path.join(self._ipc_dir, "kernel")
+            transport="ipc", ip=os.path.join(self._ipc_dir, "kernel"), autorestart=False
         )
         self._km.kernel_spec.argv = [
             sys.executable,
@@ -328,16 +342,72 @@ import rlm
         self._execute_silent(setup_code)
 
     def set_broker_scope(self, scope_id: str | None) -> None:
-        """Set the active recursive-call scope inside the kernel."""
-        if self.broker_endpoint is not None:
-            self._execute_silent(f"_rlm_broker.set_scope({scope_id!r})")
+        """Set the scope to install when the next cell starts executing."""
+        self._scope_id = scope_id
 
-    def _execute_silent(self, code: str):
-        """Execute code without capturing output (for setup)."""
-        self._kc.execute(code, silent=True)
-        self._kc.get_shell_msg(timeout=30)
+    def take_recovery_notices(self) -> list[str]:
+        notices, self._recovery_notices = self._recovery_notices, []
+        return notices
 
-    def _wait_for_idle(self, timeout: float) -> bool:
+    def _execute_silent(self, code: str, *, interruptible: bool = False):
+        """Execute setup and verify the matching reply succeeded."""
+        if interruptible and self._interrupt_requested.is_set():
+            return
+        msg_id = self._kc.execute(code, silent=True)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if interruptible and self._interrupt_requested.is_set():
+                self._interrupt_and_recover(msg_id)
+                return
+            if not self._km.is_alive():
+                raise _KernelDied()
+            try:
+                reply = self._kc.get_shell_msg(timeout=0.1)
+            except Empty:
+                continue
+            if reply["parent_header"].get("msg_id") != msg_id:
+                continue
+            if reply["content"].get("status") != "ok":
+                raise RuntimeError(
+                    f"IPython setup failed: {reply['content'].get('ename', 'unknown error')}"
+                )
+            return
+        raise TimeoutError("IPython setup did not respond within 30 seconds")
+
+    def _recover(self, reason: str) -> bool:
+        self._recovery_failed = True
+        if self._recovery_attempts >= MAX_RECOVERY_ATTEMPTS:
+            self._recovery_notices.append(
+                "Supervisor: IPython is unavailable: the three-attempt recovery limit was reached. "
+                "The cell was not replayed. Conversation and supervisor-owned resources remain available."
+            )
+            return False
+        self._recovery_attempts += 1
+        try:
+            self.restart_kernel()
+        except Exception as exc:
+            self._recovery_notices.append(
+                f"Supervisor: IPython restart failed (attempt {self._recovery_attempts}/3): {type(exc).__name__}: {exc}. "
+                "The cell was not replayed. A later IPython call can retry within the recovery limit. "
+                "Conversation and supervisor-owned resources remain available."
+            )
+            return False
+        self._recovery_failed = False
+        self._recovery_notices.append(
+            f"Supervisor: Your IPython kernel {reason} and has been restarted. "
+            "Python variables, imports, and in-kernel tasks were lost. Your conversation, inbox, "
+            "agents, and shell jobs remain available. Recreate the variables you need and recover "
+            "handles through rlm.agent.list/get and rlm.shell.list/get. Inbox read state is unchanged. "
+            + (
+                "The interrupted cell may have produced partial side effects; it was not replayed. "
+                if self._cell_submitted
+                else "The requested cell was not submitted and produced no side effects. "
+            )
+            + "Inspect existing resources before retrying a spawn, send, or shell command."
+        )
+        return True
+
+    def _wait_for_idle(self, msg_id: str, timeout: float) -> bool:
         """Wait briefly for the kernel to report an idle state."""
         deadline = time.monotonic() + timeout
         while True:
@@ -349,7 +419,8 @@ import rlm
             except Empty:
                 return False
             if (
-                msg["msg_type"] == "status"
+                msg["parent_header"].get("msg_id") == msg_id
+                and msg["msg_type"] == "status"
                 and msg["content"].get("execution_state") == "idle"
             ):
                 return True
@@ -367,45 +438,77 @@ import rlm
     def interrupt(self):
         """Request interruption and recovery of a running cell."""
         self._interrupt_requested.set()
-        if self._km:
+        if self._km and self._km.is_alive():
             self._km.interrupt_kernel()
 
     def finish_interrupt(self):
         """Clear an interrupt after the execution worker has settled."""
         self._interrupt_requested.clear()
 
-    def _interrupt_and_recover(self):
-        """Interrupt the running cell and restart the kernel if needed."""
+    def _interrupt_and_recover(self, msg_id: str):
+        """Interrupt the cell; report any restart that loses Python state."""
+        if not self._km.is_alive():
+            self._recover("crashed")
+            return
         self._km.interrupt_kernel()
-        if not self._wait_for_idle(timeout=2):
-            self.restart_kernel()
+        if not self._wait_for_idle(msg_id, timeout=2):
+            self._recover("did not respond to interruption")
 
     def execute(self, code: str, timeout: int | None = None) -> str:
-        """Execute code and return combined output."""
+        """Execute once; a lost kernel is recovered without replaying the cell."""
         with self._lock:
+            self._cell_submitted = False
             try:
                 if self._interrupt_requested.is_set():
                     return ""
-                return self._execute_locked(code, timeout)
+                if self._recovery_failed or not self._km.is_alive():
+                    self._recover("was unavailable")
+                    return "[cell not executed: IPython was unavailable; see recovery notice]"
+                if self.broker_endpoint is not None:
+                    try:
+                        self._execute_silent(
+                            f"_rlm_broker.set_scope({self._scope_id!r})",
+                            interruptible=True,
+                        )
+                    except _KernelDied:
+                        raise
+                    except (TimeoutError, RuntimeError) as exc:
+                        self._recover(f"could not install its broker scope ({exc})")
+                        return "[cell not executed: broker setup failed; see recovery notice]"
+                if self._interrupt_requested.is_set():
+                    return ""
+                result = self._execute_locked(code, timeout)
+                if not self._recovery_notices:
+                    self._recovery_attempts = 0
+                return result
+            except _KernelDied as exc:
+                self._recover("crashed")
+                if not self._cell_submitted:
+                    return "[cell not executed: IPython exited during setup; see recovery notice]"
+                return exc.output + "\n[cell interrupted by kernel exit; not replayed]"
             finally:
                 self._interrupt_requested.clear()
 
     def _execute_locked(self, code: str, timeout: int | None) -> str:
-        msg_id = self._kc.execute(code)
+        client = self._kc
+        msg_id = client.execute(code)
+        self._cell_submitted = True
         deadline = None if timeout is None else time.monotonic() + timeout
 
         outputs: list[str] = []
         try:
             while True:
+                if not self._km.is_alive():
+                    raise _KernelDied("".join(outputs))
                 if self._interrupt_requested.is_set():
-                    self._interrupt_and_recover()
+                    self._interrupt_and_recover(msg_id)
                     break
                 if deadline is None:
                     wait_timeout = 0.1
                 else:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        self._interrupt_and_recover()
+                        self._interrupt_and_recover(msg_id)
                         outputs.append(
                             f"\n[execution timed out after {timeout}s and was interrupted]"
                         )
@@ -437,7 +540,8 @@ import rlm
         finally:
             try:
                 timeout = 0.1 if self._interrupt_requested.is_set() else 5
-                self._kc.get_shell_msg(timeout=timeout)
+                if self._kc is client and self._km.is_alive():
+                    client.get_shell_msg(timeout=timeout)
             except Exception:
                 pass
 
