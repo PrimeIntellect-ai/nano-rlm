@@ -39,7 +39,7 @@ class _Session:
     spawn_claimed: bool = False
     last_request_id: str | None = None
     pending_edges: list[_PendingEdge] = field(default_factory=list)
-    returned: bool = False
+    returned_request_id: str | None = None
 
 
 @dataclass
@@ -135,7 +135,9 @@ class SemanticEdgeTracker:
                 inbound.append(_PendingEdge(session.last_request_id, "continuation"))
 
         request_id = uuid.uuid4().hex
-        self._requests[request_id] = _Request(session_id, inbound, compaction_id)
+        self._requests[request_id] = _Request(
+            session_id, list(dict.fromkeys(inbound)), compaction_id
+        )
         if compaction_id is not None:
             compaction.summary_request_id = request_id
         return request_id
@@ -197,20 +199,34 @@ class SemanticEdgeTracker:
         session.last_request_id = summary_request_id
         session.pending_edges.append(_PendingEdge(summary_request_id, "compaction"))
 
-    def finish_subagent(self, session_id: str) -> None:
+    def last_request_id(self, session_id: str) -> str | None:
+        return self._sessions[session_id].last_request_id
+
+    def deliver_message(
+        self, session_id: str, source_request_id: str | None, *, edge_type: str
+    ) -> None:
+        if source_request_id is None:
+            return
+        edge = _PendingEdge(source_request_id, edge_type)
+        pending = self._sessions[session_id].pending_edges
+        if edge not in pending:
+            pending.append(edge)
+
+    def finish_subagent(
+        self, session_id: str, *, request_id: str | None = None
+    ) -> None:
         session = self._sessions[session_id]
-        if session.returned:
+        request_id = request_id or session.last_request_id
+        if request_id is None or session.returned_request_id == request_id:
             return
         if session.parent_session_id is None:
             raise ValueError("root session cannot return to a parent")
-        if session.last_request_id is None:
-            session.returned = True
-            return
-        parent = self._sessions[session.parent_session_id]
-        parent.pending_edges.append(
-            _PendingEdge(session.last_request_id, "subagent_return")
+        self.deliver_message(
+            session.parent_session_id,
+            request_id,
+            edge_type="subagent_return",
         )
-        session.returned = True
+        session.returned_request_id = request_id
 
     def snapshot(self) -> dict[str, list[dict[str, str]]]:
         return {"edges": [edge.copy() for edge in self._edges]}
