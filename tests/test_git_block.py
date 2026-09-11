@@ -470,7 +470,7 @@ import subprocess
 argv = ['g' + 'it', 'log', '--' + 'all']
 p = subprocess.run(argv, capture_output=True, text=True)
 assert p.returncode == 126 and 'not allowed' in p.stderr
-job = await rlm.shell.run('g=git; flag=--all; "$g" log "$flag"')
+job = await rlm.shell.start('g=git; flag=--all; "$g" log "$flag"')
 """
     client = DummyClient(
         [
