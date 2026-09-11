@@ -501,13 +501,18 @@ class SessionTreeSupervisor:
         return selected
 
     def inbox_notification(self, invocation_id: str) -> str | None:
+        """Announce inbox arrivals once: only events that arrived since the last
+        announcement produce a notification, so an unread-but-known event does not
+        nag on every subsequent turn (the count still reports the unread total)."""
         agent = self._invocations[invocation_id]
+        new = len(agent.inbox) - agent.announced
         agent.announced = len(agent.inbox)
+        if new <= 0:
+            return None
         count = sum(not event["read"] for event in agent.inbox)
         return (
-            f"Supervisor: Inbox: {count} unread events. Use rlm.inbox.list() and rlm.inbox.read(event_id) to inspect them."
-            if count
-            else None
+            f"Supervisor: Inbox: {new} new events ({count} unread). Use rlm.inbox.list() "
+            "and rlm.inbox.read(event_id) to inspect them."
         )
 
     async def wait_for_events(self, invocation_id: str, timeout: float) -> str:
