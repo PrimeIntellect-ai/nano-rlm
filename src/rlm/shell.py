@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+
 import builtins
 from dataclasses import dataclass
 from typing import Literal
@@ -17,6 +19,11 @@ class ShellResult:
     truncated: bool
     error: str | None
     timed_out: bool = False
+
+    @property
+    def ok(self) -> bool:
+        """True only when the command ran to completion and exited 0."""
+        return self.exit_code == 0 and not self.timed_out and self.error is None
 
     def __getattr__(self, name: str):
         # Frozen dataclass: only unknown attributes reach here. Point common
@@ -97,6 +104,15 @@ class JobHandle:
         return JobInfo(**await broker.agent_request("shell.cancel", job_id=self.id))
 
 
+def _command(command) -> str:
+    """Accept a Bash string or an argv list (joined with shell quoting)."""
+    if isinstance(command, str):
+        return command
+    if isinstance(command, (list, tuple)) and all(isinstance(c, str) for c in command):
+        return shlex.join(command)
+    raise TypeError("command must be a Bash string or a list of argv strings")
+
+
 def _timeout(timeout: float | None) -> float | None:
     if timeout is None:
         return None
@@ -108,7 +124,7 @@ def _timeout(timeout: float | None) -> float | None:
 
 
 async def run(
-    command: str, *, cwd: str | None = None, timeout: float | None = None
+    command: str | list[str], *, cwd: str | None = None, timeout: float | None = None
 ) -> ShellResult:
     """Wait for Bash and return combined output (up to 16 KiB) and its exit code.
 
@@ -121,13 +137,13 @@ async def run(
     """
     return ShellResult(
         **await broker.agent_request(
-            "shell.run", command=command, cwd=cwd, timeout=_timeout(timeout)
+            "shell.run", command=_command(command), cwd=cwd, timeout=_timeout(timeout)
         )
     )
 
 
 async def start(
-    command: str, *, cwd: str | None = None, timeout: float | None = None
+    command: str | list[str], *, cwd: str | None = None, timeout: float | None = None
 ) -> JobHandle:
     """Register a Bash job and return immediately. Defaults to the agent's cwd.
 
@@ -137,7 +153,7 @@ async def start(
     timed_out.
     """
     info = await broker.agent_request(
-        "shell.start", command=command, cwd=cwd, timeout=_timeout(timeout)
+        "shell.start", command=_command(command), cwd=cwd, timeout=_timeout(timeout)
     )
     return JobHandle(info["id"])
 
