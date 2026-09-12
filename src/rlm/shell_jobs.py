@@ -31,6 +31,7 @@ class ShellJob:
     started: float = field(default_factory=time.monotonic)
     finished: float | None = None
     cancel_requested: bool = False
+    timed_out: bool = False
     task: asyncio.Task | None = None
 
     def snapshot(self) -> dict:
@@ -62,6 +63,7 @@ class ShellJobs:
         directory: Path,
         env: dict[str, str],
         source_request_id: str | None,
+        timeout: float | None = None,
     ) -> dict:
         if len(self.jobs) >= MAX_JOBS:
             raise RuntimeError("shell job limit reached")
@@ -87,6 +89,7 @@ class ShellJobs:
                 output_complete=False,
                 output_truncated=False,
                 error=None,
+                timeout=timeout,
             ),
             source_request_id,
         )
@@ -178,6 +181,16 @@ class ShellJobs:
             with open(job.info.output_path, "ab", buffering=0) as output:
                 while True:
                     now = time.monotonic()
+                    if (
+                        job.info.timeout is not None
+                        and cancel_at is None
+                        and now - job.started >= job.info.timeout
+                    ):
+                        job.timed_out = True
+                        job.update(
+                            error=f"timed out after {job.info.timeout:g}s; process group killed"
+                        )
+                        job.cancel_requested = True
                     if job.cancel_requested and cancel_at is None:
                         self._signal(process, signal.SIGTERM)
                         cancel_at = now
@@ -208,9 +221,11 @@ class ShellJobs:
                             exit_at = now
                         if eof or now - exit_at >= DRAIN_SECONDS:
                             job.update(
-                                exit_code=code,
+                                exit_code=None if job.timed_out else code,
                                 output_complete=eof,
-                                status="cancelled"
+                                status="timed_out"
+                                if job.timed_out
+                                else "cancelled"
                                 if job.cancel_requested
                                 else "completed",
                                 output_truncated=job.info.output_truncated or not eof,

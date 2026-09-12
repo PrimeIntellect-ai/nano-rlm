@@ -111,10 +111,11 @@ an interrupted cell: file writes and accepted spawn/send/job requests may alread
 happened. Compaction alone preserves the kernel and supervisor resources.
 
 ## Bash commands and background jobs
-Use `result = await rlm.shell.run(command, cwd=...)` for quick commands whose results you
-need immediately. It waits for Bash and output capture to finish and returns a finished
-ShellResult with .text (combined stdout/stderr, up to 16 KiB), .exit_code, .truncated,
-.job_id, and .error. It is not a handle: there is no .read() or .info() on it;
+Use `result = await rlm.shell.run(command, cwd=..., timeout=...)` for quick commands whose
+results you need immediately. It waits for Bash and output capture to finish and returns a
+finished ShellResult with .text (combined stdout/stderr, up to 16 KiB), .exit_code,
+.truncated, .job_id, .error, and .timed_out. timeout is optional seconds; when exceeded the
+process group is killed, .timed_out is true, and .exit_code is None. It is not a handle: there is no .read() or .info() on it;
 `rlm.shell.start` is the call that returns a JobHandle. Look at the exit code before the
 text: a nonzero .exit_code means the command failed even if .text looks plausible. Batch
 independent inspections in one cell when you already know what you need to inspect:
@@ -151,7 +152,7 @@ result = await rlm.shell.run("python /tmp/repro.py", cwd="/workspace/project")
 ```
 Reuse Python variables and helpers across cells.
 
-Use `job = await rlm.shell.start(command, cwd=...)` for anything likely to take longer than
+Use `job = await rlm.shell.start(command, cwd=..., timeout=...)` for anything likely to take longer than
 about a minute (a full test suite, a build, an install) or for work you want to run
 alongside other tasks. It returns a JobHandle promptly, before completion; keep working or
 call native `wait`, then collect the result from the shell.completed inbox event described
@@ -162,10 +163,12 @@ Both calls run supervisor-owned Bash, with no stdin/PTY. Default cwd is this age
 working directory; relative cwd resolves against it. Cancelling a cell awaiting run()
 stops waiting but leaves the job running. Jobs survive kernel restarts; recover their IDs
 with shell.list(). Both calls publish shell.completed inbox events.
-`await rlm.shell.list()` returns JobInfo objects; `await rlm.shell.get(job_id)` recovers
-a handle. `job.id` is stable. `await job.info()` returns metadata with .status,
-.exit_code, .output_complete, .output_truncated, and .error. Status is starting, running, completed, failed, or cancelled. Nonzero exit codes are
-completed processes; failed means startup/capture failure. `await job.cancel()` stops
+`await rlm.shell.list()` returns JobInfo snapshots; each has `.handle()` and forwards
+`await item.info()/read()/cancel()`. `await rlm.shell.get(job_id)` recovers a handle.
+`job.id` is stable. `await job.info()` returns metadata with .status, .exit_code,
+.output_complete, .output_truncated, .timeout, and .error. Status is starting, running,
+completed, failed, cancelled, or timed_out. Nonzero exit codes are completed processes;
+failed means startup/capture failure; timed_out means the job's timeout killed it. `await job.cancel()` stops
 the process group. Owner termination cancels its jobs, including background descendants.
 Keep Bash alive until its work finishes; detached processes are outside this guarantee.
 

@@ -680,6 +680,7 @@ class SessionTreeSupervisor:
                 directory=parent.session.dir,
                 env=build_kernel_env(dict(parent.runtime_config.kernel_env)),
                 source_request_id=self._scopes[request["scope_id"]].request_id,
+                timeout=request.get("timeout"),
             )
             if op == "shell.start":
                 return info
@@ -692,6 +693,7 @@ class SessionTreeSupervisor:
                 "job_id": job.info.id,
                 "truncated": output["truncated"] or not output["done"],
                 "error": job.info.error,
+                "timed_out": job.info.status == "timed_out",
             }
         if op == "shell.list":
             return [

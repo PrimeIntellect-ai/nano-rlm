@@ -106,8 +106,23 @@ assert len(result.text) == 16384 and result.truncated
 failed = await rlm.shell.run('true', cwd='missing-directory')
 assert failed.exit_code is None and failed.error
 import asyncio
+listed = await rlm.shell.list()
+assert (await listed[-1].info()).id == listed[-1].id and listed[-1].handle().id == listed[-1].id
+timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)
+assert timed.timed_out and timed.exit_code is None and timed.text == 'partial'
+assert 'timed out' in timed.error
+timed_job = await rlm.shell.start('sleep 30', timeout=0.2)
+await asyncio.sleep(0.6)
+info = await timed_job.info()
+assert info.status == 'timed_out' and info.timeout == 0.2
+try:
+    await rlm.shell.run('true', timeout=-1)
+except ValueError:
+    pass
+else:
+    raise AssertionError('negative timeout accepted')
 waiting = asyncio.create_task(rlm.shell.run('sleep 30'))
-while len(await rlm.shell.list()) < 5:
+while len(await rlm.shell.list()) < 7:
     await asyncio.sleep(0.01)
 waiting.cancel()
 try:
@@ -231,3 +246,41 @@ async def test_job_metadata_failure_still_publishes_completion(tmp_path, monkeyp
     assert published[0]["status"] == "completed"
     assert "Metadata persistence failed" in published[0]["error"]
     assert jobs.read(job, 0, 1024)["text"] == "done"
+
+
+async def test_job_timeout_kills_process_group(tmp_path, monkeypatch):
+    monkeypatch.setattr("rlm.shell_jobs.DRAIN_SECONDS", 0.05)
+    events = []
+    jobs = ShellJobs(events.append)
+    try:
+        info = jobs.start(
+            owner_id="owner",
+            command="printf started; sleep 30 & sleep 30; printf never",
+            cwd=str(tmp_path),
+            directory=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+            source_request_id=None,
+            timeout=0.3,
+        )
+        job = jobs.get("owner", info["id"])
+        assert job.info.timeout == 0.3
+        await asyncio.wait_for(asyncio.shield(job.task), 5)
+        assert job.info.status == "timed_out"
+        assert job.info.exit_code is None
+        assert "timed out after 0.3s" in job.info.error
+        assert jobs.read(job, 0, 64)["text"] == "started"
+        assert len(events) == 1
+        untimed = jobs.start(
+            owner_id="owner",
+            command="printf ok",
+            cwd=str(tmp_path),
+            directory=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+            source_request_id=None,
+        )
+        untimed_job = jobs.get("owner", untimed["id"])
+        await asyncio.wait_for(asyncio.shield(untimed_job.task), 5)
+        assert untimed_job.info.status == "completed"
+        assert untimed_job.info.timeout is None
+    finally:
+        await jobs.close()

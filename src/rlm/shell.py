@@ -16,6 +16,7 @@ class ShellResult:
     job_id: str
     truncated: bool
     error: str | None
+    timed_out: bool = False
 
     def __getattr__(self, name: str):
         # Frozen dataclass: only unknown attributes reach here. Point common
@@ -41,7 +42,9 @@ class JobInfo:
     owner_id: str
     command: str
     cwd: str
-    status: Literal["starting", "running", "completed", "failed", "cancelled"]
+    status: Literal[
+        "starting", "running", "completed", "failed", "cancelled", "timed_out"
+    ]
     created_at: float
     elapsed_seconds: float
     exit_code: int | None
@@ -50,6 +53,20 @@ class JobInfo:
     output_complete: bool
     output_truncated: bool
     error: str | None
+    timeout: float | None = None
+
+    def handle(self) -> "JobHandle":
+        """The JobHandle for this job (records from shell.list() are snapshots)."""
+        return JobHandle(self.id)
+
+    async def info(self) -> "JobInfo":
+        return await self.handle().info()
+
+    async def read(self, *, cursor: int = 0, max_bytes: int = 16_384) -> "JobOutput":
+        return await self.handle().read(cursor=cursor, max_bytes=max_bytes)
+
+    async def cancel(self) -> "JobInfo":
+        return await self.handle().cancel()
 
 
 @dataclass(frozen=True)
@@ -84,26 +101,48 @@ class JobHandle:
         return JobInfo(**await broker.agent_request("shell.cancel", job_id=self.id))
 
 
-async def run(command: str, *, cwd: str | None = None) -> ShellResult:
+def _timeout(timeout: float | None) -> float | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError("timeout must be a number of seconds or None")
+    if timeout <= 0:
+        raise ValueError("timeout must be positive seconds")
+    return float(timeout)
+
+
+async def run(
+    command: str, *, cwd: str | None = None, timeout: float | None = None
+) -> ShellResult:
     """Wait for Bash and return combined output (up to 16 KiB) and its exit code.
 
     Nonzero exit codes are returned; startup/capture failures populate error.
     truncated indicates omitted output; get(result.job_id) can read more.
+    timeout (seconds) kills the whole process group when exceeded: the result then
+    has timed_out=True, exit_code None, and the output captured so far.
     Cancelling the cell stops waiting, not the job; list() can recover its ID.
     Both run() and start() publish completion events to the inbox.
     """
     return ShellResult(
-        **await broker.agent_request("shell.run", command=command, cwd=cwd)
+        **await broker.agent_request(
+            "shell.run", command=command, cwd=cwd, timeout=_timeout(timeout)
+        )
     )
 
 
-async def start(command: str, *, cwd: str | None = None) -> JobHandle:
+async def start(
+    command: str, *, cwd: str | None = None, timeout: float | None = None
+) -> JobHandle:
     """Register a Bash job and return immediately. Defaults to the agent's cwd.
 
     Jobs survive cell completion. Completion posts an inbox event. No interactive
-    stdin is provided; stdout and stderr share one captured stream.
+    stdin is provided; stdout and stderr share one captured stream. timeout
+    (seconds) kills the process group when exceeded; the job's status becomes
+    timed_out.
     """
-    info = await broker.agent_request("shell.start", command=command, cwd=cwd)
+    info = await broker.agent_request(
+        "shell.start", command=command, cwd=cwd, timeout=_timeout(timeout)
+    )
     return JobHandle(info["id"])
 
 
