@@ -88,7 +88,7 @@ async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch)
             tool(
                 "del job; job = await rlm.shell.get(saved_id); assert len(await rlm.shell.list()) == 1"
             ),
-            DummyMessage(tool_calls=[DummyToolCall("wait", {"timeout": 5})]),
+            DummyMessage(tool_calls=[DummyToolCall("wait", {"timeout": 400})]),  # clamped
             tool(r"""
 events = await rlm.inbox.list()
 assert len(events) == 1
@@ -187,6 +187,9 @@ print('SHELL_OK')
             r.get("content", "") for r in records if r.get("type") == "tool_result"
         ]
         assert any(t.strip() == "SHELL_OK" for t in tool_outputs), tool_outputs[-1][
+        assert any(
+            t.startswith("Note: wait timeout clamped from 400 to 300") for t in tool_outputs
+        )
             -1500:
         ]
     finally:
