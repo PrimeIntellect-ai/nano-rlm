@@ -351,7 +351,7 @@ result = await rlm.shell.run("git status --short")
 print(result.text, result.exit_code)
 ```
 
-`run(command, cwd=..., timeout=...)` returns `ok`, combined stdout/stderr `text` (up to
+`run(command, cwd=..., timeout=..., env=...)` returns `ok`, combined stdout/stderr `text` (up to
 16 KiB: the first and last 8 KiB around an omitted-range marker when longer), `exit_code`,
 `job_id`, `truncated`, `error`, and `timed_out`. The command is a Bash string or an argv
 list. Nonzero exit codes are returned; startup/capture errors populate `error`; an exceeded
@@ -359,7 +359,8 @@ list. Nonzero exit codes are returned; startup/capture errors populate `error`; 
 recover the job with `await rlm.shell.get(result.job_id)` to read more or inspect its
 metadata. Cancelling the waiting cell leaves the job running and discoverable with
 `shell.list()`. Both calls run Bash under the supervisor; only `start()` publishes a
-`shell.completed` inbox event. The kernel and Bash jobs inherit the launching process's environment
+`shell.completed` inbox event. `await rlm.shell.setenv(NAME='value')` sets variables for every later `run()`/`start()` of the
+agent (`getenv()` reads the overlay; per-call `env=` wins). The kernel and Bash jobs inherit the launching process's environment
 (in a sandbox, the image's ENV) minus a blocklist: credential-looking names, values with
 URL-embedded credentials, variables that would redirect the kernel's own interpreter or
 venv (PYTHONHOME, UV_PYTHON, ...), and agent/daemon sockets.
