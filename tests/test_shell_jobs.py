@@ -169,11 +169,8 @@ print('SHELL_OK')
             json.loads(line)
             for line in (session.dir / "messages.jsonl").read_text().splitlines()
         ]
-        assert any(
-            r.get("type") == "tool_result"
-            and r.get("content", "").strip() == "SHELL_OK"
-            for r in records
-        )
+        tool_outputs = [r.get("content", "") for r in records if r.get("type") == "tool_result"]
+        assert any(t.strip() == "SHELL_OK" for t in tool_outputs), tool_outputs[-1][-1500:]
     finally:
         supervisor = engine._supervisor
         await engine.aclose()
