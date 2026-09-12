@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import secrets
+import shlex
 import shutil
 import tempfile
 import time
@@ -42,6 +44,33 @@ from rlm.types import ProgrammaticToolCallStats, RLMResult
 # When a blocking run() detaches (see RUN_DETACH_SECONDS) the supervisor explains the
 # unusual result once per occurrence, at most MAX_LONG_RUN_NOTES times per agent.
 MAX_LONG_RUN_NOTES = 3
+# A `VAR=value cmd` prefix repeated this many times on one variable earns a hint that
+# rlm.shell.setenv() applies it to every later command (once per variable, tag env-prefix).
+ENV_PREFIX_HINT_AFTER = 3
+_ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+
+
+def _leading_env_assignments(command: str) -> list[tuple[str, str]]:
+    """`VAR=value` words that prefix the first simple command of a Bash string, after any
+    leading `cd dir &&` and an optional `env`; the model's way of setting PYTHONPATH per call."""
+    first = re.split(r"\s*(?:&&|\|\||;|\|)\s*", command.strip(), maxsplit=1)
+    segment = first[0]
+    if segment.startswith("cd ") and len(first) > 1:
+        segment = re.split(r"\s*(?:&&|\|\||;|\|)\s*", first[1].strip(), maxsplit=1)[0]
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        words = segment.split()
+    if words and words[0] == "env":
+        words = words[1:]
+    out: list[tuple[str, str]] = []
+    for word in words:
+        match = _ENV_ASSIGNMENT_RE.match(word)
+        if not match:
+            break
+        out.append((match.group(1), match.group(2)))
+    return out
+
 
 if TYPE_CHECKING:
     from rlm.engine import RLMEngine
@@ -80,6 +109,8 @@ class _Invocation:
     )  # (tag, text) for next turn
     muted_hints: set[str] = field(default_factory=set)  # rlm.hints.mute()
     long_run_notes: int = 0
+    env_prefixes: dict[str, int] = field(default_factory=dict)  # VAR -> prefix count
+    env_prefix_hinted: set[str] = field(default_factory=set)
     result_request_id: str | None = None
     engine: RLMEngine | None = None
     runner: asyncio.Task[None] | None = None
@@ -552,6 +583,22 @@ class SessionTreeSupervisor:
                 )
         return selected
 
+    def _note_env_prefixes(self, agent: _Invocation, command: str) -> None:
+        """Count `VAR=value` command prefixes; the ENV_PREFIX_HINT_AFTER-th use of one
+        variable earns a one-time hint pointing at rlm.shell.setenv()."""
+        for name, value in _leading_env_assignments(command):
+            count = agent.env_prefixes.get(name, 0) + 1
+            agent.env_prefixes[name] = count
+            if count == ENV_PREFIX_HINT_AFTER and name not in agent.env_prefix_hinted:
+                agent.env_prefix_hinted.add(name)
+                self._hint(
+                    agent,
+                    "env-prefix",
+                    f"`{name}=...` has prefixed {count} commands so far; "
+                    f"`await rlm.shell.setenv({name}={value!r})` applies it to every "
+                    "later run()/start(), and `env={...}` to one call.",
+                )
+
     @staticmethod
     def _hint(agent: _Invocation, tag: str, text: str) -> None:
         """Queue a tagged one-line hint for the agent's next turn unless the tag is muted."""
@@ -709,6 +756,7 @@ class SessionTreeSupervisor:
             )
             if blocked:
                 raise PermissionError(refusal(blocked))
+            self._note_env_prefixes(parent, command)
             cwd = Path(parent.cwd) / (request["cwd"] or ".")
             info = self._shell_jobs.start(
                 owner_id=parent.id,

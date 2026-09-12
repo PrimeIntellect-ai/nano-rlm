@@ -169,6 +169,8 @@ except ValueError:
     pass
 else:
     raise AssertionError('negative timeout accepted')
+for _ in range(4):
+    await rlm.shell.run('cd . && HINT_VAR=/tmp/x true')  # the third prefix earns one env-prefix hint
 before = len(await rlm.shell.list())
 waiting = asyncio.create_task(rlm.shell.run('sleep 30'))
 while len(await rlm.shell.list()) <= before:
@@ -216,6 +218,17 @@ print('SHELL_OK')
         assert hint_msgs, "detach hint never reached the model"
         assert 'rlm.hints.mute("run-detach")' in hint_msgs[0]
         assert len(set(hint_msgs)) == 1  # the second detach happened after mute()
+        env_hints = [
+            str(m.get("content", ""))
+            for call in client.calls
+            for m in call["messages"]
+            if m.get("role") == "user" and "HINT_VAR=" in str(m.get("content", ""))
+        ]
+        assert env_hints and "rlm.shell.setenv(HINT_VAR='/tmp/x')" in env_hints[0]
+        assert 'rlm.hints.mute("env-prefix")' in env_hints[0]
+        assert (
+            len(set(env_hints)) == 1
+        )  # hinted once per variable, not on the fourth use
     finally:
         supervisor = engine._supervisor
         await engine.aclose()
