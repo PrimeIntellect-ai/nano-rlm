@@ -1,5 +1,10 @@
 # AGENTS.md
 
+## Documentation
+
+- Architecture, concepts, user flows, and configuration reference live in [`docs/`](docs/README.md), with Mermaid diagrams grounded in `src/rlm/`.
+- Keep the diagrams in sync when changing the engine loop, tool registry, supervisor, or config schema.
+
 ## Writing code
 
 - **Minimal try/except**: let errors propagate — silent failures hide bugs. Only catch for intentional fault tolerance (retries, robustness).
