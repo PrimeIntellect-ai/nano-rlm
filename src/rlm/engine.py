@@ -668,14 +668,21 @@ class RLMEngine:
                     set(tool_args) - {"timeout"}
                     or isinstance(timeout, bool)
                     or not isinstance(timeout, (int, float))
-                    or not 0 <= timeout <= 300
+                    or timeout < 0
                 ):
                     tool_result = ToolOutcome(
                         content="Error: wait accepts timeout between 0 and 300 seconds."
                     )
                 else:
+                    # A longer wait is not an error: clamp to the 300 s ceiling and say
+                    # so, instead of costing the model a turn to learn the limit.
+                    note = ""
+                    if timeout > 300:
+                        note = f"Note: wait timeout clamped from {timeout:g} to 300 seconds.\n"
+                        timeout = 300
                     tool_result = ToolOutcome(
-                        content=await self._supervisor.wait_for_events(
+                        content=note
+                        + await self._supervisor.wait_for_events(
                             self._invocation_id, timeout
                         )
                     )
