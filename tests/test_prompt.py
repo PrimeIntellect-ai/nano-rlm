@@ -43,7 +43,7 @@ def test_git_history_guard_prompt_included_for_shell_tools():
     assert "Do not cheat" in prompt
     assert "online solutions or hints specific to this task" in prompt
     assert "other branches, tags, remotes" in prompt
-    assert "`--all`" in prompt
+    assert "`git log --all`" in prompt and "`clone`" in prompt
 
 
 def test_git_history_guard_prompt_omitted_when_unrestricted():
