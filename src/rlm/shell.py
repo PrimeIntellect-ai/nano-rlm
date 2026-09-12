@@ -108,7 +108,7 @@ def _command(command) -> str:
     """Accept a Bash string or an argv list (joined with shell quoting)."""
     if isinstance(command, str):
         return command
-    if isinstance(command, (list, tuple)) and all(isinstance(c, str) for c in command):
+    if isinstance(command, (builtins.list, tuple)) and all(isinstance(c, str) for c in command):
         return shlex.join(command)
     raise TypeError("command must be a Bash string or a list of argv strings")
 
