@@ -17,6 +17,23 @@ class ShellResult:
     truncated: bool
     error: str | None
 
+    def __getattr__(self, name: str):
+        # Frozen dataclass: only unknown attributes reach here. Point common
+        # JobHandle/subprocess habits at the right place instead of a bare error.
+        if name in ("read", "info", "cancel", "wait"):
+            raise AttributeError(
+                f"ShellResult has no {name}(); run() already finished. Use .text/"
+                ".exit_code, or `await rlm.shell.get(result.job_id)` for a JobHandle, "
+                "or rlm.shell.start() for background work."
+            )
+        if name in ("stdout", "stderr", "output"):
+            raise AttributeError(
+                f"ShellResult has no .{name}; stdout and stderr are combined in .text."
+            )
+        if name in ("returncode", "status"):
+            raise AttributeError(f"ShellResult has no .{name}; use .exit_code.")
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
 
 @dataclass(frozen=True)
 class JobInfo:
