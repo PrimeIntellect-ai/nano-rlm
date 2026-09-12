@@ -55,6 +55,11 @@ class JobInfo:
     error: str | None
     timeout: float | None = None
 
+    @property
+    def timed_out(self) -> bool:
+        """True when the job's timeout killed it (status == "timed_out")."""
+        return self.status == "timed_out"
+
     def handle(self) -> "JobHandle":
         """The JobHandle for this job; a JobInfo is a snapshot, not a handle."""
         return JobHandle(self.id)
