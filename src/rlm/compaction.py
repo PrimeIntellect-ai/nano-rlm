@@ -5,19 +5,21 @@ from typing import Any
 
 from openai import APIError, APIStatusError, AsyncOpenAI
 
-CHECKPOINT_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary another LLM can ACT on immediately to resume the task.
+CHECKPOINT_PROMPT = """Create a concise continuation summary for the current task.
+Preserve what is needed to resume accurately:
+- The user's objective, exact requirements, constraints, and unresolved decisions.
+- Completed work, evidence/results, important paths or sources, and remaining next steps.
+- Ongoing orchestration: child names/IDs, assignments and pending follow-ups; Bash job IDs,
+  commands and last-known outcomes; subscriptions/targets; unread or retrieved events still
+  requiring action; output cursors and useful history message/window references.
+- Any interrupted or uncertain operation and side effects that must be inspected before retrying.
 
-It MUST contain, as fenced code blocks (not prose):
-- The exact shell/test command(s) to reproduce and verify — copy-pasteable, with the real path and test filter
-- Any edit still to apply, as the concrete `await edit(path=..., old_str=..., new_str=...)` call
+Include runnable commands, test filters, or concrete edits when relevant and known.
+Use only APIs/tools actually available; do not invent edits, results, resource IDs, or state.
+Distinguish last-observed state from assumptions: background work may progress during compaction.
+If resources are no longer needed, note that they can be cancelled; do not imply they were cancelled.
 
-Then:
-- A NUMBERED list of remaining next steps
-- Current progress, key decisions, and constraints
-
-Be concise and concrete: prefer runnable commands over descriptions.
-
-Reply with the summary as plain text. Do not call any tools - summarize from the conversation as it stands."""
+Summarize from the existing conversation. Do not call tools. Reply with the summary as plain text."""
 
 REPL_NOTE = (
     "\n\nCompaction itself preserves the IPython kernel and supervisor-owned resources. "
@@ -28,12 +30,13 @@ REPL_NOTE = (
     "state before deciding whether to repeat work or wait."
 )
 
-SUMMARY_FRAMING = """Another language model started to solve this problem and produced \
-a summary of its thinking process. You also have access to the state of the tools that \
-were used by that language model. Use this to build on the work \
-that has already been done and avoid duplicating work. Here is \
-the summary produced by the other language model, use the \
-information in this summary to assist with your own analysis:"""
+SUMMARY_FRAMING = (
+    "The earlier conversation was compacted. The summary below preserves task progress, "
+    "constraints, and references for continuing. Compaction does not finish or restart "
+    "background work. Treat resource statuses as last-observed: refresh metadata and inbox "
+    "state with the available tools. Consult original history for exact instructions or "
+    "missing evidence, and do not duplicate work merely because its full conversation is absent."
+)
 
 RESERVE_TOKENS = 16_384
 """Compact when this many tokens remain below the model context window."""

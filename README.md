@@ -2,7 +2,7 @@
 
 A minimal CLI coding agent with a persistent IPython execution environment and optional recursive sub-agents. For a full-fledged coding agent built on the same RLM principles, see [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, shell commands via `!command`, and multi-line shell scripts via `%%bash`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
+By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, Bash commands via `rlm.shell.run`, and background jobs via `rlm.shell.start`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
 
 For convenience, rlm ships built-in *skills* that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via the contract's `builtin_tools`).
 
@@ -86,6 +86,24 @@ environment, search credential). Prompt configuration is role-aware: optional
 `leaf_append_to_system_prompt` (depth == max_depth) override `append_to_system_prompt`
 for sub-agents, each falling back to the next-more-general tier. Recursive children inherit the parent's configuration
 in-memory (`model_copy`); nothing is re-read from the process environment.
+
+`system_prompt_path` supplies task instructions in place of the default task role.
+The runtime guide is always appended, including when a custom prompt file is used.
+The role-appropriate append instructions are included between the task instructions
+and runtime guide. This keeps tool/API documentation and lifecycle rules available
+to root agents, persistent children, and leaves. Credentials are not included in
+agent identity metadata.
+
+The generated guide distinguishes Python state from supervisor-owned resources,
+shows inbox dictionaries versus handle/metadata objects, and explains waiting,
+completion, history recovery, jobs, and subscriptions. Delegation instructions are
+shown only when IPython and recursion are available. Tool descriptions follow the
+same shell execution guidance.
+
+Checkpoint prompts preserve task requirements, evidence, outstanding assignments,
+jobs, subscriptions, event actions, output cursors, and history references. Commands
+and edits are included only when relevant. Compaction thresholds, summary validation,
+and context retention policy are unchanged.
 
 The process environment configures only process infrastructure:
 
@@ -324,12 +342,34 @@ Agent execution status and cleanup are separate: `info.cleanup_error` reports fa
 
 `send()` and `steer()` return acceptance IDs, not processing acknowledgements. They reject instructions when the tree budget is already exhausted. If an accepted instruction cannot be delivered because the budget runs out or the child terminates, the supervisor records `instruction_failed` in the child's inbox journal and sends the parent an `agent.delivery_failed` event containing `agent_id`, `message_id`, and `reason`. Failed instructions are removed from the pending queue.
 
-### Background Bash jobs
+### Bash commands and background jobs
 
-Inside IPython, register a supervisor-owned Bash job and keep working:
+For quick commands, wait for the result in the current cell:
 
 ```python
-job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project")
+result = await rlm.shell.run("git status --short")
+print(result.text, result.exit_code)
+```
+
+`run(command, cwd=..., timeout=..., env=...)` returns `ok`, combined stdout/stderr `text` (up to
+16 KiB: the first and last 8 KiB around an omitted-range marker when longer), `exit_code`,
+`job_id`, `truncated`, `error`, and `timed_out`. The command is a Bash string or an argv
+list. Nonzero exit codes are returned; startup/capture errors populate `error`; an exceeded
+`timeout` (seconds) kills the process group and sets `timed_out`; a `run()` still going after 60 s
+returns early with `running=True` and partial text while the job continues in the background. If output is truncated,
+recover the job with `await rlm.shell.get(result.job_id)` to read more or inspect its
+metadata. Cancelling the waiting cell leaves the job running and discoverable with
+`shell.list()`. Both calls run Bash under the supervisor; only `start()` publishes a
+`shell.completed` inbox event. `await rlm.shell.setenv(NAME='value')` sets variables for every later `run()`/`start()` of the
+agent (`getenv()` reads the overlay; per-call `env=` wins). The kernel and Bash jobs inherit the launching process's environment
+(in a sandbox, the image's ENV) minus a blocklist: credential-looking names, values with
+URL-embedded credentials, variables that would redirect the kernel's own interpreter or
+venv (PYTHONHOME, UV_PYTHON, ...), and agent/daemon sockets.
+
+For long commands or work that should run alongside other tasks, use `start()`:
+
+```python
+job = await rlm.shell.start("uv run pytest tests/", cwd="/workspace/project")
 job_id = job.id
 await job.info()
 

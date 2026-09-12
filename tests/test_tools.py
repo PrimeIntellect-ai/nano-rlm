@@ -52,7 +52,7 @@ async def test_multiple_tool_calls(session):
                 DummyToolCall("add", {"a": 3, "b": 4}, id="call_1"),
             ]
         ),
-        DummyMessage(content=""),
+        DummyMessage(content="done"),
     ]
 
     client = DummyClient(messages)
@@ -116,7 +116,7 @@ def test_builtin_tools_selection():
         get_active_builtin_tools(names=["bogus"])
 
 
-def test_real_kernel_and_subprocess_receive_only_explicit_environment(
+def test_real_kernel_and_subprocess_receive_environment_minus_secrets(
     monkeypatch, session
 ):
     from jupyter_client import KernelManager
@@ -131,7 +131,9 @@ def test_real_kernel_and_subprocess_receive_only_explicit_environment(
         }
 
     monkeypatch.setattr(KernelManager, "__init__", init_with_host_kernel_environment)
-    monkeypatch.setenv("SUPERVISOR_ONLY", "hidden")
+    monkeypatch.setenv(
+        "AMBIENT_PLAIN", "inherited"
+    )  # non-secret ambient vars pass through
     monkeypatch.setenv("SERPER_API_KEY", "search-secret")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ambient-cloud-secret")
     repl = IPythonREPL(
@@ -143,9 +145,9 @@ def test_real_kernel_and_subprocess_receive_only_explicit_environment(
     code = f"""
 import os, subprocess
 child_env = subprocess.check_output(['env'], text=True)
-print(os.environ.get('TASK_VISIBLE'))
-print(all(name not in os.environ for name in ('SUPERVISOR_ONLY', 'SERPER_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'KERNELSPEC_SENTINEL', 'RLM_API_KEY')))
-print(all(f'{{name}}=' not in child_env for name in ('SUPERVISOR_ONLY', 'SERPER_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'KERNELSPEC_SENTINEL', 'RLM_API_KEY')))
+print(os.environ.get('TASK_VISIBLE'), os.environ.get('AMBIENT_PLAIN'))
+print(all(name not in os.environ for name in ('SERPER_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'KERNELSPEC_SENTINEL', 'RLM_API_KEY')))
+print(all(f'{{name}}=' not in child_env for name in ('SERPER_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'KERNELSPEC_SENTINEL', 'RLM_API_KEY')) and 'AMBIENT_PLAIN=inherited' in child_env)
 print(all(os.environ.get(name, '').startswith({repl._ipc_dir!r}) for name in ('IPYTHONDIR', 'JUPYTER_CONFIG_DIR', 'JUPYTER_DATA_DIR', 'JUPYTER_RUNTIME_DIR')))
 """
     try:
@@ -155,8 +157,8 @@ print(all(os.environ.get(name, '').startswith({repl._ipc_dir!r}) for name in ('I
     finally:
         repl.shutdown()
 
-    assert first.strip().splitlines() == ["yes", "True", "True", "True"]
-    assert second.strip().splitlines() == ["yes", "True", "True", "True"]
+    assert first.strip().splitlines() == ["yes inherited", "True", "True", "True"]
+    assert second.strip().splitlines() == ["yes inherited", "True", "True", "True"]
 
 
 def _tool_ctx(**overrides):

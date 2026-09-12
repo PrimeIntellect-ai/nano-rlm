@@ -22,6 +22,11 @@ MAX_ACTIVE_JOBS = 32
 MAX_JOBS = 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DRAIN_SECONDS = 2.0
+RUN_TEXT_BYTES = 16 * 1024  # run() returns at most this much: head + tail of the output
+# A blocking run() that has not finished after this many seconds returns early with
+# running=True and the partial output; the job carries on as a background job (it is one
+# already) and posts shell.completed when it ends. Nothing is killed unless timeout= was given.
+RUN_DETACH_SECONDS = 60.0
 
 
 @dataclass
@@ -31,6 +36,10 @@ class ShellJob:
     started: float = field(default_factory=time.monotonic)
     finished: float | None = None
     cancel_requested: bool = False
+    timed_out: bool = False  # set by the loop when the deadline fires; JobInfo.timed_out derives from status
+    notify: bool = (
+        True  # publish shell.completed to the owner's inbox (start(); not run())
+    )
     task: asyncio.Task | None = None
 
     def snapshot(self) -> dict:
@@ -62,6 +71,8 @@ class ShellJobs:
         directory: Path,
         env: dict[str, str],
         source_request_id: str | None,
+        timeout: float | None = None,
+        notify: bool = True,
     ) -> dict:
         if len(self.jobs) >= MAX_JOBS:
             raise RuntimeError("shell job limit reached")
@@ -87,8 +98,10 @@ class ShellJobs:
                 output_complete=False,
                 output_truncated=False,
                 error=None,
+                timeout=timeout,
             ),
             source_request_id,
+            notify=notify,
         )
         self.jobs[job_id] = job
         job.task = asyncio.create_task(self._run(job, env))
@@ -110,8 +123,11 @@ class ShellJobs:
         return job
 
     def read(self, job: ShellJob, cursor: int, max_bytes: int) -> dict:
-        if cursor > job.info.output_bytes:
-            raise ValueError("cursor is beyond captured output")
+        if cursor < 0:
+            raise ValueError("cursor must be >= 0")
+        # A cursor past the retained output is not an error: it returns an empty
+        # chunk positioned at the end, so "read until done" loops terminate.
+        cursor = min(cursor, job.info.output_bytes)
         with open(job.info.output_path, "rb") as stream:
             stream.seek(cursor)
             data = stream.read(max_bytes)
@@ -122,6 +138,27 @@ class ShellJobs:
             and cursor + len(data) == job.info.output_bytes,
             "truncated": job.info.output_truncated,
         }
+
+    def run_text(self, job: ShellJob) -> dict:
+        """Text for a finished run(): the whole output when it fits RUN_TEXT_BYTES,
+        otherwise its first and last halves around an explicit gap marker (test
+        runners put the failure at the top and the summary at the bottom)."""
+        total = job.info.output_bytes
+        if total <= RUN_TEXT_BYTES:
+            chunk = self.read(job, 0, RUN_TEXT_BYTES)
+            return {
+                "text": chunk["text"],
+                "truncated": chunk["truncated"] or not chunk["done"],
+            }
+        half = RUN_TEXT_BYTES // 2
+        head = self.read(job, 0, half)["text"]
+        tail = self.read(job, total - half, half)["text"]
+        omitted = total - 2 * half
+        marker = (
+            f"\n[... {omitted} bytes omitted; output is retained up to 16 MiB: "
+            f"job = await rlm.shell.get(result.job_id); await job.read(cursor={half}) ...]\n"
+        )
+        return {"text": head + marker + tail, "truncated": True}
 
     async def cancel(self, job: ShellJob) -> dict:
         job.cancel_requested = True
@@ -162,7 +199,17 @@ class ShellJobs:
                 job.update(status="cancelled", output_complete=True)
                 return
             process = subprocess.Popen(
-                ["/bin/bash", "--noprofile", "--norc", "-c", job.info.command],
+                [
+                    "/bin/bash",
+                    "--noprofile",
+                    "--norc",
+                    # pipefail: a pipeline's exit code is its first failing stage, so
+                    # `pytest ... | tail -20` cannot report the tail's 0 for a failed run
+                    "-o",
+                    "pipefail",
+                    "-c",
+                    job.info.command,
+                ],
                 cwd=job.info.cwd,
                 env=env,
                 stdin=subprocess.DEVNULL,
@@ -178,6 +225,21 @@ class ShellJobs:
             with open(job.info.output_path, "ab", buffering=0) as output:
                 while True:
                     now = time.monotonic()
+                    # Poll before judging the deadline: a process that already exited
+                    # keeps its real status and exit code even if the deadline passed.
+                    code = process.poll()
+                    if (
+                        code is None
+                        and job.info.timeout is not None
+                        and cancel_at is None
+                        and not job.cancel_requested
+                        and now - job.started >= job.info.timeout
+                    ):
+                        job.timed_out = True
+                        job.update(
+                            error=f"timed out after {job.info.timeout:g}s; process group killed"
+                        )
+                        job.cancel_requested = True
                     if job.cancel_requested and cancel_at is None:
                         self._signal(process, signal.SIGTERM)
                         cancel_at = now
@@ -202,15 +264,18 @@ class ShellJobs:
                             )
                             if retained and self.output is not None:
                                 self.output(job, job.info.output_bytes - len(retained))
-                    code = process.poll()
+                    if code is None:
+                        code = process.poll()
                     if code is not None:
                         if exit_at is None:
                             exit_at = now
                         if eof or now - exit_at >= DRAIN_SECONDS:
                             job.update(
-                                exit_code=code,
+                                exit_code=None if job.timed_out else code,
                                 output_complete=eof,
-                                status="cancelled"
+                                status="timed_out"
+                                if job.timed_out
+                                else "cancelled"
                                 if job.cancel_requested
                                 else "completed",
                                 output_truncated=job.info.output_truncated or not eof,

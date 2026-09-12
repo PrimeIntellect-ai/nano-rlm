@@ -757,6 +757,7 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
         invocation=InvocationContext(),
         policy=ExecutionPolicy(max_depth=1),
         system_prompt_path=str(system_prompt),
+        append_to_system_prompt="task-specific guidance",
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
@@ -774,6 +775,10 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
     result = await engine.prompt("retry")
     await engine.aclose()
 
+    prompt = client.calls[-1]["messages"][0]["content"]
+    assert prompt.startswith("system\n\ntask-specific guidance")
+    assert "rlm.shell.start" in prompt
+    assert "Supervisor identity:" in prompt
     assert result.answer == "continued"
     assert len(repls) == 2
     assert repls[1].stopped is True

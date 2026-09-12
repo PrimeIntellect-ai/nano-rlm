@@ -31,13 +31,17 @@ from rlm.mcp import (
     MCPToolDescriptor,
     write_skill_modules,
 )
-from rlm.shell_jobs import ShellJob, ShellJobs
+from rlm.shell_jobs import RUN_DETACH_SECONDS, RUN_TEXT_BYTES, ShellJob, ShellJobs
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
 from rlm.types import ProgrammaticToolCallStats, RLMResult
+
+# When a blocking run() detaches (see RUN_DETACH_SECONDS) the supervisor explains the
+# unusual result once per occurrence, at most MAX_LONG_RUN_NOTES times per agent.
+MAX_LONG_RUN_NOTES = 3
 
 if TYPE_CHECKING:
     from rlm.engine import RLMEngine
@@ -70,6 +74,12 @@ class _Invocation:
     cleanup_error: str | None = None
     released: bool = False
     result: RLMResult | None = None
+    shell_env: dict[str, str] = field(default_factory=dict)  # rlm.shell.setenv overlay
+    notes: list[tuple[str, str]] = field(
+        default_factory=list
+    )  # (tag, text) for next turn
+    muted_hints: set[str] = field(default_factory=set)  # rlm.hints.mute()
+    long_run_notes: int = 0
     result_request_id: str | None = None
     engine: RLMEngine | None = None
     runner: asyncio.Task[None] | None = None
@@ -334,6 +344,16 @@ class SessionTreeSupervisor:
                 return agent
         raise PermissionError("agent is not a direct child of the caller")
 
+    def agent_context(self, invocation_id: str) -> dict[str, Any]:
+        """Runtime identity for this agent's prompt, without broker credentials."""
+        agent = self._invocations[invocation_id]
+        return {
+            "id": agent.id,
+            "parent_id": agent.parent_id,
+            "name": agent.name,
+            "persistent": agent.persistent,
+        }
+
     def _info(self, agent: _Invocation) -> dict[str, Any]:
         return {
             "id": agent.id,
@@ -532,11 +552,25 @@ class SessionTreeSupervisor:
                 )
         return selected
 
+    @staticmethod
+    def _hint(agent: _Invocation, tag: str, text: str) -> None:
+        """Queue a tagged one-line hint for the agent's next turn unless the tag is muted."""
+        if tag in agent.muted_hints:
+            return
+        agent.notes.append(
+            (tag, f'{text} (Mute this hint with await rlm.hints.mute("{tag}").)')
+        )
+
     def inbox_notification(self, invocation_id: str) -> str | None:
         agent = self._invocations[invocation_id]
         agent.announced = len(agent.inbox)
         count = sum(not event["read"] for event in agent.inbox)
         notices = []
+        if agent.notes:
+            notices.extend(
+                text for tag, text in agent.notes if tag not in agent.muted_hints
+            )
+            agent.notes.clear()
         if agent.inbox_error:
             notices.append(agent.inbox_error)
         if count:
@@ -632,7 +666,7 @@ class SessionTreeSupervisor:
     def _publish_job(self, job: ShellJob) -> None:
         self._subscriptions.finish("job", job.info.id)
         owner = self._invocations[job.info.owner_id]
-        if self._closed or owner.capability not in self._capabilities:
+        if self._closed or owner.capability not in self._capabilities or not job.notify:
             return
         self._publish(
             owner,
@@ -653,7 +687,20 @@ class SessionTreeSupervisor:
 
     async def _shell_operation(self, parent: _Invocation, request: dict) -> Any:
         op = request["op"]
-        if op == "shell.run":
+        if op == "shell.setenv":
+            variables = request.get("variables") or {}
+            if any(
+                not k or "=" in k or "\0" in k or "\0" in v
+                for k, v in variables.items()
+            ):
+                raise ValueError(
+                    "environment variable names must be non-empty without '='"
+                )
+            parent.shell_env.update(variables)
+            return dict(parent.shell_env)
+        if op == "shell.getenv":
+            return dict(parent.shell_env)
+        if op in ("shell.run", "shell.start"):
             command = request["command"]
             if not command.strip():
                 raise ValueError("empty command")
@@ -663,14 +710,67 @@ class SessionTreeSupervisor:
             if blocked:
                 raise PermissionError(refusal(blocked))
             cwd = Path(parent.cwd) / (request["cwd"] or ".")
-            return self._shell_jobs.start(
+            info = self._shell_jobs.start(
                 owner_id=parent.id,
                 command=command,
                 cwd=str(cwd.resolve()),
                 directory=parent.session.dir,
-                env=build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                env={
+                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                    **parent.shell_env,
+                    **(request.get("env") or {}),
+                },
                 source_request_id=self._scopes[request["scope_id"]].request_id,
+                timeout=request.get("timeout"),
+                # run() hands its result back synchronously; an inbox event on top only
+                # makes the agent drain notifications it has already consumed.
+                notify=op == "shell.start",
             )
+            if op == "shell.start":
+                return info
+            job = self._shell_jobs.get(parent.id, info["id"])
+            try:
+                await asyncio.wait_for(asyncio.shield(job.task), RUN_DETACH_SECONDS)
+            except asyncio.TimeoutError:
+                # Detach instead of blocking or killing: the job is already a supervisor
+                # job, so it simply continues as if start() had been called, and its
+                # completion now posts a shell.completed event like any background job.
+                job.notify = True
+                partial = self._shell_jobs.read(job, 0, RUN_TEXT_BYTES)
+                marker = (
+                    f"[still running after {RUN_DETACH_SECONDS:g} s: job {job.info.id} continues "
+                    "in the background; its completion arrives as a shell.completed inbox "
+                    "event; rlm.shell.get(result.job_id) reads more output or cancels it]\n"
+                )
+                if parent.long_run_notes < MAX_LONG_RUN_NOTES:
+                    parent.long_run_notes += 1
+                    self._hint(
+                        parent,
+                        "run-detach",
+                        f"rlm.shell.run() detached after {RUN_DETACH_SECONDS:g} s: the command is "
+                        "still running as a background job. Commands that long belong in "
+                        "rlm.shell.start(); keep working and collect the result from the "
+                        "shell.completed inbox event.",
+                    )
+                return {
+                    "text": marker + partial["text"],
+                    "exit_code": None,
+                    "job_id": job.info.id,
+                    "truncated": True,
+                    "error": None,
+                    "timed_out": False,
+                    "running": True,
+                }
+            output = self._shell_jobs.run_text(job)
+            return {
+                "text": output["text"],
+                "exit_code": job.info.exit_code,
+                "job_id": job.info.id,
+                "truncated": output["truncated"],
+                "error": job.info.error,
+                "timed_out": job.info.status == "timed_out",
+                "running": False,
+            }
         if op == "shell.list":
             return [
                 job.snapshot()
@@ -691,6 +791,13 @@ class SessionTreeSupervisor:
             return await self._watch_operation(parent, request)
         if op.startswith("shell."):
             return await self._shell_operation(parent, request)
+        if op.startswith("hints."):
+            tags = set(request.get("tags") or [])
+            if op == "hints.mute":
+                parent.muted_hints |= tags
+            elif op == "hints.unmute":
+                parent.muted_hints -= tags
+            return {"muted": sorted(parent.muted_hints)}
         if op == "inbox.list":
             return [
                 {

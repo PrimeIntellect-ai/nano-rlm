@@ -117,11 +117,29 @@ class BrokerInboxReadRequest(TypedDict):
 
 class BrokerShellRunRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
-    op: Literal["shell.run"]
+    op: Literal["shell.run", "shell.start"]
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
     command: Annotated[str, Field(min_length=1, max_length=65_536)]
     cwd: str | None
+    timeout: Annotated[float, Field(gt=0)] | None
+    env: dict[str, str] | None
+
+
+class BrokerShellEnvRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["shell.setenv", "shell.getenv"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    variables: dict[str, str] | None
+
+
+class BrokerHintsRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["hints.mute", "hints.unmute", "hints.muted"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    tags: list[Annotated[str, Field(min_length=1, max_length=64)]]
 
 
 class BrokerShellListRequest(TypedDict):
@@ -212,6 +230,8 @@ BrokerRequest = Annotated[
     | BrokerShellRunRequest
     | BrokerShellListRequest
     | BrokerShellHandleRequest
+    | BrokerShellEnvRequest
+    | BrokerHintsRequest
     | BrokerShellReadRequest
     | BrokerWatchAgentRequest
     | BrokerWatchJobRequest

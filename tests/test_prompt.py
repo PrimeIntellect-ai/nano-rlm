@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from rlm.prompt import (
     EDIT_SKILL_PROMPT,
     GIT_HISTORY_GUARD_PROMPT,
@@ -41,7 +43,7 @@ def test_git_history_guard_prompt_included_for_shell_tools():
     assert "Do not cheat" in prompt
     assert "online solutions or hints specific to this task" in prompt
     assert "other branches, tags, remotes" in prompt
-    assert "`--all`" in prompt
+    assert "`git log --all`" in prompt and "`clone`" in prompt
 
 
 def test_git_history_guard_prompt_omitted_when_unrestricted():
@@ -56,7 +58,8 @@ def test_ipython_control_prompt_included_for_ipython_tool():
     prompt = _prompt([_Tool("ipython")])
 
     assert IPYTHON_CONTROL_PROMPT in prompt
-    assert "await rlm.shell.run(command, cwd=...)" in prompt
+    assert "await rlm.shell.start(command, cwd=..., timeout=...)" in prompt
+    assert "await rlm.shell.run(command, cwd=..., timeout=...)" in prompt
     assert "project's interpreter" in prompt
 
 
@@ -98,3 +101,73 @@ def test_prompt_only_advertises_actual_shell_skills():
 
     assert "Shell-enabled installed skills: `uploaded`" in prompt
     assert "Other listed skills are IPython-only" in prompt
+
+
+def test_runtime_guidance_matches_agent_capabilities():
+    leaf = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        depth=1,
+        allow_recursion=False,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+        agent_info={
+            "id": "leaf",
+            "parent_id": "root",
+            "name": "researcher",
+            "persistent": True,
+        },
+    )
+    assert "rlm.agent.send_to_parent(message)" in leaf
+    assert "rlm.agent.spawn(" not in leaf
+    assert "rlm.watch.agent(" not in leaf
+    assert "become idle" in leaf
+    assert '"parent_id": "root"' in leaf
+    assert "rlm.shell.start" in leaf
+
+    native = build_system_prompt(
+        "/repo",
+        None,
+        ["search"],
+        allow_recursion=True,
+        allow_git=False,
+        active_tools=[_Tool("bash")],
+    )
+    assert "rlm.agent.spawn(" not in native
+    assert "rlm.shell.start" not in native
+    assert "await search" not in native
+    assert "native bash tool" in native
+    assert GIT_HISTORY_GUARD_PROMPT in native
+
+    root = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        allow_recursion=True,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+    )
+    assert "rlm.agent.spawn(" in root
+    assert "rlm.watch.agent(" in root
+    assert "You have no parent" in root
+
+
+@pytest.mark.parametrize("tool", ["add", "ipython"])
+async def test_wait_registration_matches_runtime_capability(session, tool):
+    from conftest import DummyClient, DummyMessage, make_runtime_config
+    from rlm.engine import RLMEngine
+
+    engine = RLMEngine(
+        client=DummyClient([DummyMessage(content="done")]),
+        session=session,
+        runtime_config=make_runtime_config(builtin_tools=(tool,)),
+    )
+    try:
+        await engine.prompt("task")
+        registered = {
+            schema["function"]["name"] for schema in engine._active_tool_schemas
+        }
+        assert ("wait" in registered) == (tool == "ipython")
+    finally:
+        await engine.aclose()

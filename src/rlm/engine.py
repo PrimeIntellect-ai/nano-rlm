@@ -131,6 +131,13 @@ WAIT_SCHEMA = {
 }
 
 
+MAX_EMPTY_REPLY_NUDGES = 2
+EMPTY_REPLY_NUDGE = (
+    "Your last reply was empty (no text and no tool call). Continue the task: call a "
+    "tool, or state your final answer in plain text."
+)
+
+
 class RLMEngine:
     def __init__(
         self,
@@ -228,6 +235,7 @@ class RLMEngine:
         self._active_tools: list[BuiltinTool] = []
         self._active_tool_schemas: list[dict] = []
         self._turn = 0
+        self._empty_reply_nudges = 0
         self._last_answer = ""
         self._has_result = False
         self._started = False
@@ -263,6 +271,7 @@ class RLMEngine:
         """Run one user turn while preserving conversation and kernel state."""
         if self._closed or self._close_task is not None:
             raise RuntimeError("RLM engine is closed")
+        self._empty_reply_nudges = 0  # the nudge budget is per user turn
 
         if self.session is not None:
             self.session.check_writable()
@@ -403,7 +412,8 @@ class RLMEngine:
             try:
                 await self._supervisor.start()
                 broker_endpoint = self._supervisor.endpoint_for(self._invocation_id)
-                self._active_tool_schemas.append(WAIT_SCHEMA)
+                if any(tool.name == "ipython" for tool in self._active_tools):
+                    self._active_tool_schemas.append(WAIT_SCHEMA)
                 if self.mcp_servers or "search" in self.skills:
                     reserved_names = {"rlm", *local_skills, *discover_skills()}
                     brokered_skills = self._supervisor.write_brokered_skill_modules(
@@ -620,9 +630,32 @@ class RLMEngine:
             if not msg.tool_calls:
                 if self._deliver_supervisor_input(include_queue=True, notify=False):
                     continue
+                # An empty, tool-less reply that stopped normally is almost always a
+                # glitch (the model meant to call a tool and the call was lost), not a
+                # deliberate final answer: nudge it to continue, a bounded number of
+                # times, before accepting the empty answer.
+                if (
+                    not (msg.content or "").strip()
+                    # a lost tool call surfaces as "stop", as "tool_calls" with an
+                    # empty list, or with no finish reason at all; "length" is a
+                    # different failure handled by compaction
+                    and response.choices[0].finish_reason
+                    in (None, "stop", "tool_calls")
+                    and self._empty_reply_nudges < MAX_EMPTY_REPLY_NUDGES
+                ):
+                    self._empty_reply_nudges += 1
+                    self.session.log(
+                        {
+                            "type": "empty_reply_nudge",
+                            "message": {"role": "user", "content": EMPTY_REPLY_NUDGE},
+                        },
+                        in_context=True,
+                    )
+                    continue
                 self._metrics.stop_reason = "done"
                 final_text = msg.content or ""
                 break
+            self._empty_reply_nudges = 0
 
             tc = msg.tool_calls[0]
             tool_name = tc.function.name
@@ -635,14 +668,21 @@ class RLMEngine:
                     set(tool_args) - {"timeout"}
                     or isinstance(timeout, bool)
                     or not isinstance(timeout, (int, float))
-                    or not 0 <= timeout <= 300
+                    or timeout < 0
                 ):
                     tool_result = ToolOutcome(
                         content="Error: wait accepts timeout between 0 and 300 seconds."
                     )
                 else:
+                    # A longer wait is not an error: clamp to the 300 s ceiling and say
+                    # so, instead of costing the model a turn to learn the limit.
+                    note = ""
+                    if timeout > 300:
+                        note = f"Note: wait timeout clamped from {timeout:g} to 300 seconds.\n"
+                        timeout = 300
                     tool_result = ToolOutcome(
-                        content=await self._supervisor.wait_for_events(
+                        content=note
+                        + await self._supervisor.wait_for_events(
                             self._invocation_id, timeout
                         )
                     )
@@ -1164,9 +1204,7 @@ class RLMEngine:
         return snapshot
 
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
-        if self.system_prompt_path:
-            return Path(self.system_prompt_path).read_text()
-        system_prompt = build_system_prompt(
+        return build_system_prompt(
             self.cwd,
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
@@ -1176,10 +1214,14 @@ class RLMEngine:
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
+            task_instructions=Path(self.system_prompt_path).read_text()
+            if self.system_prompt_path
+            else None,
+            extra_instructions=self.append_to_system_prompt,
+            agent_info=self._supervisor.agent_context(self._invocation_id)
+            if self._supervisor
+            else None,
         )
-        if self.append_to_system_prompt:
-            system_prompt += "\n\n" + self.append_to_system_prompt
-        return system_prompt
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:
         return ToolContext(

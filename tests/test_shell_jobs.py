@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 import pytest
 
@@ -43,6 +44,12 @@ async def test_bash_capture_limits_failure_and_cleanup(tmp_path, monkeypatch):
             "done": True,
             "truncated": True,
         }
+        assert jobs.read(job, 99, 4) == {
+            "text": "",
+            "next_cursor": 8,
+            "done": True,
+            "truncated": True,
+        }
         with pytest.raises(PermissionError):
             jobs.get("another-agent", job.info.id)
         failed = start("true", tmp_path / "missing")
@@ -68,6 +75,7 @@ async def test_bash_capture_limits_failure_and_cleanup(tmp_path, monkeypatch):
 
 async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch):
     monkeypatch.setenv("SHELL_TEST_PRIVATE_KEY", "must-not-leak")
+    monkeypatch.setattr("rlm.supervisor.RUN_DETACH_SECONDS", 0.5)
 
     def tool(code):
         return DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})])
@@ -75,13 +83,15 @@ async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch)
     client = DummyClient(
         [
             tool(
-                "job = await rlm.shell.run('sleep 0.2; [[ -z ${SHELL_TEST_PRIVATE_KEY+x} ]] || exit 90; values=(one two); [[ ${#values[@]} == 2 ]] && printf BASH_OK'); saved_id = job.id"
+                "job = await rlm.shell.start('sleep 0.2; [[ -z ${SHELL_TEST_PRIVATE_KEY+x} ]] || exit 90; values=(one two); [[ ${#values[@]} == 2 ]] && printf BASH_OK'); saved_id = job.id"
             ),
             tool(
                 "del job; job = await rlm.shell.get(saved_id); assert len(await rlm.shell.list()) == 1"
             ),
-            DummyMessage(tool_calls=[DummyToolCall("wait", {"timeout": 5})]),
-            tool("""
+            DummyMessage(
+                tool_calls=[DummyToolCall("wait", {"timeout": 400})]
+            ),  # clamped
+            tool(r"""
 events = await rlm.inbox.list()
 assert len(events) == 1
 event = await rlm.inbox.read(events[0]['id'])
@@ -92,12 +102,84 @@ output = await job.read()
 assert output.text == 'BASH_OK' and output.done
 assert (await job.read()).text == output.text
 try:
-    await rlm.shell.run('git log --all')
+    await rlm.shell.start('git log --all')
 except RuntimeError:
     pass
 else:
     raise AssertionError('Git policy was bypassed')
-await rlm.shell.run('sleep 30')
+result = await rlm.shell.run("values=(one two); printf '%s' \"${values[*]}\"; exit 7")
+assert result.text == 'one two' and result.exit_code == 7 and not result.ok
+argv = await rlm.shell.run(['printf', '%s %s', 'a b', 'c'])
+assert (await rlm.shell.getenv()) == {}
+overlay = await rlm.shell.setenv(STUDY_PERSIST='1')
+assert overlay == {'STUDY_PERSIST': '1'} and (await rlm.shell.getenv()) == overlay
+envres = await rlm.shell.run('printf "%s-%s" "$STUDY_PERSIST" "$PER_CALL"', env={'PER_CALL': '2'})
+assert envres.ok and envres.text == '1-2'
+assert (await rlm.shell.run('printf "%s" "$PER_CALL"')).text == ''
+piped = await rlm.shell.run('(printf out; exit 3) | tail -1')
+assert piped.exit_code == 3 and piped.text == 'out' and not piped.ok  # pipefail on
+assert argv.ok and argv.text == 'a b c'
+for bad in (['ls', 3], []):
+    try:
+        await rlm.shell.run(bad)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError(f'bad argv accepted: {bad!r}')
+assert not result.truncated and result.error is None
+assert (await (await rlm.shell.get(result.job_id)).read()).text == result.text
+result = await rlm.shell.run("printf '%20000s' x")
+assert result.truncated and result.text.endswith('x') and 'bytes omitted' in result.text
+assert result.text.startswith(' ' * 8192) and len(result.text) < 16384 + 200
+job = await rlm.shell.get(result.job_id)
+past = await job.read(cursor=10**6)
+assert past.text == '' and past.done and past.next_cursor == 20000
+big = await job.read(cursor=0, max_bytes=10**6)
+assert len(big.text.encode()) == 20000 and big.done  # max_bytes clamped to 64 KiB, output is 20000 bytes
+failed = await rlm.shell.run('true', cwd='missing-directory')
+assert failed.exit_code is None and failed.error
+assert not [e for e in await rlm.inbox.list() if e['type'] == 'shell.completed'], 'run() must not post inbox events'
+import asyncio
+listed = await rlm.shell.list()
+assert listed[-1].handle().id == listed[-1].id and not hasattr(listed[-1], 'read')
+assert (await listed[-1].handle().info()).id == listed[-1].id
+detached = await rlm.shell.run('printf server; sleep 30')  # no timeout=: detaches after RUN_DETACH_SECONDS
+assert detached.running and not detached.ok and detached.exit_code is None and not detached.timed_out
+assert detached.text.startswith('[still running after') and detached.text.endswith('server')
+bg = await rlm.shell.get(detached.job_id)
+assert (await bg.info()).status == 'running'
+await bg.cancel()
+assert (await bg.info()).status == 'cancelled'
+assert (await rlm.hints.muted()) == []
+assert (await rlm.hints.mute('run-detach')) == ['run-detach']
+muted_run = await rlm.shell.run('sleep 30')  # detaches again, but the hint is muted now
+assert muted_run.running
+await (await rlm.shell.get(muted_run.job_id)).cancel()
+assert (await rlm.hints.unmute('run-detach')) == []
+timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)
+assert timed.timed_out and timed.exit_code is None and timed.text == 'partial'
+assert 'timed out' in timed.error
+timed_job = await rlm.shell.start('sleep 30', timeout=0.2)
+await asyncio.sleep(0.6)
+info = await timed_job.info()
+assert info.status == 'timed_out' and info.timeout == 0.2 and info.timed_out
+try:
+    await rlm.shell.run('true', timeout=-1)
+except ValueError:
+    pass
+else:
+    raise AssertionError('negative timeout accepted')
+before = len(await rlm.shell.list())
+waiting = asyncio.create_task(rlm.shell.run('sleep 30'))
+while len(await rlm.shell.list()) <= before:
+    await asyncio.sleep(0.01)
+waiting.cancel()
+try:
+    await waiting
+except asyncio.CancelledError:
+    pass
+jobs = await rlm.shell.list()
+assert jobs[-1].status in ('starting', 'running')
 print('SHELL_OK')
 """),
             DummyMessage(content="done"),
@@ -115,11 +197,25 @@ print('SHELL_OK')
             json.loads(line)
             for line in (session.dir / "messages.jsonl").read_text().splitlines()
         ]
+        tool_outputs = [
+            r.get("content", "") for r in records if r.get("type") == "tool_result"
+        ]
+        assert any(t.strip() == "SHELL_OK" for t in tool_outputs), tool_outputs[-1][
+            -1500:
+        ]
         assert any(
-            r.get("type") == "tool_result"
-            and r.get("content", "").strip() == "SHELL_OK"
-            for r in records
+            t.startswith("Note: wait timeout clamped from 400 to 300")
+            for t in tool_outputs
         )
+        hint_msgs = [
+            str(m.get("content", ""))
+            for call in client.calls
+            for m in call["messages"]
+            if m.get("role") == "user" and "detached after" in str(m.get("content", ""))
+        ]
+        assert hint_msgs, "detach hint never reached the model"
+        assert 'rlm.hints.mute("run-detach")' in hint_msgs[0]
+        assert len(set(hint_msgs)) == 1  # the second detach happened after mute()
     finally:
         supervisor = engine._supervisor
         await engine.aclose()
@@ -213,3 +309,75 @@ async def test_job_metadata_failure_still_publishes_completion(tmp_path, monkeyp
     assert published[0]["status"] == "completed"
     assert "Metadata persistence failed" in published[0]["error"]
     assert jobs.read(job, 0, 1024)["text"] == "done"
+
+
+async def test_job_timeout_kills_process_group(tmp_path, monkeypatch):
+    monkeypatch.setattr("rlm.shell_jobs.DRAIN_SECONDS", 0.05)
+    events = []
+    jobs = ShellJobs(events.append)
+    try:
+        info = jobs.start(
+            owner_id="owner",
+            command="printf started; sleep 30 & sleep 30; printf never",
+            cwd=str(tmp_path),
+            directory=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+            source_request_id=None,
+            timeout=0.3,
+        )
+        job = jobs.get("owner", info["id"])
+        assert job.info.timeout == 0.3
+        await asyncio.wait_for(asyncio.shield(job.task), 5)
+        assert job.info.status == "timed_out"
+        assert job.info.exit_code is None
+        assert "timed out after 0.3s" in job.info.error
+        assert jobs.read(job, 0, 64)["text"] == "started"
+        assert len(events) == 1
+        untimed = jobs.start(
+            owner_id="owner",
+            command="printf ok",
+            cwd=str(tmp_path),
+            directory=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+            source_request_id=None,
+        )
+        untimed_job = jobs.get("owner", untimed["id"])
+        await asyncio.wait_for(asyncio.shield(untimed_job.task), 5)
+        assert untimed_job.info.status == "completed"
+        assert untimed_job.info.timeout is None
+    finally:
+        await jobs.close()
+
+
+async def test_job_that_exited_before_the_deadline_tick_keeps_its_exit_code(
+    tmp_path, monkeypatch
+):
+    """Regression: the deadline check must not relabel an already-exited process."""
+    monkeypatch.setattr("rlm.shell_jobs.DRAIN_SECONDS", 0.05)
+    real_popen = subprocess.Popen
+
+    def exited_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        process.wait(5)  # the process is finished before the loop's first tick
+        return process
+
+    monkeypatch.setattr("rlm.shell_jobs.subprocess.Popen", exited_popen)
+    jobs = ShellJobs(lambda job: None)
+    try:
+        info = jobs.start(
+            owner_id="owner",
+            command="printf done; exit 3",
+            cwd=str(tmp_path),
+            directory=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+            source_request_id=None,
+            timeout=1e-6,  # already expired when the loop first looks at it
+        )
+        job = jobs.get("owner", info["id"])
+        await asyncio.wait_for(asyncio.shield(job.task), 5)
+        assert job.info.status == "completed"
+        assert job.info.exit_code == 3
+        assert job.info.error is None
+        assert jobs.read(job, 0, 64)["text"] == "done"
+    finally:
+        await jobs.close()
