@@ -117,7 +117,7 @@ assert 'timed out' in timed.error
 timed_job = await rlm.shell.start('sleep 30', timeout=0.2)
 await asyncio.sleep(0.6)
 info = await timed_job.info()
-assert info.status == 'timed_out' and info.timeout == 0.2
+assert info.status == 'timed_out' and info.timeout == 0.2 and info.timed_out
 try:
     await rlm.shell.run('true', timeout=-1)
 except ValueError:

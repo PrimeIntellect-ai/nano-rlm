@@ -167,7 +167,7 @@ result directly and posts nothing to the inbox.
 `await rlm.shell.list()` returns JobInfo snapshots, not handles; `item.handle()` or
 `await rlm.shell.get(job_id)` gives the JobHandle for reading or cancelling.
 `job.id` is stable. `await job.info()` returns metadata with .status, .exit_code,
-.output_complete, .output_truncated, .timeout, and .error. Status is starting, running,
+.output_complete, .output_truncated, .timeout, .timed_out, and .error. Status is starting, running,
 completed, failed, cancelled, or timed_out. Nonzero exit codes are completed processes;
 failed means startup/capture failure; timed_out means the job's timeout killed it. `await job.cancel()` stops
 the process group. Owner termination cancels its jobs, including background descendants.
