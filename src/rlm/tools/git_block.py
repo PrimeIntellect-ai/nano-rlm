@@ -44,7 +44,26 @@ _BLOCKED_SUBCOMMANDS = {
     "tag",
     "bundle",
     "fsck",
+    # object-store enumeration: with refs removed, dangling upstream commits are still
+    # discoverable this way (seen in the wild as `cat-file --batch-all-objects`)
+    "count-objects",
+    "verify-pack",
+    "unpack-objects",
+    "pack-refs",
+    "prune",
+    "gc",
+    "repack",
 }
+_BLOCKED_OPTION_ANYWHERE = {
+    "--batch-all-objects",
+    "--lost-found",
+    "--dangling",
+    "--unreachable",
+}
+# Reading the repository's internals directly is the same leak by another route.
+_GIT_INTERNALS_RE = re.compile(
+    r"\.git/(objects|packed-refs|refs|logs|ORIG_HEAD|FETCH_HEAD|lost-found|info/refs)"
+)
 # `git branch` is fine for the current branch but not for listing others.
 _BLOCKED_BRANCH_OPTIONS = {
     "-a",
@@ -144,6 +163,9 @@ def find_blocked_command(command: str, *, allow_git: bool | None = None) -> str 
                 blocked = find_blocked_command(argv[i + 1], allow_git=False)
                 if blocked is not None:
                     return blocked
+    internals = _GIT_INTERNALS_RE.search(command)
+    if internals:
+        return internals.group(0)
     for segment in _SEPARATORS.split(command):
         blocked = find_blocked_git_log_option(_split_segment(segment))
         if blocked is not None:
@@ -212,6 +234,9 @@ def find_blocked_git_log_option(argv: list[str]) -> str | None:
     rest = argv[subcommand_index + 1 :]
     if subcommand in _BLOCKED_SUBCOMMANDS:
         return subcommand
+    for token in rest:
+        if token.split("=", 1)[0] in _BLOCKED_OPTION_ANYWHERE:
+            return token
     if subcommand == "branch":
         for token in rest:
             if token == "--":
@@ -224,7 +249,10 @@ def find_blocked_git_log_option(argv: list[str]) -> str | None:
     for token in rest:
         if token == "--":
             return None
-        if subcommand == "log" and _is_restricted_log_option(token):
+        # history-wide options (--all, --branches=..., --reflog, -g, ...) are refused on
+        # every history subcommand, not only on `log`: `rev-list --objects --all` and
+        # `show --all` reach the same commits
+        if _is_restricted_log_option(token):
             return token
         if _REMOTE_REF_RE.match(token):
             return token
