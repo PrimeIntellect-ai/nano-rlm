@@ -22,6 +22,7 @@ MAX_ACTIVE_JOBS = 32
 MAX_JOBS = 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DRAIN_SECONDS = 2.0
+RUN_TEXT_BYTES = 16 * 1024  # run() returns at most this much: head + tail of the output
 
 
 @dataclass
@@ -116,8 +117,11 @@ class ShellJobs:
         return job
 
     def read(self, job: ShellJob, cursor: int, max_bytes: int) -> dict:
-        if cursor > job.info.output_bytes:
-            raise ValueError("cursor is beyond captured output")
+        if cursor < 0:
+            raise ValueError("cursor must be >= 0")
+        # A cursor past the retained output is not an error: it returns an empty
+        # chunk positioned at the end, so "read until done" loops terminate.
+        cursor = min(cursor, job.info.output_bytes)
         with open(job.info.output_path, "rb") as stream:
             stream.seek(cursor)
             data = stream.read(max_bytes)
@@ -128,6 +132,24 @@ class ShellJobs:
             and cursor + len(data) == job.info.output_bytes,
             "truncated": job.info.output_truncated,
         }
+
+    def run_text(self, job: ShellJob) -> dict:
+        """Text for a finished run(): the whole output when it fits RUN_TEXT_BYTES,
+        otherwise its first and last halves around an explicit gap marker (test
+        runners put the failure at the top and the summary at the bottom)."""
+        total = job.info.output_bytes
+        if total <= RUN_TEXT_BYTES:
+            chunk = self.read(job, 0, RUN_TEXT_BYTES)
+            return {"text": chunk["text"], "truncated": chunk["truncated"] or not chunk["done"]}
+        half = RUN_TEXT_BYTES // 2
+        head = self.read(job, 0, half)["text"]
+        tail = self.read(job, total - half, half)["text"]
+        omitted = total - 2 * half
+        marker = (
+            f"\n[... {omitted} bytes omitted; the full output is retained: "
+            f"job = await rlm.shell.get(result.job_id); await job.read(cursor={half}) ...]\n"
+        )
+        return {"text": head + marker + tail, "truncated": True}
 
     async def cancel(self, job: ShellJob) -> dict:
         job.cancel_requested = True

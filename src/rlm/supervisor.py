@@ -689,12 +689,12 @@ class SessionTreeSupervisor:
                 return info
             job = self._shell_jobs.get(parent.id, info["id"])
             await asyncio.shield(job.task)
-            output = self._shell_jobs.read(job, 0, 16_384)
+            output = self._shell_jobs.run_text(job)
             return {
                 "text": output["text"],
                 "exit_code": job.info.exit_code,
                 "job_id": job.info.id,
-                "truncated": output["truncated"] or not output["done"],
+                "truncated": output["truncated"],
                 "error": job.info.error,
                 "timed_out": job.info.status == "timed_out",
             }
