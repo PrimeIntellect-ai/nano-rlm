@@ -56,17 +56,8 @@ class JobInfo:
     timeout: float | None = None
 
     def handle(self) -> "JobHandle":
-        """The JobHandle for this job (records from shell.list() are snapshots)."""
+        """The JobHandle for this job; a JobInfo is a snapshot, not a handle."""
         return JobHandle(self.id)
-
-    async def info(self) -> "JobInfo":
-        return await self.handle().info()
-
-    async def read(self, *, cursor: int = 0, max_bytes: int = 16_384) -> "JobOutput":
-        return await self.handle().read(cursor=cursor, max_bytes=max_bytes)
-
-    async def cancel(self) -> "JobInfo":
-        return await self.handle().cancel()
 
 
 @dataclass(frozen=True)
