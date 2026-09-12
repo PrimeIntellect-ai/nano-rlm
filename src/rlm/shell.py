@@ -22,11 +22,17 @@ class ShellResult:
     truncated: bool
     error: str | None
     timed_out: bool = False
+    running: bool = False  # run() detached: the job continues in the background
 
     @property
     def ok(self) -> bool:
         """True only when the command ran to completion and exited 0."""
-        return self.exit_code == 0 and not self.timed_out and self.error is None
+        return (
+            self.exit_code == 0
+            and not self.timed_out
+            and not self.running
+            and self.error is None
+        )
 
     def __getattr__(self, name: str):
         # Frozen dataclass: only unknown attributes reach here. Point common
@@ -175,7 +181,10 @@ async def run(
     Nonzero exit codes are returned; startup/capture failures populate error.
     truncated indicates omitted output; get(result.job_id) can read more.
     timeout (seconds) kills the whole process group when exceeded: the result then
-    has timed_out=True, exit_code None, and the output captured so far.
+    has timed_out=True, exit_code None, and the output captured so far. Without a
+    timeout, a command still running after RUN_DETACH_SECONDS (60) comes back with
+    running=True and its partial output while the job continues in the background
+    (completion posts shell.completed; get(result.job_id) reads or cancels it).
     Cancelling the cell stops waiting, not the job; list() can recover its ID.
     Only start() publishes a completion event to the inbox; run() returns directly.
     """
