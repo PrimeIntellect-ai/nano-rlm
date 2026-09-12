@@ -181,9 +181,14 @@ class ShellJobs:
             with open(job.info.output_path, "ab", buffering=0) as output:
                 while True:
                     now = time.monotonic()
+                    # Poll before judging the deadline: a process that already exited
+                    # keeps its real status and exit code even if the deadline passed.
+                    code = process.poll()
                     if (
-                        job.info.timeout is not None
+                        code is None
+                        and job.info.timeout is not None
                         and cancel_at is None
+                        and not job.cancel_requested
                         and now - job.started >= job.info.timeout
                     ):
                         job.timed_out = True
@@ -215,7 +220,8 @@ class ShellJobs:
                             )
                             if retained and self.output is not None:
                                 self.output(job, job.info.output_bytes - len(retained))
-                    code = process.poll()
+                    if code is None:
+                        code = process.poll()
                     if code is not None:
                         if exit_at is None:
                             exit_at = now
