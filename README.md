@@ -359,9 +359,10 @@ list. Nonzero exit codes are returned; startup/capture errors populate `error`; 
 recover the job with `await rlm.shell.get(result.job_id)` to read more or inspect its
 metadata. Cancelling the waiting cell leaves the job running and discoverable with
 `shell.list()`. Both calls run Bash under the supervisor; only `start()` publishes a
-`shell.completed` inbox event. The kernel and Bash jobs inherit toolchain variables from
-the launching environment (PYTHON*, GOPATH/GOMODCACHE/..., NODE_*, ...), never
-credential-looking names or values.
+`shell.completed` inbox event. The kernel and Bash jobs inherit the launching process's environment
+(in a sandbox, the image's ENV) minus a blocklist: credential-looking names, values with
+URL-embedded credentials, variables that would redirect the kernel's own interpreter or
+venv (PYTHONHOME, UV_PYTHON, ...), and agent/daemon sockets.
 
 For long commands or work that should run alongside other tasks, use `start()`:
 
