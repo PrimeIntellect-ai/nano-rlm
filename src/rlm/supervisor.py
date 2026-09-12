@@ -31,7 +31,7 @@ from rlm.mcp import (
     MCPToolDescriptor,
     write_skill_modules,
 )
-from rlm.shell_jobs import ShellJob, ShellJobs
+from rlm.shell_jobs import DEFAULT_RUN_TIMEOUT, ShellJob, ShellJobs
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
@@ -698,7 +698,8 @@ class SessionTreeSupervisor:
                     **(request.get("env") or {}),
                 },
                 source_request_id=self._scopes[request["scope_id"]].request_id,
-                timeout=request.get("timeout"),
+                timeout=request.get("timeout")
+                or (DEFAULT_RUN_TIMEOUT if op == "shell.run" else None),
                 # run() hands its result back synchronously; an inbox event on top only
                 # makes the agent drain notifications it has already consumed.
                 notify=op == "shell.start",

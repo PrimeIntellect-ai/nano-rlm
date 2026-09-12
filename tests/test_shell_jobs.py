@@ -75,6 +75,7 @@ async def test_bash_capture_limits_failure_and_cleanup(tmp_path, monkeypatch):
 
 async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch):
     monkeypatch.setenv("SHELL_TEST_PRIVATE_KEY", "must-not-leak")
+    monkeypatch.setattr("rlm.supervisor.DEFAULT_RUN_TIMEOUT", 0.5)
 
     def tool(code):
         return DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})])
@@ -138,6 +139,8 @@ import asyncio
 listed = await rlm.shell.list()
 assert listed[-1].handle().id == listed[-1].id and not hasattr(listed[-1], 'read')
 assert (await listed[-1].handle().info()).id == listed[-1].id
+untimed = await rlm.shell.run('printf server; sleep 30')  # no timeout= -> DEFAULT_RUN_TIMEOUT
+assert untimed.timed_out and untimed.text == 'server'
 timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)
 assert timed.timed_out and timed.exit_code is None and timed.text == 'partial'
 assert 'timed out' in timed.error

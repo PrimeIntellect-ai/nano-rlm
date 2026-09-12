@@ -355,7 +355,7 @@ print(result.text, result.exit_code)
 16 KiB: the first and last 8 KiB around an omitted-range marker when longer), `exit_code`,
 `job_id`, `truncated`, `error`, and `timed_out`. The command is a Bash string or an argv
 list. Nonzero exit codes are returned; startup/capture errors populate `error`; an exceeded
-`timeout` (seconds) kills the process group and sets `timed_out`. If output is truncated,
+`timeout` (seconds; `run()` defaults to 540) kills the process group and sets `timed_out`. If output is truncated,
 recover the job with `await rlm.shell.get(result.job_id)` to read more or inspect its
 metadata. Cancelling the waiting cell leaves the job running and discoverable with
 `shell.list()`. Both calls run Bash under the supervisor; only `start()` publishes a

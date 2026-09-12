@@ -115,8 +115,9 @@ Use `result = await rlm.shell.run(command, cwd=..., timeout=...)` for quick comm
 results you need immediately. It waits for Bash and output capture to finish and returns a
 finished ShellResult with .ok, .text (combined stdout/stderr, up to 16 KiB), .exit_code,
 .truncated, .job_id, .error, and .timed_out. .ok is True only for a clean exit 0. The command
-is a Bash string or an argv list. timeout is optional seconds; when exceeded the
-process group is killed, .timed_out is true, and .exit_code is None. It is not a handle:
+is a Bash string or an argv list. timeout is optional seconds (default 540 for run());
+when exceeded the process group is killed, .timed_out is true, and .exit_code is None, so a
+server or watcher started with run() comes back as timed_out instead of hanging the cell. It is not a handle:
 there is no .read() or .info() on it; `rlm.shell.start` is the call that returns a JobHandle.
 Act on the exit code before reading the text: a nonzero .exit_code means the command failed
 even if .text looks plausible, so branch on it rather than only printing it. Pass cwd=
