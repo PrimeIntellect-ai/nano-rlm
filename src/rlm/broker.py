@@ -122,6 +122,7 @@ class BrokerShellRunRequest(TypedDict):
     scope_id: Annotated[str, Field(min_length=1)]
     command: Annotated[str, Field(min_length=1, max_length=65_536)]
     cwd: str | None
+    timeout: Annotated[float, Field(gt=0)] | None
 
 
 class BrokerShellListRequest(TypedDict):
