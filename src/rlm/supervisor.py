@@ -70,6 +70,7 @@ class _Invocation:
     cleanup_error: str | None = None
     released: bool = False
     result: RLMResult | None = None
+    shell_env: dict[str, str] = field(default_factory=dict)  # rlm.shell.setenv overlay
     result_request_id: str | None = None
     engine: RLMEngine | None = None
     runner: asyncio.Task[None] | None = None
@@ -663,6 +664,19 @@ class SessionTreeSupervisor:
 
     async def _shell_operation(self, parent: _Invocation, request: dict) -> Any:
         op = request["op"]
+        if op == "shell.setenv":
+            variables = request.get("variables") or {}
+            if any(
+                not k or "=" in k or "\0" in k or "\0" in v
+                for k, v in variables.items()
+            ):
+                raise ValueError(
+                    "environment variable names must be non-empty without '='"
+                )
+            parent.shell_env.update(variables)
+            return dict(parent.shell_env)
+        if op == "shell.getenv":
+            return dict(parent.shell_env)
         if op in ("shell.run", "shell.start"):
             command = request["command"]
             if not command.strip():
@@ -678,7 +692,11 @@ class SessionTreeSupervisor:
                 command=command,
                 cwd=str(cwd.resolve()),
                 directory=parent.session.dir,
-                env=build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                env={
+                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                    **parent.shell_env,
+                    **(request.get("env") or {}),
+                },
                 source_request_id=self._scopes[request["scope_id"]].request_id,
                 timeout=request.get("timeout"),
                 # run() hands its result back synchronously; an inbox event on top only
