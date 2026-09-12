@@ -162,7 +162,8 @@ need.
 Both calls run supervisor-owned Bash, with no stdin/PTY. Default cwd is this agent's
 working directory; relative cwd resolves against it. Cancelling a cell awaiting run()
 stops waiting but leaves the job running. Jobs survive kernel restarts; recover their IDs
-with shell.list(). Both calls publish shell.completed inbox events.
+with shell.list(). Only start() publishes a shell.completed inbox event; run() returns its
+result directly and posts nothing to the inbox.
 `await rlm.shell.list()` returns JobInfo snapshots, not handles; `item.handle()` or
 `await rlm.shell.get(job_id)` gives the JobHandle for reading or cancelling.
 `job.id` is stable. `await job.info()` returns metadata with .status, .exit_code,
