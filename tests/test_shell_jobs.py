@@ -75,8 +75,7 @@ async def test_bash_capture_limits_failure_and_cleanup(tmp_path, monkeypatch):
 
 async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch):
     monkeypatch.setenv("SHELL_TEST_PRIVATE_KEY", "must-not-leak")
-    monkeypatch.setattr("rlm.supervisor.DEFAULT_RUN_TIMEOUT", 0.5)
-    monkeypatch.setattr("rlm.supervisor.LONG_RUN_NOTE_SECONDS", 0.2)
+    monkeypatch.setattr("rlm.supervisor.RUN_DETACH_SECONDS", 0.5)
 
     def tool(code):
         return DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})])
@@ -144,10 +143,13 @@ import asyncio
 listed = await rlm.shell.list()
 assert listed[-1].handle().id == listed[-1].id and not hasattr(listed[-1], 'read')
 assert (await listed[-1].handle().info()).id == listed[-1].id
-slow = await rlm.shell.run('sleep 0.3; printf slow')
-assert slow.ok and slow.text == 'slow'
-untimed = await rlm.shell.run('printf server; sleep 30')  # no timeout= -> DEFAULT_RUN_TIMEOUT
-assert untimed.timed_out and untimed.text == 'server'
+detached = await rlm.shell.run('printf server; sleep 30')  # no timeout=: detaches after RUN_DETACH_SECONDS
+assert detached.running and not detached.ok and detached.exit_code is None and not detached.timed_out
+assert detached.text.startswith('[still running after') and detached.text.endswith('server')
+bg = await rlm.shell.get(detached.job_id)
+assert (await bg.info()).status == 'running'
+await bg.cancel()
+assert (await bg.info()).status == 'cancelled'
 timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)
 assert timed.timed_out and timed.exit_code is None and timed.text == 'partial'
 assert 'timed out' in timed.error
@@ -161,8 +163,9 @@ except ValueError:
     pass
 else:
     raise AssertionError('negative timeout accepted')
+before = len(await rlm.shell.list())
 waiting = asyncio.create_task(rlm.shell.run('sleep 30'))
-while len(await rlm.shell.list()) < 8:
+while len(await rlm.shell.list()) <= before:
     await asyncio.sleep(0.01)
 waiting.cancel()
 try:
@@ -199,11 +202,11 @@ print('SHELL_OK')
             for t in tool_outputs
         )
         assert any(
-            "blocked for" in str(m.get("content", ""))
+            "detached after" in str(m.get("content", ""))
             for call in client.calls
             for m in call["messages"]
             if m.get("role") == "user"
-        ), "long blocking run() note never reached the model"
+        ), "detach note never reached the model"
     finally:
         supervisor = engine._supervisor
         await engine.aclose()

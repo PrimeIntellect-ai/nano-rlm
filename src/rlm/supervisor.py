@@ -31,7 +31,7 @@ from rlm.mcp import (
     MCPToolDescriptor,
     write_skill_modules,
 )
-from rlm.shell_jobs import DEFAULT_RUN_TIMEOUT, ShellJob, ShellJobs
+from rlm.shell_jobs import RUN_DETACH_SECONDS, RUN_TEXT_BYTES, ShellJob, ShellJobs
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
@@ -39,9 +39,8 @@ from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
 from rlm.types import ProgrammaticToolCallStats, RLMResult
 
-# A blocking run() at least this long earns a one-line supervisor note pointing at
-# start(); at most MAX_LONG_RUN_NOTES per agent, after that the habit is the model's.
-LONG_RUN_NOTE_SECONDS = 60.0
+# When a blocking run() detaches (see RUN_DETACH_SECONDS) the supervisor explains the
+# unusual result once per occurrence, at most MAX_LONG_RUN_NOTES times per agent.
 MAX_LONG_RUN_NOTES = 3
 
 if TYPE_CHECKING:
@@ -710,8 +709,7 @@ class SessionTreeSupervisor:
                     **(request.get("env") or {}),
                 },
                 source_request_id=self._scopes[request["scope_id"]].request_id,
-                timeout=request.get("timeout")
-                or (DEFAULT_RUN_TIMEOUT if op == "shell.run" else None),
+                timeout=request.get("timeout"),
                 # run() hands its result back synchronously; an inbox event on top only
                 # makes the agent drain notifications it has already consumed.
                 notify=op == "shell.start",
@@ -719,20 +717,36 @@ class SessionTreeSupervisor:
             if op == "shell.start":
                 return info
             job = self._shell_jobs.get(parent.id, info["id"])
-            await asyncio.shield(job.task)
-            elapsed = (job.finished or time.monotonic()) - job.started
-            if (
-                elapsed >= LONG_RUN_NOTE_SECONDS
-                and parent.long_run_notes < MAX_LONG_RUN_NOTES
-            ):
-                # Said at the moment of the habit, not as a rule in the guide: models
-                # act on event-shaped feedback far more than on prose.
-                parent.long_run_notes += 1
-                parent.notes.append(
-                    f"The last rlm.shell.run() blocked for {elapsed:.0f} s. Commands that long "
-                    "belong in rlm.shell.start(): you can keep working and collect the "
-                    "result from the shell.completed inbox event."
+            try:
+                await asyncio.wait_for(asyncio.shield(job.task), RUN_DETACH_SECONDS)
+            except asyncio.TimeoutError:
+                # Detach instead of blocking or killing: the job is already a supervisor
+                # job, so it simply continues as if start() had been called, and its
+                # completion now posts a shell.completed event like any background job.
+                job.notify = True
+                partial = self._shell_jobs.read(job, 0, RUN_TEXT_BYTES)
+                marker = (
+                    f"[still running after {RUN_DETACH_SECONDS:g} s: job {job.info.id} continues "
+                    "in the background; its completion arrives as a shell.completed inbox "
+                    "event; rlm.shell.get(result.job_id) reads more output or cancels it]\n"
                 )
+                if parent.long_run_notes < MAX_LONG_RUN_NOTES:
+                    parent.long_run_notes += 1
+                    parent.notes.append(
+                        f"rlm.shell.run() detached after {RUN_DETACH_SECONDS:g} s: the command is "
+                        "still running as a background job. Commands that long belong in "
+                        "rlm.shell.start(); keep working and collect the result from the "
+                        "shell.completed inbox event."
+                    )
+                return {
+                    "text": marker + partial["text"],
+                    "exit_code": None,
+                    "job_id": job.info.id,
+                    "truncated": True,
+                    "error": None,
+                    "timed_out": False,
+                    "running": True,
+                }
             output = self._shell_jobs.run_text(job)
             return {
                 "text": output["text"],
@@ -741,6 +755,7 @@ class SessionTreeSupervisor:
                 "truncated": output["truncated"],
                 "error": job.info.error,
                 "timed_out": job.info.status == "timed_out",
+                "running": False,
             }
         if op == "shell.list":
             return [
