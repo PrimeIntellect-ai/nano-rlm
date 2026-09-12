@@ -59,6 +59,31 @@ IPYTHON_SCHEMA = {
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 IPYTHON_TIMEOUT_MAX_SECONDS = 600
+# Toolchain configuration that container images set through ENV and that both the
+# kernel and supervisor-owned Bash need to see the project the way its tests do
+# (module paths, caches, proxies). Anything that looks like a credential is still
+# dropped even when its name matches a prefix (GOOGLE_APPLICATION_CREDENTIALS, ...).
+_KERNEL_TOOLCHAIN_ENV_PREFIXES = (
+    "LC_", "PYTHON", "GO", "NODE", "NPM_CONFIG_", "YARN_", "PNPM_", "CARGO_", "RUSTUP_",
+    "RUST", "JAVA_", "MAVEN_", "GRADLE_", "UV_", "PIP_", "POETRY_", "CONDA_", "XDG_",
+    "DOTNET_", "GEM_", "BUNDLE_", "COMPOSER_", "PHP_", "RUBY", "DENO_", "BUN_",
+)
+_KERNEL_TOOLCHAIN_ENV_NAMES = {
+    "LD_LIBRARY_PATH", "LIBRARY_PATH", "PKG_CONFIG_PATH", "CPATH", "C_INCLUDE_PATH",
+    "CC", "CXX", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "MAKEFLAGS",
+    "DISPLAY", "DEBIAN_FRONTEND", "CI", "DOCKER_HOST",
+}
+_KERNEL_SECRET_ENV_RE = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
+
+
+def _passes_kernel_env(key: str) -> bool:
+    if key in _KERNEL_BASE_ENV_NAMES:
+        return True
+    if key in _KERNEL_TOOLCHAIN_ENV_NAMES or key.startswith(_KERNEL_TOOLCHAIN_ENV_PREFIXES):
+        return not _KERNEL_SECRET_ENV_RE.search(key)
+    return False
+
+
 _KERNEL_BASE_ENV_NAMES = {
     "CURL_CA_BUNDLE",
     "HOME",
@@ -92,11 +117,7 @@ def build_kernel_env(
     ]
     if invalid_types:
         raise TypeError("kernel environment keys and values must be strings")
-    kernel_env = {
-        key: value
-        for key, value in source.items()
-        if key in _KERNEL_BASE_ENV_NAMES or key.startswith("LC_")
-    }
+    kernel_env = {key: value for key, value in source.items() if _passes_kernel_env(key)}
     kernel_env.update(explicit)
     kernel_env["NO_COLOR"] = "1"
     if private_dir is not None:
