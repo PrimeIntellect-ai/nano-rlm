@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from rlm.tools.base import ToolContext
 from rlm.tools.git_block import (
     find_blocked_command,
@@ -12,7 +14,10 @@ from rlm.tools.git_block import (
 from rlm.types import RLMMetrics, TokenUsage
 
 
-REFUSAL = "Git history option '--all' is not allowed. Use current-branch history only."
+REFUSAL = (
+    "Git command '--all' is not allowed. Use current-branch history only: no other "
+    "branches, tags, remotes, reflog, clones or fetches."
+)
 
 
 def _ctx() -> ToolContext:
@@ -327,3 +332,58 @@ def test_ipython_tool_uses_explicit_execution_policy(monkeypatch):
             "description"
         ]
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git clone https://github.com/vulsio/go-cve-dictionary gcved",
+        "git fetch origin",
+        "git pull",
+        "git ls-remote origin",
+        "git remote add up https://example/x.git",
+        "git reflog -5",
+        "git for-each-ref refs/",
+        "git show-ref",
+        "git tag --contains 1cfbcb0",
+        "git describe --tags",
+        "git branch -a",
+        "git branch -r",
+        "git show origin/main -- models/",
+        "git rev-list -n1 --before=2020-07-01 origin/master",
+        "git ls-tree -r refs/tags/v1.0",
+        "git checkout origin/main -- go.mod",
+        "git worktree add /tmp/w origin/devel",
+        "git log --all=plain",
+        "git log --reflog=x",
+        "echo $(git log --all)",
+        'bash -lc "cd /app && git log --all"',
+        "sh -c 'git show refs/remotes/origin/devel'",
+        "git log --oneline \\\n  --all",
+    ],
+)
+def test_out_of_branch_git_access_blocked(command):
+    assert find_blocked_command(command, allow_git=False) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status --short",
+        "git diff HEAD~1",
+        "git log --oneline -5",
+        "git show HEAD~2 -- lib/x.py",
+        "git branch --show-current",
+        "git branch",
+        "git stash push -u -m wip && pytest -q | tail -5; git stash pop",
+        "git checkout -- go.work.sum",
+        "git worktree add /tmp/w HEAD",
+        "git rev-parse HEAD",
+        "git blame lib/ansible/x.py",
+        "git grep -n needle -- lib/",
+        "bash -lc 'git status'",
+        "ls origin/ && cat tags/README",
+    ],
+)
+def test_current_branch_git_access_allowed(command):
+    assert find_blocked_command(command, allow_git=False) is None

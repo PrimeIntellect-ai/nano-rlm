@@ -30,10 +30,11 @@ SHELL_TOOL_NAMES = frozenset({"ipython", "bash"})
 GIT_HISTORY_GUARD_PROMPT = (
     "Do not cheat by using online solutions or hints specific to this task, or "
     "by copying or inferring solutions from other branches, tags, remotes, "
-    "reflogs, or broad git history in the project. Broad-history `git log` "
-    "options such as `--all`, `-all`, `--branches`, `--remotes`, `--tags`, "
-    "`--glob`, `--alternate-refs`, `--reflog`, `--walk-reflogs`, or `-g` will "
-    "be refused."
+    "reflogs, or broad git history in the project, or by cloning other "
+    "repositories to read their history. Git commands that reach beyond the "
+    "current branch are refused: `git log --all` and similar history options, "
+    "history subcommands given another ref (`git show origin/main`), listing "
+    "branches, tags, remotes or the reflog, and `clone`, `fetch` or `pull`."
 )
 PROJECT_ENV_PROMPT = (
     "The ipython kernel is an isolated venv without the project's packages — "

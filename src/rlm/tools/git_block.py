@@ -1,9 +1,11 @@
-"""Restrict history-wide ``git log`` access at the tool-call level.
+"""Restrict git access to the current branch's history at the tool-call level.
 
-Ordinary git commands are allowed. The guard refuses ``git log`` invocations
-that ask for non-current-branch history, such as ``git log --all``. This keeps
-the agent's visibility close to current-branch history while preserving useful
-commands like ``git status`` and ``git diff``.
+Ordinary git commands are allowed. The guard refuses invocations that reach beyond the
+current branch: history-wide ``git log`` options (``--all``, ``--remotes``, ...), history
+subcommands given another ref (``git show origin/main``), listing branches/tags/reflog/
+remotes, and ``clone``/``fetch``/``pull`` (an audit of 365 SWE-bench Pro rollouts found the
+only solution leakage came from cloning an upstream dependency and mining its history).
+``git status``, ``git diff``, ``git log`` on the current branch and ``git stash`` stay usable.
 
 - split a bash command on ``&&``, ``||``, ``;`` and ``|``
 - if a segment invokes ``git log`` with a restricted history flag, refuse
@@ -20,11 +22,70 @@ import re
 import shlex
 
 REFUSAL_TEMPLATE = (
-    "Git history option '{cmd}' is not allowed. Use current-branch history only."
+    "Git command '{cmd}' is not allowed. Use current-branch history only: no other "
+    "branches, tags, remotes, reflog, clones or fetches."
 )
 
-# Reuse the mini_swe_agent_plus separators verbatim so behavior matches.
-_SEPARATORS = re.compile(r"&&|\|\||;|\|")
+# Reuse the mini_swe_agent_plus separators verbatim so behavior matches; command
+# substitutions and backticks are split as well so `echo $(git log --all)` is seen.
+_SEPARATORS = re.compile(r"&&|\|\||;|\||\$\(|`|\)")
+
+# Subcommands that reach beyond the current branch's history by construction.
+_BLOCKED_SUBCOMMANDS = {
+    "clone",
+    "fetch",
+    "pull",
+    "ls-remote",
+    "remote",
+    "reflog",
+    "for-each-ref",
+    "show-ref",
+    "describe",
+    "tag",
+    "bundle",
+    "fsck",
+}
+# `git branch` is fine for the current branch but not for listing others.
+_BLOCKED_BRANCH_OPTIONS = {
+    "-a",
+    "-r",
+    "--all",
+    "--remotes",
+    "--list",
+    "-l",
+    "--contains",
+    "--merged",
+    "--no-merged",
+}
+# Revision arguments that name other refs; checked on every history-reading subcommand.
+_REMOTE_REF_RE = re.compile(
+    r"^(?:refs/(?:remotes|tags|heads)/|remotes/|origin/|upstream/|tags/|[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@\{)"
+)
+_HISTORY_SUBCOMMANDS = {
+    "log",
+    "show",
+    "rev-list",
+    "ls-tree",
+    "diff",
+    "grep",
+    "cat-file",
+    "shortlog",
+    "whatchanged",
+    "format-patch",
+    "archive",
+    "checkout",
+    "restore",
+    "switch",
+    "worktree",
+    "cherry-pick",
+    "merge-base",
+    "name-rev",
+    "rev-parse",
+    "blame",
+    "annotate",
+}
+# Shells whose -c/-lc string is itself a command line to scan.
+_SHELL_WRAPPERS = {"bash", "sh", "zsh", "dash"}
 
 _RESTRICTED_LOG_OPTIONS = {
     "--all",
@@ -69,6 +130,20 @@ def find_blocked_command(command: str, *, allow_git: bool | None = None) -> str 
     """
     if _git_allowed(allow_git):
         return None
+    # Backslash line continuations are one command line.
+    command = command.replace("\\\n", " ")
+    # `bash -lc "cd /app && git log --all"`: unwrap the shell wrapper before splitting, so
+    # the inner command line is scanned whole instead of being cut at its own separators.
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = []
+    if argv and argv[0].rsplit("/", 1)[-1] in _SHELL_WRAPPERS:
+        for i, token in enumerate(argv[1:], 1):
+            if token in ("-c", "-lc", "-ic", "-lic") and i + 1 < len(argv):
+                blocked = find_blocked_command(argv[i + 1], allow_git=False)
+                if blocked is not None:
+                    return blocked
     for segment in _SEPARATORS.split(command):
         blocked = find_blocked_git_log_option(_split_segment(segment))
         if blocked is not None:
@@ -112,22 +187,46 @@ def _is_restricted_log_option(token: str) -> bool:
         return True
     return any(
         token == option or token.startswith(f"{option}=")
-        for option in _RESTRICTED_LOG_OPTION_PREFIXES
+        for option in (*_RESTRICTED_LOG_OPTION_PREFIXES, *_RESTRICTED_LOG_OPTIONS)
     )
 
 
 def find_blocked_git_log_option(argv: list[str]) -> str | None:
-    if not argv or not _is_git_binary(argv[0]):
+    """Return the offending token if ``argv`` is a git invocation that reaches beyond the
+    current branch (history options, other refs, remotes, clones), else ``None``."""
+    if not argv:
+        return None
+    # `bash -c "git log --all"`, `sh -lc '...'`: scan the wrapped command line.
+    if argv[0].rsplit("/", 1)[-1] in _SHELL_WRAPPERS:
+        for i, token in enumerate(argv[1:], 1):
+            if token in ("-c", "-lc", "-ic", "-lic") and i + 1 < len(argv):
+                return find_blocked_command(argv[i + 1], allow_git=False)
+        return None
+    if not _is_git_binary(argv[0]):
         return None
 
     subcommand_index = _skip_git_global_options(argv, 1)
-    if subcommand_index >= len(argv) or argv[subcommand_index] != "log":
+    if subcommand_index >= len(argv):
         return None
-
-    for token in argv[subcommand_index + 1 :]:
+    subcommand = argv[subcommand_index]
+    rest = argv[subcommand_index + 1 :]
+    if subcommand in _BLOCKED_SUBCOMMANDS:
+        return subcommand
+    if subcommand == "branch":
+        for token in rest:
+            if token == "--":
+                break
+            if token in _BLOCKED_BRANCH_OPTIONS:
+                return f"branch {token}"
+        return None
+    if subcommand not in _HISTORY_SUBCOMMANDS:
+        return None
+    for token in rest:
         if token == "--":
             return None
-        if _is_restricted_log_option(token):
+        if subcommand == "log" and _is_restricted_log_option(token):
+            return token
+        if _REMOTE_REF_RE.match(token):
             return token
     return None
 
