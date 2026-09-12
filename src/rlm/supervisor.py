@@ -642,7 +642,7 @@ class SessionTreeSupervisor:
     def _publish_job(self, job: ShellJob) -> None:
         self._subscriptions.finish("job", job.info.id)
         owner = self._invocations[job.info.owner_id]
-        if self._closed or owner.capability not in self._capabilities:
+        if self._closed or owner.capability not in self._capabilities or not job.notify:
             return
         self._publish(
             owner,
@@ -681,6 +681,9 @@ class SessionTreeSupervisor:
                 env=build_kernel_env(dict(parent.runtime_config.kernel_env)),
                 source_request_id=self._scopes[request["scope_id"]].request_id,
                 timeout=request.get("timeout"),
+                # run() hands its result back synchronously; an inbox event on top only
+                # makes the agent drain notifications it has already consumed.
+                notify=op == "shell.start",
             )
             if op == "shell.start":
                 return info

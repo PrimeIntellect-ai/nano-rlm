@@ -32,6 +32,7 @@ class ShellJob:
     finished: float | None = None
     cancel_requested: bool = False
     timed_out: bool = False
+    notify: bool = True  # publish shell.completed to the owner's inbox (start(); not run())
     task: asyncio.Task | None = None
 
     def snapshot(self) -> dict:
@@ -64,6 +65,7 @@ class ShellJobs:
         env: dict[str, str],
         source_request_id: str | None,
         timeout: float | None = None,
+        notify: bool = True,
     ) -> dict:
         if len(self.jobs) >= MAX_JOBS:
             raise RuntimeError("shell job limit reached")
@@ -92,6 +94,7 @@ class ShellJobs:
                 timeout=timeout,
             ),
             source_request_id,
+            notify=notify,
         )
         self.jobs[job_id] = job
         job.task = asyncio.create_task(self._run(job, env))
