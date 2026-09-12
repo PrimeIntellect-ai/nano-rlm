@@ -114,6 +114,8 @@ assert overlay == {'STUDY_PERSIST': '1'} and (await rlm.shell.getenv()) == overl
 envres = await rlm.shell.run('printf "%s-%s" "$STUDY_PERSIST" "$PER_CALL"', env={'PER_CALL': '2'})
 assert envres.ok and envres.text == '1-2'
 assert (await rlm.shell.run('printf "%s" "$PER_CALL"')).text == ''
+piped = await rlm.shell.run('(printf out; exit 3) | tail -1')
+assert piped.exit_code == 3 and piped.text == 'out' and not piped.ok  # pipefail on
 assert argv.ok and argv.text == 'a b c'
 for bad in (['ls', 3], []):
     try:

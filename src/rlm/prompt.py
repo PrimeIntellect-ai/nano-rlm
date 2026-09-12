@@ -133,9 +133,9 @@ for command in ["git status --short", "git diff --stat"]:
     else:
         print(result.text)
 ```
-Startup/capture failures populate .error. When piping a command through `tail`, `tee`, or
-another filter, use `set -o pipefail` so a failed command cannot be hidden by the filter's
-successful exit status.
+Startup/capture failures populate .error. Bash runs with pipefail on: a pipeline's exit code
+is that of its first failing stage, so `pytest ... | tail -20` reports pytest's failure, and a
+`grep` with no match makes the pipeline exit 1.
 
 .text is capped at 16 KiB: longer output keeps its first and last 8 KiB around a marker
 that names the omitted byte range, so the first failure and the final summary both survive
