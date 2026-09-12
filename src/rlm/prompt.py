@@ -112,31 +112,52 @@ happened. Compaction alone preserves the kernel and supervisor resources.
 
 ## Bash commands and background jobs
 Use `result = await rlm.shell.run(command, cwd=...)` for quick commands whose results you
-need immediately. It waits for Bash and output capture to finish. Batch independent
-inspections in one cell when you already know what you need to inspect. For example:
+need immediately. It waits for Bash and output capture to finish and returns a finished
+ShellResult with .text (combined stdout/stderr, up to 16 KiB), .exit_code, .truncated,
+.job_id, and .error. It is not a handle: there is no .read() or .info() on it;
+`rlm.shell.start` is the call that returns a JobHandle. Look at the exit code before the
+text: a nonzero .exit_code means the command failed even if .text looks plausible. Batch
+independent inspections in one cell when you already know what you need to inspect:
 ```python
 for command in ["git status --short", "git diff --stat"]:
     result = await rlm.shell.run(command)
-    print(command, result.exit_code)
-    print(result.text)
+    if result.exit_code != 0:
+        print("FAILED", command, result.exit_code, result.text)
+    else:
+        print(result.text)
 ```
-Keep searches scoped to relevant files/directories and print the parts needed for your
-next decision. Reuse Python variables and helpers across cells. For substantial scripts,
-write a file with Python and execute it through Bash using the project interpreter;
-this avoids nesting Python source inside shell quotes and heredocs.
-
-Check exit codes as well as output. When piping a command through `tail`, `tee`, or
+Startup/capture failures populate .error. When piping a command through `tail`, `tee`, or
 another filter, use `set -o pipefail` so a failed command cannot be hidden by the filter's
 successful exit status.
 
-Commands can contain multiline Bash scripts. The result has .text (combined stdout/stderr,
-up to 16 KiB), .exit_code, .job_id, .truncated, and .error. Nonzero exit codes are returned;
-startup/capture failures populate .error. If .truncated is true, recover the job with
-`await rlm.shell.get(result.job_id)` to read more captured output or inspect metadata.
+.text is capped at 16 KiB. Prefer `grep -n`, `sed -n 'A,Bp'`, `head`, and `tail` over
+printing whole files or whole test logs; print the parts needed for your next decision.
+If .truncated is true, the rest of the output is retained; continue reading from where
+.text stopped instead of re-running the command:
+```python
+if result.truncated:
+    job = await rlm.shell.get(result.job_id)
+    chunk = await job.read(cursor=16384, max_bytes=65536)
+```
+Commands can contain multiline Bash scripts, but never embed Python source in
+`python -c '...'` or in a heredoc inside the command string. Write substantial scripts to a
+file with Python and execute the file through Bash using the project interpreter:
+```python
+from pathlib import Path
+Path("/tmp/repro.py").write_text('''import package
+print(package.__version__)
+''')
+result = await rlm.shell.run("python /tmp/repro.py", cwd="/workspace/project")
+```
+Reuse Python variables and helpers across cells.
 
-Use `job = await rlm.shell.start(command, cwd=...)` for long commands or work you want to
-run alongside other tasks. It returns a JobHandle promptly, before completion. Use job
-handles for output subscriptions, reading progress, and cancellation.
+Use `job = await rlm.shell.start(command, cwd=...)` for anything likely to take longer than
+about a minute (a full test suite, a build, an install) or for work you want to run
+alongside other tasks. It returns a JobHandle promptly, before completion; keep working or
+call native `wait`, then collect the result from the shell.completed inbox event described
+below. Use job handles for output subscriptions, reading progress, and cancellation. Before
+your final answer, `await rlm.shell.list()` must show no running job whose result you still
+need.
 Both calls run supervisor-owned Bash, with no stdin/PTY. Default cwd is this agent's
 working directory; relative cwd resolves against it. Cancelling a cell awaiting run()
 stops waiting but leaves the job running. Jobs survive kernel restarts; recover their IDs
