@@ -113,8 +113,9 @@ happened. Compaction alone preserves the kernel and supervisor resources.
 ## Bash commands and background jobs
 Use `result = await rlm.shell.run(command, cwd=..., timeout=...)` for quick commands whose
 results you need immediately. It waits for Bash and output capture to finish and returns a
-finished ShellResult with .text (combined stdout/stderr, up to 16 KiB), .exit_code,
-.truncated, .job_id, .error, and .timed_out. timeout is optional seconds; when exceeded the
+finished ShellResult with .ok, .text (combined stdout/stderr, up to 16 KiB), .exit_code,
+.truncated, .job_id, .error, and .timed_out. .ok is True only for a clean exit 0. The command
+is a Bash string or an argv list. timeout is optional seconds; when exceeded the
 process group is killed, .timed_out is true, and .exit_code is None. It is not a handle:
 there is no .read() or .info() on it; `rlm.shell.start` is the call that returns a JobHandle.
 Act on the exit code before reading the text: a nonzero .exit_code means the command failed
@@ -124,7 +125,7 @@ know what you need to inspect:
 ```python
 for command in ["git status --short", "git diff --stat"]:
     result = await rlm.shell.run(command)
-    if result.exit_code != 0:
+    if not result.ok:
         print("FAILED", command, result.exit_code, result.text)
     else:
         print(result.text)
