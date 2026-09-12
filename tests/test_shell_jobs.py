@@ -107,6 +107,12 @@ else:
 result = await rlm.shell.run("values=(one two); printf '%s' \"${values[*]}\"; exit 7")
 assert result.text == 'one two' and result.exit_code == 7 and not result.ok
 argv = await rlm.shell.run(['printf', '%s %s', 'a b', 'c'])
+assert (await rlm.shell.getenv()) == {}
+overlay = await rlm.shell.setenv(STUDY_PERSIST='1')
+assert overlay == {'STUDY_PERSIST': '1'} and (await rlm.shell.getenv()) == overlay
+envres = await rlm.shell.run('printf "%s-%s" "$STUDY_PERSIST" "$PER_CALL"', env={'PER_CALL': '2'})
+assert envres.ok and envres.text == '1-2'
+assert (await rlm.shell.run('printf "%s" "$PER_CALL"')).text == ''
 assert argv.ok and argv.text == 'a b c'
 for bad in (['ls', 3], []):
     try:

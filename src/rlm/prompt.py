@@ -120,7 +120,9 @@ process group is killed, .timed_out is true, and .exit_code is None. It is not a
 there is no .read() or .info() on it; `rlm.shell.start` is the call that returns a JobHandle.
 Act on the exit code before reading the text: a nonzero .exit_code means the command failed
 even if .text looks plausible, so branch on it rather than only printing it. Pass cwd=
-instead of prefixing `cd dir &&`. Batch independent inspections in one cell when you already
+instead of prefixing `cd dir &&`. Environment variables the project needs (PYTHONPATH,
+GOFLAGS, ...) are set once with `await rlm.shell.setenv(PYTHONPATH="/app/lib")` and apply
+to every later run()/start(); `env={...}` applies to one call. Batch independent inspections in one cell when you already
 know what you need to inspect:
 ```python
 for command in ["git status --short", "git diff --stat"]:

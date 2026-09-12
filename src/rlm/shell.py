@@ -126,6 +126,33 @@ def _command(command: str | builtins.list[str]) -> str:
     raise TypeError("command must be a Bash string or a non-empty list of argv strings")
 
 
+def _env(env: dict[str, str] | None) -> dict[str, str] | None:
+    if env is None:
+        return None
+    if not isinstance(env, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+    ):
+        raise TypeError("env must map str names to str values")
+    return dict(env)
+
+
+async def setenv(
+    variables: dict[str, str] | None = None, /, **more: str
+) -> dict[str, str]:
+    """Set environment variables for every later run()/start() of this agent.
+
+    Returns the full persistent overlay. Per-call env= wins over it; the image's own
+    environment sits underneath. Survives kernel restarts (supervisor-owned).
+    """
+    merged = {**(variables or {}), **more}
+    return await broker.agent_request("shell.setenv", variables=_env(merged))
+
+
+async def getenv() -> dict[str, str]:
+    """The persistent overlay set with setenv()."""
+    return await broker.agent_request("shell.getenv", variables=None)
+
+
 def _timeout(timeout: float | None) -> float | None:
     if timeout is None:
         return None
@@ -137,7 +164,11 @@ def _timeout(timeout: float | None) -> float | None:
 
 
 async def run(
-    command: str | list[str], *, cwd: str | None = None, timeout: float | None = None
+    command: str | list[str],
+    *,
+    cwd: str | None = None,
+    timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> ShellResult:
     """Wait for Bash and return combined output (up to 16 KiB) and its exit code.
 
@@ -150,13 +181,21 @@ async def run(
     """
     return ShellResult(
         **await broker.agent_request(
-            "shell.run", command=_command(command), cwd=cwd, timeout=_timeout(timeout)
+            "shell.run",
+            command=_command(command),
+            cwd=cwd,
+            timeout=_timeout(timeout),
+            env=_env(env),
         )
     )
 
 
 async def start(
-    command: str | list[str], *, cwd: str | None = None, timeout: float | None = None
+    command: str | list[str],
+    *,
+    cwd: str | None = None,
+    timeout: float | None = None,
+    env: dict[str, str] | None = None,
 ) -> JobHandle:
     """Register a Bash job and return immediately. Defaults to the agent's cwd.
 
@@ -166,7 +205,11 @@ async def start(
     timed_out.
     """
     info = await broker.agent_request(
-        "shell.start", command=_command(command), cwd=cwd, timeout=_timeout(timeout)
+        "shell.start",
+        command=_command(command),
+        cwd=cwd,
+        timeout=_timeout(timeout),
+        env=_env(env),
     )
     return JobHandle(info["id"])
 
