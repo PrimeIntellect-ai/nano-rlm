@@ -59,101 +59,53 @@ IPYTHON_SCHEMA = {
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 IPYTHON_TIMEOUT_MAX_SECONDS = 600
-# Toolchain configuration that container images set through ENV and that both the
-# kernel and supervisor-owned Bash need to see the project the way its tests do
-# (module paths, caches, proxies). The source is this process's environment, so
-# in a sandbox it is the image's ENV plus whatever the launcher added; locally it is
-# the developer's shell. Names are filtered by prefix/allowlist, credential-looking
-# names are dropped, values that embed URL credentials are dropped, and variables
-# that would override rather than describe a toolchain (PYTHONHOME, UV_PYTHON, ...)
-# are excluded.
-_KERNEL_TOOLCHAIN_ENV_PREFIXES = (
-    "LC_",
-    "PYTHON",
-    "NODE_",
-    "NPM_CONFIG_",
-    "YARN_",
-    "PNPM_",
-    "CARGO_",
-    "RUSTUP_",
-    "RUSTFLAGS",
-    "JAVA_",
-    "MAVEN_",
-    "GRADLE_",
-    "UV_",
-    "PIP_",
-    "POETRY_",
-    "CONDA_",
-    "XDG_",
-    "DOTNET_",
-    "GEM_",
-    "COMPOSER_",
-    "DENO_",
-    "BUN_",
+# The kernel and supervisor-owned Bash inherit this process's environment (in a
+# sandbox: the image's ENV plus whatever the launcher added; locally: the developer's
+# shell) minus a blocklist. Blocked: credential-looking names, values that embed URL
+# credentials, variables that would break or redirect the kernel's own interpreter and
+# venv, and agent/daemon sockets. Everything else passes so that projects see the
+# toolchain the way their own tests do (PYTHONPATH, GOMODCACHE, NODE_OPTIONS, ...).
+_KERNEL_SECRET_ENV_RE = re.compile(
+    r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|COOKIE|SESSION",
+    re.I,
 )
-_KERNEL_TOOLCHAIN_ENV_NAMES = {
-    "GOPATH",
-    "GOMODCACHE",
-    "GOCACHE",
-    "GOFLAGS",
-    "GOPROXY",
-    "GONOSUMDB",
-    "GONOSUMCHECK",
-    "GOPRIVATE",
-    "GOSUMDB",
-    "GOTOOLCHAIN",
-    "GOROOT",
-    "GOBIN",
-    "GO111MODULE",
-    "GOWORK",
-    "GOTMPDIR",
-    "CGO_ENABLED",
-    "CGO_CFLAGS",
-    "CGO_LDFLAGS",
-    "LD_LIBRARY_PATH",
-    "LIBRARY_PATH",
-    "PKG_CONFIG_PATH",
-    "CPATH",
-    "C_INCLUDE_PATH",
-    "CC",
-    "CXX",
-    "CFLAGS",
-    "CXXFLAGS",
-    "CPPFLAGS",
-    "LDFLAGS",
-    "MAKEFLAGS",
-    "DISPLAY",
-    "DEBIAN_FRONTEND",
-    "CI",
-}
-_KERNEL_ENV_OVERRIDES_EXCLUDED = {
+_KERNEL_SECRET_VALUE_RE = re.compile(r"://[^/\s@]+:[^/\s@]+@")  # user:pass@ in a URL
+_KERNEL_ENV_BLOCKED_NAMES = {
+    # would break or redirect the kernel's interpreter / venv / config dirs
     "PYTHONHOME",
     "PYTHONSTARTUP",
     "PYTHONEXECUTABLE",
     "PYTHONUSERBASE",
+    "PYTHONSAFEPATH",
     "UV_PROJECT_ENVIRONMENT",
     "UV_PYTHON",
     "UV_RUN_RECURSION_DEPTH",
     "PIP_TARGET",
     "CONDA_PREFIX",
     "CONDA_DEFAULT_ENV",
+    "IPYTHONDIR",
+    "JUPYTER_CONFIG_DIR",
+    "JUPYTER_DATA_DIR",
+    "JUPYTER_RUNTIME_DIR",
+    # host/daemon access that has nothing to do with the task
+    "DOCKER_HOST",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GPG_AGENT_INFO",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "KUBECONFIG",
 }
-_KERNEL_SECRET_ENV_RE = re.compile(
-    r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I
-)
-_KERNEL_SECRET_VALUE_RE = re.compile(r"://[^/\s@]+:[^/\s@]+@")  # user:pass@ in a URL
+_KERNEL_ENV_BLOCKED_PREFIXES = ("BUNDLE_",)  # Bundler stores user:password per host
 
 
 def _passes_kernel_env(key: str, value: str) -> bool:
     if key in _KERNEL_BASE_ENV_NAMES:
         return True
-    if key in _KERNEL_ENV_OVERRIDES_EXCLUDED or _KERNEL_SECRET_ENV_RE.search(key):
+    if key in _KERNEL_ENV_BLOCKED_NAMES or key.startswith(_KERNEL_ENV_BLOCKED_PREFIXES):
         return False
-    if key in _KERNEL_TOOLCHAIN_ENV_NAMES or key.startswith(
-        _KERNEL_TOOLCHAIN_ENV_PREFIXES
-    ):
-        return not _KERNEL_SECRET_VALUE_RE.search(value)
-    return False
+    if _KERNEL_SECRET_ENV_RE.search(key) or _KERNEL_SECRET_VALUE_RE.search(value):
+        return False
+    return True
 
 
 _KERNEL_BASE_ENV_NAMES = {
@@ -179,7 +131,7 @@ def build_kernel_env(
     environ: Mapping[str, str] | None = None,
     private_dir: str | None = None,
 ) -> dict[str, str]:
-    """Build a minimal kernel environment plus explicitly supplied task variables."""
+    """Build the kernel environment: inherited minus the blocklist, plus explicit task variables."""
     source = os.environ if environ is None else environ
     explicit = dict(task_env or {})
     invalid_types = [

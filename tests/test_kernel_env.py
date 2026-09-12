@@ -1,48 +1,48 @@
 from rlm.tools.ipython import build_kernel_env
 
 
-def test_kernel_env_passes_toolchain_variables_and_drops_secrets():
+def test_kernel_env_passes_everything_except_the_blocklist():
     environ = {
         "PATH": "/usr/bin",
         "HOME": "/root",
         "PYTHONPATH": "/app/lib:/app",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "GOPATH": "/root/go",
         "GOMODCACHE": "/root/go/pkg/mod",
-        "GOFLAGS": "-mod=mod",
         "NODE_OPTIONS": "--max-old-space-size=4096",
-        "NPM_CONFIG_CACHE": "/root/.npm",
+        "npm_config_cache": "/root/.npm",
         "LD_LIBRARY_PATH": "/usr/local/lib",
         "PIP_INDEX_URL": "https://pypi.org/simple",
-        # must not pass
+        "RANDOM_APP_SETTING": "x",
+        # blocked by name pattern
         "GOOGLE_APPLICATION_CREDENTIALS": "/secrets/gcp.json",
         "AWS_SECRET_ACCESS_KEY": "x",
         "OPENAI_API_KEY": "x",
         "GITHUB_TOKEN": "x",
         "NPM_CONFIG_AUTHTOKEN": "x",
-        "PYTHON_PASSWORD": "x",
+        "DB_PASSWORD": "x",
+        "TLS_PRIVATE_PEM": "x",
+        "SESSION_ID": "x",
+        # blocked by value (URL credentials)
         "PIP_EXTRA_INDEX_URL": "https://user:tok@private.example/simple",
-        "GOPROXY": "https://user:tok@proxy.example",
+        "DATABASE_URL": "postgres://u:p@db/app",
+        # blocked explicitly
         "PYTHONHOME": "/opt/other",
         "UV_PYTHON": "3.12",
         "DOCKER_HOST": "unix:///var/run/docker.sock",
+        "SSH_AUTH_SOCK": "/tmp/agent",
         "BUNDLE_GEMS__EXAMPLE__COM": "user:pass",
-        "RANDOM_APP_SETTING": "x",
-        "npm_config_cache": "/lower",
+        "IPYTHONDIR": "/elsewhere",
     }
     env = build_kernel_env({"TASK_FLAG": "1"}, environ=environ)
     for key in (
         "PATH",
         "HOME",
         "PYTHONPATH",
-        "PYTHONDONTWRITEBYTECODE",
-        "GOPATH",
         "GOMODCACHE",
-        "GOFLAGS",
         "NODE_OPTIONS",
-        "NPM_CONFIG_CACHE",
+        "npm_config_cache",
         "LD_LIBRARY_PATH",
         "PIP_INDEX_URL",
+        "RANDOM_APP_SETTING",
     ):
         assert env[key] == environ[key], key
     assert env["TASK_FLAG"] == "1"
@@ -52,22 +52,26 @@ def test_kernel_env_passes_toolchain_variables_and_drops_secrets():
         "OPENAI_API_KEY",
         "GITHUB_TOKEN",
         "NPM_CONFIG_AUTHTOKEN",
-        "PYTHON_PASSWORD",
+        "DB_PASSWORD",
+        "TLS_PRIVATE_PEM",
+        "SESSION_ID",
         "PIP_EXTRA_INDEX_URL",
-        "GOPROXY",
+        "DATABASE_URL",
         "PYTHONHOME",
         "UV_PYTHON",
         "DOCKER_HOST",
+        "SSH_AUTH_SOCK",
         "BUNDLE_GEMS__EXAMPLE__COM",
-        "RANDOM_APP_SETTING",
-        "npm_config_cache",
     ):
         assert key not in env, key
     assert env["NO_COLOR"] == "1"
 
 
-def test_explicit_task_env_overrides_inherited():
+def test_explicit_task_env_and_private_dirs_override_inherited(tmp_path):
     env = build_kernel_env(
-        {"PYTHONPATH": "/task"}, environ={"PYTHONPATH": "/image", "PATH": "/bin"}
+        {"PYTHONPATH": "/task"},
+        environ={"PYTHONPATH": "/image", "PATH": "/bin", "IPYTHONDIR": "/elsewhere"},
+        private_dir=str(tmp_path),
     )
     assert env["PYTHONPATH"] == "/task" and env["PATH"] == "/bin"
+    assert env["IPYTHONDIR"].startswith(str(tmp_path))
