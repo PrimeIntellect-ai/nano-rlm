@@ -131,14 +131,15 @@ Startup/capture failures populate .error. When piping a command through `tail`, 
 another filter, use `set -o pipefail` so a failed command cannot be hidden by the filter's
 successful exit status.
 
-.text is capped at 16 KiB. Prefer `grep -n`, `sed -n 'A,Bp'`, `head`, and `tail` over
-printing whole files or whole test logs; print the parts needed for your next decision.
-If .truncated is true, the rest of the output is retained; continue reading from where
-.text stopped instead of re-running the command:
+.text is capped at 16 KiB: longer output keeps its first and last 8 KiB around a marker
+that names the omitted byte range, so the first failure and the final summary both survive
+without piping through `tail`. Prefer `grep -n`, `sed -n 'A,Bp'`, and `head` over printing
+whole files; print the parts needed for your next decision. If .truncated is true, the whole
+output is retained; read the omitted part instead of re-running the command:
 ```python
 if result.truncated:
     job = await rlm.shell.get(result.job_id)
-    chunk = await job.read(cursor=16384, max_bytes=65536)
+    chunk = await job.read(cursor=8192, max_bytes=65536)
 ```
 Commands can contain multiline Bash scripts, but never embed Python source in
 `python -c '...'` or in a heredoc inside the command string. Write substantial scripts to a
@@ -184,9 +185,9 @@ Agent cleanup errors are reported separately in AgentInfo.cleanup_error; complet
 
 ## Inbox and waiting
 `await rlm.inbox.list()` returns unread event dictionaries: ["id"], ["type"],
-["sender_id"], ["created_at"], ["read"]. Listing does not mark events read.
-`event = await rlm.inbox.read(event_id)` returns a dictionary with ["content"] and
-marks it read. `list(unread_only=False)` includes read events; reads are repeatable.
+["sender_id"], ["created_at"], ["read"]; listed items carry no ["content"] and listing
+does not mark events read. `event = await rlm.inbox.read(event_id)` returns a dictionary
+whose ["content"] is itself a dictionary (index its keys; do not slice it) and marks it read. `list(unread_only=False)` includes read events; reads are repeatable.
 A read flag means retrieved, not completed or acted upon.
 
 Supervisor notifications show only an unread count. You choose when to inspect payloads.

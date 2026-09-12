@@ -44,6 +44,12 @@ async def test_bash_capture_limits_failure_and_cleanup(tmp_path, monkeypatch):
             "done": True,
             "truncated": True,
         }
+        assert jobs.read(job, 99, 4) == {
+            "text": "",
+            "next_cursor": 8,
+            "done": True,
+            "truncated": True,
+        }
         with pytest.raises(PermissionError):
             jobs.get("another-agent", job.info.id)
         failed = start("true", tmp_path / "missing")
@@ -103,7 +109,11 @@ assert result.text == 'one two' and result.exit_code == 7
 assert not result.truncated and result.error is None
 assert (await (await rlm.shell.get(result.job_id)).read()).text == result.text
 result = await rlm.shell.run("printf '%20000s' x")
-assert len(result.text) == 16384 and result.truncated
+assert result.truncated and result.text.endswith('x') and 'bytes omitted' in result.text
+assert result.text.startswith(' ' * 8192) and len(result.text) < 16384 + 200
+job = await rlm.shell.get(result.job_id)
+past = await job.read(cursor=10**6)
+assert past.text == '' and past.done and past.next_cursor == 20000
 failed = await rlm.shell.run('true', cwd='missing-directory')
 assert failed.exit_code is None and failed.error
 assert not [e for e in await rlm.inbox.list() if e['type'] == 'shell.completed'], 'run() must not post inbox events'
