@@ -199,7 +199,17 @@ class ShellJobs:
                 job.update(status="cancelled", output_complete=True)
                 return
             process = subprocess.Popen(
-                ["/bin/bash", "--noprofile", "--norc", "-c", job.info.command],
+                [
+                    "/bin/bash",
+                    "--noprofile",
+                    "--norc",
+                    # pipefail: a pipeline's exit code is its first failing stage, so
+                    # `pytest ... | tail -20` cannot report the tail's 0 for a failed run
+                    "-o",
+                    "pipefail",
+                    "-c",
+                    job.info.command,
+                ],
                 cwd=job.info.cwd,
                 env=env,
                 stdin=subprocess.DEVNULL,
