@@ -62,8 +62,9 @@ IPYTHON_TIMEOUT_MAX_SECONDS = 600
 # The kernel and supervisor-owned Bash inherit this process's environment (in a
 # sandbox: the image's ENV plus whatever the launcher added; locally: the developer's
 # shell) minus a blocklist. Blocked: credential-looking names, values that embed URL
-# credentials, variables that would break or redirect the kernel's own interpreter and
-# venv, and agent/daemon sockets. Everything else passes so that projects see the
+# credentials, launcher provider/infra configuration (OPENAI_*, PRIME_*, RLM_*, AWS_*, ...),
+# variables that would break or redirect the kernel's own interpreter and venv, and
+# agent/daemon sockets. Everything else passes so that projects see the
 # toolchain the way their own tests do (PYTHONPATH, GOMODCACHE, NODE_OPTIONS, ...).
 _KERNEL_SECRET_ENV_RE = re.compile(
     r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|COOKIE|SESSION",
@@ -95,7 +96,31 @@ _KERNEL_ENV_BLOCKED_NAMES = {
     "DBUS_SESSION_BUS_ADDRESS",
     "KUBECONFIG",
 }
-_KERNEL_ENV_BLOCKED_PREFIXES = ("BUNDLE_",)  # Bundler stores user:password per host
+_KERNEL_ENV_BLOCKED_PREFIXES = (
+    "BUNDLE_",  # Bundler stores user:password per host
+    # provider / infrastructure configuration of the launcher, not of the task
+    "OPENAI_",
+    "ANTHROPIC_",
+    "PRIME_",
+    "RLM_",
+    "VLLM_",
+    "HF_",
+    "HUGGING",
+    "WANDB_",
+    "AWS_",
+    "AZURE_",
+    "GOOGLE_",
+    "GCP_",
+    "GITHUB_",
+    "GH_",
+    "SLACK_",
+    "SENTRY_",
+    "DATADOG_",
+    "DD_",
+    "OTEL_",
+    "STRIPE_",
+    "TWILIO_",
+)
 
 
 def _passes_kernel_env(key: str, value: str) -> bool:

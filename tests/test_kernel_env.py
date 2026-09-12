@@ -31,6 +31,10 @@ def test_kernel_env_passes_everything_except_the_blocklist():
         "SSH_AUTH_SOCK": "/tmp/agent",
         "BUNDLE_GEMS__EXAMPLE__COM": "user:pass",
         "IPYTHONDIR": "/elsewhere",
+        "OPENAI_BASE_URL": "https://api.example",
+        "PRIME_TEAM_ID": "team",
+        "RLM_BASE_URL": "http://broker",
+        "AWS_REGION": "eu-west-1",
     }
     env = build_kernel_env({"TASK_FLAG": "1"}, environ=environ)
     for key in (
