@@ -61,26 +61,98 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 IPYTHON_TIMEOUT_MAX_SECONDS = 600
 # Toolchain configuration that container images set through ENV and that both the
 # kernel and supervisor-owned Bash need to see the project the way its tests do
-# (module paths, caches, proxies). Anything that looks like a credential is still
-# dropped even when its name matches a prefix (GOOGLE_APPLICATION_CREDENTIALS, ...).
+# (module paths, caches, proxies). The source is this process's environment, so
+# in a sandbox it is the image's ENV plus whatever the launcher added; locally it is
+# the developer's shell. Names are filtered by prefix/allowlist, credential-looking
+# names are dropped, values that embed URL credentials are dropped, and variables
+# that would override rather than describe a toolchain (PYTHONHOME, UV_PYTHON, ...)
+# are excluded.
 _KERNEL_TOOLCHAIN_ENV_PREFIXES = (
-    "LC_", "PYTHON", "GO", "NODE", "NPM_CONFIG_", "YARN_", "PNPM_", "CARGO_", "RUSTUP_",
-    "RUST", "JAVA_", "MAVEN_", "GRADLE_", "UV_", "PIP_", "POETRY_", "CONDA_", "XDG_",
-    "DOTNET_", "GEM_", "BUNDLE_", "COMPOSER_", "PHP_", "RUBY", "DENO_", "BUN_",
+    "LC_",
+    "PYTHON",
+    "NODE_",
+    "NPM_CONFIG_",
+    "YARN_",
+    "PNPM_",
+    "CARGO_",
+    "RUSTUP_",
+    "RUSTFLAGS",
+    "JAVA_",
+    "MAVEN_",
+    "GRADLE_",
+    "UV_",
+    "PIP_",
+    "POETRY_",
+    "CONDA_",
+    "XDG_",
+    "DOTNET_",
+    "GEM_",
+    "COMPOSER_",
+    "DENO_",
+    "BUN_",
 )
 _KERNEL_TOOLCHAIN_ENV_NAMES = {
-    "LD_LIBRARY_PATH", "LIBRARY_PATH", "PKG_CONFIG_PATH", "CPATH", "C_INCLUDE_PATH",
-    "CC", "CXX", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "MAKEFLAGS",
-    "DISPLAY", "DEBIAN_FRONTEND", "CI", "DOCKER_HOST",
+    "GOPATH",
+    "GOMODCACHE",
+    "GOCACHE",
+    "GOFLAGS",
+    "GOPROXY",
+    "GONOSUMDB",
+    "GONOSUMCHECK",
+    "GOPRIVATE",
+    "GOSUMDB",
+    "GOTOOLCHAIN",
+    "GOROOT",
+    "GOBIN",
+    "GO111MODULE",
+    "GOWORK",
+    "GOTMPDIR",
+    "CGO_ENABLED",
+    "CGO_CFLAGS",
+    "CGO_LDFLAGS",
+    "LD_LIBRARY_PATH",
+    "LIBRARY_PATH",
+    "PKG_CONFIG_PATH",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CC",
+    "CXX",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CPPFLAGS",
+    "LDFLAGS",
+    "MAKEFLAGS",
+    "DISPLAY",
+    "DEBIAN_FRONTEND",
+    "CI",
 }
-_KERNEL_SECRET_ENV_RE = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I)
+_KERNEL_ENV_OVERRIDES_EXCLUDED = {
+    "PYTHONHOME",
+    "PYTHONSTARTUP",
+    "PYTHONEXECUTABLE",
+    "PYTHONUSERBASE",
+    "UV_PROJECT_ENVIRONMENT",
+    "UV_PYTHON",
+    "UV_RUN_RECURSION_DEPTH",
+    "PIP_TARGET",
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+}
+_KERNEL_SECRET_ENV_RE = re.compile(
+    r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.I
+)
+_KERNEL_SECRET_VALUE_RE = re.compile(r"://[^/\s@]+:[^/\s@]+@")  # user:pass@ in a URL
 
 
-def _passes_kernel_env(key: str) -> bool:
+def _passes_kernel_env(key: str, value: str) -> bool:
     if key in _KERNEL_BASE_ENV_NAMES:
         return True
-    if key in _KERNEL_TOOLCHAIN_ENV_NAMES or key.startswith(_KERNEL_TOOLCHAIN_ENV_PREFIXES):
-        return not _KERNEL_SECRET_ENV_RE.search(key)
+    if key in _KERNEL_ENV_OVERRIDES_EXCLUDED or _KERNEL_SECRET_ENV_RE.search(key):
+        return False
+    if key in _KERNEL_TOOLCHAIN_ENV_NAMES or key.startswith(
+        _KERNEL_TOOLCHAIN_ENV_PREFIXES
+    ):
+        return not _KERNEL_SECRET_VALUE_RE.search(value)
     return False
 
 
@@ -117,7 +189,9 @@ def build_kernel_env(
     ]
     if invalid_types:
         raise TypeError("kernel environment keys and values must be strings")
-    kernel_env = {key: value for key, value in source.items() if _passes_kernel_env(key)}
+    kernel_env = {
+        key: value for key, value in source.items() if _passes_kernel_env(key, value)
+    }
     kernel_env.update(explicit)
     kernel_env["NO_COLOR"] = "1"
     if private_dir is not None:
