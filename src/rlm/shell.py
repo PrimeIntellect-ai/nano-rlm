@@ -40,7 +40,9 @@ class ShellResult:
             )
         if name in ("returncode", "status"):
             raise AttributeError(f"ShellResult has no .{name}; use .exit_code.")
-        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+        raise AttributeError(
+            f"{type(self).__name__!r} object has no attribute {name!r}"
+        )
 
 
 @dataclass(frozen=True)
@@ -104,13 +106,17 @@ class JobHandle:
         return JobInfo(**await broker.agent_request("shell.cancel", job_id=self.id))
 
 
-def _command(command) -> str:
-    """Accept a Bash string or an argv list (joined with shell quoting)."""
+def _command(command: str | builtins.list[str]) -> str:
+    """Accept a Bash string or a non-empty argv list (joined with shell quoting)."""
     if isinstance(command, str):
         return command
-    if isinstance(command, (builtins.list, tuple)) and all(isinstance(c, str) for c in command):
+    if (
+        isinstance(command, builtins.list)
+        and command
+        and all(isinstance(c, str) for c in command)
+    ):
         return shlex.join(command)
-    raise TypeError("command must be a Bash string or a list of argv strings")
+    raise TypeError("command must be a Bash string or a non-empty list of argv strings")
 
 
 def _timeout(timeout: float | None) -> float | None:
@@ -133,7 +139,7 @@ async def run(
     timeout (seconds) kills the whole process group when exceeded: the result then
     has timed_out=True, exit_code None, and the output captured so far.
     Cancelling the cell stops waiting, not the job; list() can recover its ID.
-    Both run() and start() publish completion events to the inbox.
+    Only start() publishes a completion event to the inbox; run() returns directly.
     """
     return ShellResult(
         **await broker.agent_request(

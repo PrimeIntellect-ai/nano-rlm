@@ -137,8 +137,8 @@ successful exit status.
 .text is capped at 16 KiB: longer output keeps its first and last 8 KiB around a marker
 that names the omitted byte range, so the first failure and the final summary both survive
 without piping through `tail`. Prefer `grep -n`, `sed -n 'A,Bp'`, and `head` over printing
-whole files; print the parts needed for your next decision. If .truncated is true, the whole
-output is retained; read the omitted part instead of re-running the command:
+whole files; print the parts needed for your next decision. If .truncated is true, the output is
+retained (up to 16 MiB per job); read the omitted part instead of re-running the command:
 ```python
 if result.truncated:
     job = await rlm.shell.get(result.job_id)
@@ -155,7 +155,7 @@ script.parent.mkdir(parents=True, exist_ok=True)
 script.write_text('''import package
 print(package.__version__)
 ''')
-result = await rlm.shell.run(f"python {script}", cwd="/workspace/project")
+result = await rlm.shell.run(["python3", str(script)], cwd="/workspace/project")
 ```
 The supervisor API is the only shell: do not call subprocess or os.system from the kernel.
 Reuse Python variables and helpers across cells.
@@ -194,7 +194,9 @@ Agent cleanup errors are reported separately in AgentInfo.cleanup_error; complet
 `await rlm.inbox.list()` returns unread event dictionaries: ["id"], ["type"],
 ["sender_id"], ["created_at"], ["read"]; listed items carry no ["content"] and listing
 does not mark events read. `event = await rlm.inbox.read(event_id)` returns a dictionary
-whose ["content"] is itself a dictionary (index its keys; do not slice it) and marks it read. `list(unread_only=False)` includes read events; reads are repeatable.
+with ["content"] and marks it read. For supervisor events (shell.completed, agent.completed,
+watch.*) content is a dictionary: index its keys, do not slice it; for agent.message it is
+the string a child sent. `list(unread_only=False)` includes read events; reads are repeatable.
 A read flag means retrieved, not completed or acted upon.
 
 Supervisor notifications show only an unread count. You choose when to inspect payloads.

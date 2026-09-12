@@ -32,8 +32,10 @@ class ShellJob:
     started: float = field(default_factory=time.monotonic)
     finished: float | None = None
     cancel_requested: bool = False
-    timed_out: bool = False
-    notify: bool = True  # publish shell.completed to the owner's inbox (start(); not run())
+    timed_out: bool = False  # set by the loop when the deadline fires; JobInfo.timed_out derives from status
+    notify: bool = (
+        True  # publish shell.completed to the owner's inbox (start(); not run())
+    )
     task: asyncio.Task | None = None
 
     def snapshot(self) -> dict:
@@ -140,13 +142,16 @@ class ShellJobs:
         total = job.info.output_bytes
         if total <= RUN_TEXT_BYTES:
             chunk = self.read(job, 0, RUN_TEXT_BYTES)
-            return {"text": chunk["text"], "truncated": chunk["truncated"] or not chunk["done"]}
+            return {
+                "text": chunk["text"],
+                "truncated": chunk["truncated"] or not chunk["done"],
+            }
         half = RUN_TEXT_BYTES // 2
         head = self.read(job, 0, half)["text"]
         tail = self.read(job, total - half, half)["text"]
         omitted = total - 2 * half
         marker = (
-            f"\n[... {omitted} bytes omitted; the full output is retained: "
+            f"\n[... {omitted} bytes omitted; output is retained up to 16 MiB: "
             f"job = await rlm.shell.get(result.job_id); await job.read(cursor={half}) ...]\n"
         )
         return {"text": head + marker + tail, "truncated": True}
