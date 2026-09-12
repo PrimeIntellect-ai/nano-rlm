@@ -32,6 +32,11 @@ from rlm.mcp import (
     write_skill_modules,
 )
 from rlm.shell_jobs import DEFAULT_RUN_TIMEOUT, ShellJob, ShellJobs
+
+LONG_RUN_NOTE_SECONDS = (
+    60.0  # a blocking run() at least this long earns a one-line note
+)
+MAX_LONG_RUN_NOTES = 3  # per agent; after that the habit is the model's choice
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
@@ -71,6 +76,10 @@ class _Invocation:
     released: bool = False
     result: RLMResult | None = None
     shell_env: dict[str, str] = field(default_factory=dict)  # rlm.shell.setenv overlay
+    notes: list[str] = field(
+        default_factory=list
+    )  # one-off supervisor notes for the next turn
+    long_run_notes: int = 0
     result_request_id: str | None = None
     engine: RLMEngine | None = None
     runner: asyncio.Task[None] | None = None
@@ -548,6 +557,9 @@ class SessionTreeSupervisor:
         agent.announced = len(agent.inbox)
         count = sum(not event["read"] for event in agent.inbox)
         notices = []
+        if agent.notes:
+            notices.extend(agent.notes)
+            agent.notes.clear()
         if agent.inbox_error:
             notices.append(agent.inbox_error)
         if count:
@@ -708,6 +720,19 @@ class SessionTreeSupervisor:
                 return info
             job = self._shell_jobs.get(parent.id, info["id"])
             await asyncio.shield(job.task)
+            elapsed = (job.finished or time.monotonic()) - job.started
+            if (
+                elapsed >= LONG_RUN_NOTE_SECONDS
+                and parent.long_run_notes < MAX_LONG_RUN_NOTES
+            ):
+                # Said at the moment of the habit, not as a rule in the guide: models
+                # act on event-shaped feedback far more than on prose.
+                parent.long_run_notes += 1
+                parent.notes.append(
+                    f"The last rlm.shell.run() blocked for {elapsed:.0f} s. Commands that long "
+                    "belong in rlm.shell.start(): you can keep working and collect the "
+                    "result from the shell.completed inbox event."
+                )
             output = self._shell_jobs.run_text(job)
             return {
                 "text": output["text"],
