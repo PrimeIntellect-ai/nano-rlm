@@ -106,6 +106,7 @@ result = await rlm.shell.run("printf '%20000s' x")
 assert len(result.text) == 16384 and result.truncated
 failed = await rlm.shell.run('true', cwd='missing-directory')
 assert failed.exit_code is None and failed.error
+assert not [e for e in await rlm.inbox.list() if e['type'] == 'shell.completed'], 'run() must not post inbox events'
 import asyncio
 listed = await rlm.shell.list()
 assert listed[-1].handle().id == listed[-1].id and not hasattr(listed[-1], 'read')
