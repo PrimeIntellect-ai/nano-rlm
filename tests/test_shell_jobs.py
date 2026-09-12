@@ -105,7 +105,15 @@ except RuntimeError:
 else:
     raise AssertionError('Git policy was bypassed')
 result = await rlm.shell.run("values=(one two); printf '%s' \"${values[*]}\"; exit 7")
-assert result.text == 'one two' and result.exit_code == 7
+assert result.text == 'one two' and result.exit_code == 7 and not result.ok
+argv = await rlm.shell.run(['printf', '%s %s', 'a b', 'c'])
+assert argv.ok and argv.text == 'a b c'
+try:
+    await rlm.shell.run(['ls', 3])
+except TypeError:
+    pass
+else:
+    raise AssertionError('non-string argv accepted')
 assert not result.truncated and result.error is None
 assert (await (await rlm.shell.get(result.job_id)).read()).text == result.text
 result = await rlm.shell.run("printf '%20000s' x")
