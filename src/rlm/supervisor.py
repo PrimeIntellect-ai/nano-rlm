@@ -75,9 +75,10 @@ class _Invocation:
     released: bool = False
     result: RLMResult | None = None
     shell_env: dict[str, str] = field(default_factory=dict)  # rlm.shell.setenv overlay
-    notes: list[str] = field(
+    notes: list[tuple[str, str]] = field(
         default_factory=list
-    )  # one-off supervisor notes for the next turn
+    )  # (tag, text) for next turn
+    muted_hints: set[str] = field(default_factory=set)  # rlm.hints.mute()
     long_run_notes: int = 0
     result_request_id: str | None = None
     engine: RLMEngine | None = None
@@ -551,13 +552,24 @@ class SessionTreeSupervisor:
                 )
         return selected
 
+    @staticmethod
+    def _hint(agent: _Invocation, tag: str, text: str) -> None:
+        """Queue a tagged one-line hint for the agent's next turn unless the tag is muted."""
+        if tag in agent.muted_hints:
+            return
+        agent.notes.append(
+            (tag, f'{text} (Mute this hint with await rlm.hints.mute("{tag}").)')
+        )
+
     def inbox_notification(self, invocation_id: str) -> str | None:
         agent = self._invocations[invocation_id]
         agent.announced = len(agent.inbox)
         count = sum(not event["read"] for event in agent.inbox)
         notices = []
         if agent.notes:
-            notices.extend(agent.notes)
+            notices.extend(
+                text for tag, text in agent.notes if tag not in agent.muted_hints
+            )
             agent.notes.clear()
         if agent.inbox_error:
             notices.append(agent.inbox_error)
@@ -732,11 +744,13 @@ class SessionTreeSupervisor:
                 )
                 if parent.long_run_notes < MAX_LONG_RUN_NOTES:
                     parent.long_run_notes += 1
-                    parent.notes.append(
+                    self._hint(
+                        parent,
+                        "run-detach",
                         f"rlm.shell.run() detached after {RUN_DETACH_SECONDS:g} s: the command is "
                         "still running as a background job. Commands that long belong in "
                         "rlm.shell.start(); keep working and collect the result from the "
-                        "shell.completed inbox event."
+                        "shell.completed inbox event.",
                     )
                 return {
                     "text": marker + partial["text"],
@@ -777,6 +791,13 @@ class SessionTreeSupervisor:
             return await self._watch_operation(parent, request)
         if op.startswith("shell."):
             return await self._shell_operation(parent, request)
+        if op.startswith("hints."):
+            tags = set(request.get("tags") or [])
+            if op == "hints.mute":
+                parent.muted_hints |= tags
+            elif op == "hints.unmute":
+                parent.muted_hints -= tags
+            return {"muted": sorted(parent.muted_hints)}
         if op == "inbox.list":
             return [
                 {
