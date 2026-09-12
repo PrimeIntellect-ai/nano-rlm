@@ -107,7 +107,8 @@ failed = await rlm.shell.run('true', cwd='missing-directory')
 assert failed.exit_code is None and failed.error
 import asyncio
 listed = await rlm.shell.list()
-assert (await listed[-1].info()).id == listed[-1].id and listed[-1].handle().id == listed[-1].id
+assert listed[-1].handle().id == listed[-1].id and not hasattr(listed[-1], 'read')
+assert (await listed[-1].handle().info()).id == listed[-1].id
 timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)
 assert timed.timed_out and timed.exit_code is None and timed.text == 'partial'
 assert 'timed out' in timed.error
