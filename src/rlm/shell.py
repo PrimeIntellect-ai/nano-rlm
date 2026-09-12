@@ -11,6 +11,9 @@ from typing import Literal
 from rlm import broker
 
 
+MAX_READ_BYTES = 65_536
+
+
 @dataclass(frozen=True)
 class ShellResult:
     text: str
@@ -93,11 +96,15 @@ class JobHandle:
         """Read combined stdout/stderr using a byte cursor; reads do not consume output.
 
         Chunks decode as UTF-8 with replacement. A cursor may split a multibyte
-        character; the output file retains the exact captured bytes.
+        character; the output file retains the exact captured bytes. max_bytes is
+        clamped to MAX_READ_BYTES (65536); continue with next_cursor for more.
         """
         return JobOutput(
             **await broker.agent_request(
-                "shell.read", job_id=self.id, cursor=cursor, max_bytes=max_bytes
+                "shell.read",
+                job_id=self.id,
+                cursor=cursor,
+                max_bytes=max(1, min(int(max_bytes), MAX_READ_BYTES)),
             )
         )
 

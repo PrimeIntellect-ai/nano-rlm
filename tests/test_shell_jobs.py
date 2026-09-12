@@ -123,6 +123,8 @@ assert result.text.startswith(' ' * 8192) and len(result.text) < 16384 + 200
 job = await rlm.shell.get(result.job_id)
 past = await job.read(cursor=10**6)
 assert past.text == '' and past.done and past.next_cursor == 20000
+big = await job.read(cursor=0, max_bytes=10**6)
+assert len(big.text.encode()) == 20000 and big.done  # max_bytes clamped to 64 KiB, output is 20000 bytes
 failed = await rlm.shell.run('true', cwd='missing-directory')
 assert failed.exit_code is None and failed.error
 assert not [e for e in await rlm.inbox.list() if e['type'] == 'shell.completed'], 'run() must not post inbox events'
