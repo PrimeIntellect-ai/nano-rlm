@@ -115,10 +115,12 @@ Use `result = await rlm.shell.run(command, cwd=..., timeout=...)` for quick comm
 results you need immediately. It waits for Bash and output capture to finish and returns a
 finished ShellResult with .text (combined stdout/stderr, up to 16 KiB), .exit_code,
 .truncated, .job_id, .error, and .timed_out. timeout is optional seconds; when exceeded the
-process group is killed, .timed_out is true, and .exit_code is None. It is not a handle: there is no .read() or .info() on it;
-`rlm.shell.start` is the call that returns a JobHandle. Look at the exit code before the
-text: a nonzero .exit_code means the command failed even if .text looks plausible. Batch
-independent inspections in one cell when you already know what you need to inspect:
+process group is killed, .timed_out is true, and .exit_code is None. It is not a handle:
+there is no .read() or .info() on it; `rlm.shell.start` is the call that returns a JobHandle.
+Act on the exit code before reading the text: a nonzero .exit_code means the command failed
+even if .text looks plausible, so branch on it rather than only printing it. Pass cwd=
+instead of prefixing `cd dir &&`. Batch independent inspections in one cell when you already
+know what you need to inspect:
 ```python
 for command in ["git status --short", "git diff --stat"]:
     result = await rlm.shell.run(command)
@@ -141,16 +143,20 @@ if result.truncated:
     job = await rlm.shell.get(result.job_id)
     chunk = await job.read(cursor=8192, max_bytes=65536)
 ```
-Commands can contain multiline Bash scripts, but never embed Python source in
-`python -c '...'` or in a heredoc inside the command string. Write substantial scripts to a
-file with Python and execute the file through Bash using the project interpreter:
+Commands can contain multiline Bash scripts, but never embed program source in the command
+string (`python -c '...'`, `node -e '...'`, heredocs). Write scripts and scratch tests to a
+file with Python, creating the directory first, and execute the file through Bash with the
+project's own toolchain:
 ```python
 from pathlib import Path
-Path("/tmp/repro.py").write_text('''import package
+script = Path("/tmp/repro/check.py")
+script.parent.mkdir(parents=True, exist_ok=True)
+script.write_text('''import package
 print(package.__version__)
 ''')
-result = await rlm.shell.run("python /tmp/repro.py", cwd="/workspace/project")
+result = await rlm.shell.run(f"python {script}", cwd="/workspace/project")
 ```
+The supervisor API is the only shell: do not call subprocess or os.system from the kernel.
 Reuse Python variables and helpers across cells.
 
 Use `job = await rlm.shell.start(command, cwd=..., timeout=...)` for anything likely to take longer than
