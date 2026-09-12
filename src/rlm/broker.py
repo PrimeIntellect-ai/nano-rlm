@@ -134,6 +134,14 @@ class BrokerShellEnvRequest(TypedDict):
     variables: dict[str, str] | None
 
 
+class BrokerHintsRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["hints.mute", "hints.unmute", "hints.muted"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    tags: list[Annotated[str, Field(min_length=1, max_length=64)]]
+
+
 class BrokerShellListRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
     op: Literal["shell.list"]
@@ -223,6 +231,7 @@ BrokerRequest = Annotated[
     | BrokerShellListRequest
     | BrokerShellHandleRequest
     | BrokerShellEnvRequest
+    | BrokerHintsRequest
     | BrokerShellReadRequest
     | BrokerWatchAgentRequest
     | BrokerWatchJobRequest

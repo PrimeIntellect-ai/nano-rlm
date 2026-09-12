@@ -204,7 +204,9 @@ watch.*) content is a dictionary: index its keys, do not slice it; for agent.mes
 the string a child sent. `list(unread_only=False)` includes read events; reads are repeatable.
 A read flag means retrieved, not completed or acted upon.
 
-Supervisor notifications show only an unread count. You choose when to inspect payloads.
+Supervisor notifications show only an unread count, plus occasional one-line hints about
+runtime use, each with a tag; `await rlm.hints.mute("tag")` stops a hint you have understood.
+You choose when to inspect payloads.
 When work remains but nothing is actionable, call the native `wait` tool (outside Python),
 with timeout at most 300 seconds. It suspends inference without holding a cell open.
 New arrivals wake it; already-announced unread events do not. Inspect existing unread

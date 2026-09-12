@@ -150,6 +150,12 @@ bg = await rlm.shell.get(detached.job_id)
 assert (await bg.info()).status == 'running'
 await bg.cancel()
 assert (await bg.info()).status == 'cancelled'
+assert (await rlm.hints.muted()) == []
+assert (await rlm.hints.mute('run-detach')) == ['run-detach']
+muted_run = await rlm.shell.run('sleep 30')  # detaches again, but the hint is muted now
+assert muted_run.running
+await (await rlm.shell.get(muted_run.job_id)).cancel()
+assert (await rlm.hints.unmute('run-detach')) == []
 timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)
 assert timed.timed_out and timed.exit_code is None and timed.text == 'partial'
 assert 'timed out' in timed.error
@@ -201,12 +207,15 @@ print('SHELL_OK')
             t.startswith("Note: wait timeout clamped from 400 to 300")
             for t in tool_outputs
         )
-        assert any(
-            "detached after" in str(m.get("content", ""))
+        hint_msgs = [
+            str(m.get("content", ""))
             for call in client.calls
             for m in call["messages"]
-            if m.get("role") == "user"
-        ), "detach note never reached the model"
+            if m.get("role") == "user" and "detached after" in str(m.get("content", ""))
+        ]
+        assert hint_msgs, "detach hint never reached the model"
+        assert 'rlm.hints.mute("run-detach")' in hint_msgs[0]
+        assert len(set(hint_msgs)) == 1  # the second detach happened after mute()
     finally:
         supervisor = engine._supervisor
         await engine.aclose()
