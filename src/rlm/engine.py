@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import re
 import logging
 import os
 import time
@@ -137,6 +138,27 @@ EMPTY_REPLY_NUDGE = (
     "tool, or state your final answer in plain text."
 )
 
+# A tool-less reply that announces the next step ("Let me look at the tests:") is a plan
+# whose tool call went missing, not a final answer; one nudge lets the model resume.
+MAX_PLAN_REPLY_NUDGES = 1
+PLAN_REPLY_NUDGE = (
+    "Your last reply reads as a plan, not a final answer, and made no tool call. If the "
+    "task is complete, state what you changed; otherwise continue with the next action."
+)
+_PLAN_OPENER_RE = re.compile(
+    r"^(Let me|Let's|I'll|I will|Now let me|Now I|Next,? I|First,? I|I need to|I should)\b"
+)
+
+
+def _looks_like_plan(text: str) -> bool:
+    """A short reply that opens like a next step, or any reply that ends in a colon."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return stripped.endswith(":") or (
+        len(stripped) < 300 and bool(_PLAN_OPENER_RE.match(stripped))
+    )
+
 
 class RLMEngine:
     def __init__(
@@ -236,6 +258,7 @@ class RLMEngine:
         self._active_tool_schemas: list[dict] = []
         self._turn = 0
         self._empty_reply_nudges = 0
+        self._plan_reply_nudges = 0
         self._last_answer = ""
         self._has_result = False
         self._started = False
@@ -272,6 +295,7 @@ class RLMEngine:
         if self._closed or self._close_task is not None:
             raise RuntimeError("RLM engine is closed")
         self._empty_reply_nudges = 0  # the nudge budget is per user turn
+        self._plan_reply_nudges = 0
 
         if self.session is not None:
             self.session.check_writable()
@@ -652,10 +676,26 @@ class RLMEngine:
                         in_context=True,
                     )
                     continue
+                if (
+                    _looks_like_plan(msg.content or "")
+                    and response.choices[0].finish_reason
+                    in (None, "stop", "tool_calls")
+                    and self._plan_reply_nudges < MAX_PLAN_REPLY_NUDGES
+                ):
+                    self._plan_reply_nudges += 1
+                    self.session.log(
+                        {
+                            "type": "plan_reply_nudge",
+                            "message": {"role": "user", "content": PLAN_REPLY_NUDGE},
+                        },
+                        in_context=True,
+                    )
+                    continue
                 self._metrics.stop_reason = "done"
                 final_text = msg.content or ""
                 break
             self._empty_reply_nudges = 0
+            self._plan_reply_nudges = 0
 
             tc = msg.tool_calls[0]
             tool_name = tc.function.name
