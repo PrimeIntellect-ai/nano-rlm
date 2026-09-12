@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 import pytest
 
@@ -283,5 +284,39 @@ async def test_job_timeout_kills_process_group(tmp_path, monkeypatch):
         await asyncio.wait_for(asyncio.shield(untimed_job.task), 5)
         assert untimed_job.info.status == "completed"
         assert untimed_job.info.timeout is None
+    finally:
+        await jobs.close()
+
+
+async def test_job_that_exited_before_the_deadline_tick_keeps_its_exit_code(
+    tmp_path, monkeypatch
+):
+    """Regression: the deadline check must not relabel an already-exited process."""
+    monkeypatch.setattr("rlm.shell_jobs.DRAIN_SECONDS", 0.05)
+    real_popen = subprocess.Popen
+
+    def exited_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        process.wait(5)  # the process is finished before the loop's first tick
+        return process
+
+    monkeypatch.setattr("rlm.shell_jobs.subprocess.Popen", exited_popen)
+    jobs = ShellJobs(lambda job: None)
+    try:
+        info = jobs.start(
+            owner_id="owner",
+            command="printf done; exit 3",
+            cwd=str(tmp_path),
+            directory=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+            source_request_id=None,
+            timeout=1e-6,  # already expired when the loop first looks at it
+        )
+        job = jobs.get("owner", info["id"])
+        await asyncio.wait_for(asyncio.shield(job.task), 5)
+        assert job.info.status == "completed"
+        assert job.info.exit_code == 3
+        assert job.info.error is None
+        assert jobs.read(job, 0, 64)["text"] == "done"
     finally:
         await jobs.close()
