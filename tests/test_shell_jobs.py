@@ -108,12 +108,13 @@ result = await rlm.shell.run("values=(one two); printf '%s' \"${values[*]}\"; ex
 assert result.text == 'one two' and result.exit_code == 7 and not result.ok
 argv = await rlm.shell.run(['printf', '%s %s', 'a b', 'c'])
 assert argv.ok and argv.text == 'a b c'
-try:
-    await rlm.shell.run(['ls', 3])
-except TypeError:
-    pass
-else:
-    raise AssertionError('non-string argv accepted')
+for bad in (['ls', 3], []):
+    try:
+        await rlm.shell.run(bad)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError(f'bad argv accepted: {bad!r}')
 assert not result.truncated and result.error is None
 assert (await (await rlm.shell.get(result.job_id)).read()).text == result.text
 result = await rlm.shell.run("printf '%20000s' x")
@@ -143,7 +144,7 @@ except ValueError:
 else:
     raise AssertionError('negative timeout accepted')
 waiting = asyncio.create_task(rlm.shell.run('sleep 30'))
-while len(await rlm.shell.list()) < 7:
+while len(await rlm.shell.list()) < 8:
     await asyncio.sleep(0.01)
 waiting.cancel()
 try:
@@ -169,8 +170,12 @@ print('SHELL_OK')
             json.loads(line)
             for line in (session.dir / "messages.jsonl").read_text().splitlines()
         ]
-        tool_outputs = [r.get("content", "") for r in records if r.get("type") == "tool_result"]
-        assert any(t.strip() == "SHELL_OK" for t in tool_outputs), tool_outputs[-1][-1500:]
+        tool_outputs = [
+            r.get("content", "") for r in records if r.get("type") == "tool_result"
+        ]
+        assert any(t.strip() == "SHELL_OK" for t in tool_outputs), tool_outputs[-1][
+            -1500:
+        ]
     finally:
         supervisor = engine._supervisor
         await engine.aclose()

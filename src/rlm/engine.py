@@ -271,6 +271,7 @@ class RLMEngine:
         """Run one user turn while preserving conversation and kernel state."""
         if self._closed or self._close_task is not None:
             raise RuntimeError("RLM engine is closed")
+        self._empty_reply_nudges = 0  # the nudge budget is per user turn
 
         if self.session is not None:
             self.session.check_writable()
@@ -635,7 +636,11 @@ class RLMEngine:
                 # times, before accepting the empty answer.
                 if (
                     not (msg.content or "").strip()
-                    and response.choices[0].finish_reason == "stop"
+                    # a lost tool call surfaces as "stop", as "tool_calls" with an
+                    # empty list, or with no finish reason at all; "length" is a
+                    # different failure handled by compaction
+                    and response.choices[0].finish_reason
+                    in (None, "stop", "tool_calls")
                     and self._empty_reply_nudges < MAX_EMPTY_REPLY_NUDGES
                 ):
                     self._empty_reply_nudges += 1
