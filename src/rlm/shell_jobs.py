@@ -23,6 +23,10 @@ MAX_JOBS = 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DRAIN_SECONDS = 2.0
 RUN_TEXT_BYTES = 16 * 1024  # run() returns at most this much: head + tail of the output
+# A blocking run() with no explicit timeout is killed after this many seconds: a command
+# that never exits (a server started in the foreground) must come back as timed_out
+# instead of hanging the cell past the kernel's 600 s limit and forcing a kernel restart.
+DEFAULT_RUN_TIMEOUT = 540.0
 
 
 @dataclass
