@@ -76,6 +76,7 @@ async def test_bash_capture_limits_failure_and_cleanup(tmp_path, monkeypatch):
 async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch):
     monkeypatch.setenv("SHELL_TEST_PRIVATE_KEY", "must-not-leak")
     monkeypatch.setattr("rlm.supervisor.DEFAULT_RUN_TIMEOUT", 0.5)
+    monkeypatch.setattr("rlm.supervisor.LONG_RUN_NOTE_SECONDS", 0.2)
 
     def tool(code):
         return DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})])
@@ -143,6 +144,8 @@ import asyncio
 listed = await rlm.shell.list()
 assert listed[-1].handle().id == listed[-1].id and not hasattr(listed[-1], 'read')
 assert (await listed[-1].handle().info()).id == listed[-1].id
+slow = await rlm.shell.run('sleep 0.3; printf slow')
+assert slow.ok and slow.text == 'slow'
 untimed = await rlm.shell.run('printf server; sleep 30')  # no timeout= -> DEFAULT_RUN_TIMEOUT
 assert untimed.timed_out and untimed.text == 'server'
 timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)
@@ -195,6 +198,12 @@ print('SHELL_OK')
             t.startswith("Note: wait timeout clamped from 400 to 300")
             for t in tool_outputs
         )
+        assert any(
+            "blocked for" in str(m.get("content", ""))
+            for call in client.calls
+            for m in call["messages"]
+            if m.get("role") == "user"
+        ), "long blocking run() note never reached the model"
     finally:
         supervisor = engine._supervisor
         await engine.aclose()
