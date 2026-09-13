@@ -393,3 +393,36 @@ async def test_running_instruction_failure_at_tree_budget(
     finally:
         release.set()
         await supervisor.aclose()
+
+
+async def test_inbox_notice_repeats_only_when_the_count_changes(session):
+    supervisor = SessionTreeSupervisor(
+        root_session=session, runtime_config=_config(), cwd=str(session.dir)
+    )
+    await supervisor.start()
+    scope = await supervisor.open_scope(supervisor.root_id)
+    endpoint = supervisor.endpoint_for(supervisor.root_id)
+    owner = supervisor._invocations[supervisor.root_id]
+    try:
+        assert supervisor.inbox_notification(owner.id) is None
+        first = supervisor._event(owner, "agent.completed", {"agent_id": "a"}, None)
+        supervisor._publish(owner, first)
+        assert "Inbox: 1 unread" in supervisor.inbox_notification(owner.id)
+        # nothing changed: the same line is not repeated on the next turns
+        assert supervisor.inbox_notification(owner.id) is None
+        assert supervisor.inbox_notification(owner.id) is None
+        second = supervisor._event(owner, "agent.completed", {"agent_id": "b"}, None)
+        supervisor._publish(owner, second)
+        assert "Inbox: 2 unread" in supervisor.inbox_notification(owner.id)
+        await supervisor._agent_operation(
+            dict(
+                op="inbox.read",
+                capability=endpoint.capability,
+                scope_id=scope,
+                event_id=first["id"],
+            )
+        )
+        assert "Inbox: 1 unread" in supervisor.inbox_notification(owner.id)
+        assert supervisor.inbox_notification(owner.id) is None
+    finally:
+        await supervisor.aclose()
