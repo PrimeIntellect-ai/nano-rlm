@@ -141,6 +141,19 @@ EMPTY_REPLY_NUDGE = (
 # A tool-less reply that announces the next step ("Let me look at the tests:") is a plan
 # whose tool call went missing, not a final answer; one nudge lets the model resume.
 MAX_PLAN_REPLY_NUDGES = 1
+
+# A SyntaxError from program text nested inside a Python string literal (the cell's own
+# code, not the program it wrote) earns a one-line hint on the delimiter fix, up to this
+# many times per prompt; muted with rlm.hints.mute("quote-nesting").
+MAX_QUOTE_NESTING_HINTS = 2
+_QUOTE_NESTING_RE = re.compile(r"Cell In\[\d+\][\s\S]{0,400}?SyntaxError: ")
+_TRIPLE_QUOTE_RE = re.compile(r"\"\"\"|'''")
+QUOTE_NESTING_HINT = (
+    "That SyntaxError comes from program text nested inside a Python string literal. Pick a "
+    'delimiter the text does not contain: r"""...""" for source with \'\'\' or backslashes, '
+    "r'''...''' for source with \"\"\", or \"\\n\".join([...]) for both; for existing files use "
+    "the edit skill with short old_str/new_str hunks."
+)
 PLAN_REPLY_NUDGE = (
     "Your last reply reads as a plan, not a final answer, and made no tool call. If the "
     "task is complete, state what you changed; otherwise continue with the next action."
@@ -259,6 +272,7 @@ class RLMEngine:
         self._turn = 0
         self._empty_reply_nudges = 0
         self._plan_reply_nudges = 0
+        self._quote_nesting_hints = 0
         self._last_answer = ""
         self._has_result = False
         self._started = False
@@ -502,6 +516,20 @@ class RLMEngine:
     def _publish_agent_step(self, start: int) -> None:
         if self._supervisor is not None:
             self._supervisor.agent_step(self._invocation_id, start)
+
+    def _note_quote_nesting(self, tool_output: str, code: str) -> None:
+        """Hint (at most MAX_QUOTE_NESTING_HINTS times) when the cell's own code fails to parse
+        while it is building program text in a triple-quoted literal: the kernel reports the
+        cell (`Cell In[n]`), not a file, so the failure is the literal nesting, not the program."""
+        if (
+            self._supervisor is None
+            or self._quote_nesting_hints >= MAX_QUOTE_NESTING_HINTS
+            or not _TRIPLE_QUOTE_RE.search(code or "")
+            or not _QUOTE_NESTING_RE.search(tool_output or "")
+        ):
+            return
+        self._quote_nesting_hints += 1
+        self._supervisor.hint(self._invocation_id, "quote-nesting", QUOTE_NESTING_HINT)
 
     def _deliver_kernel_notices(self) -> None:
         if self._repl is None:
@@ -805,6 +833,8 @@ class RLMEngine:
                 call_id=tc.id,
                 context_content=content,
             )
+            if tool_name == "ipython":
+                self._note_quote_nesting(result, str(tool_args.get("code") or ""))
             self._publish_agent_step(step_start)
             self._deliver_kernel_notices()
             messages = self.session.messages

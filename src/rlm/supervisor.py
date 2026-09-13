@@ -606,6 +606,12 @@ class SessionTreeSupervisor:
                     "later run()/start(), and `env={...}` to one call.",
                 )
 
+    def hint(self, invocation_id: str, tag: str, text: str) -> None:
+        """Queue a tagged hint for an agent from outside the supervisor (engine-side observations)."""
+        agent = self._invocations.get(invocation_id)
+        if agent is not None:
+            self._hint(agent, tag, text)
+
     @staticmethod
     def _hint(agent: _Invocation, tag: str, text: str) -> None:
         """Queue a tagged one-line hint for the agent's next turn unless the tag is muted."""
