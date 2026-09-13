@@ -33,7 +33,13 @@ from rlm.mcp import (
     MCPToolDescriptor,
     write_skill_modules,
 )
-from rlm.shell_jobs import RUN_DETACH_SECONDS, RUN_TEXT_BYTES, ShellJob, ShellJobs
+from rlm.shell_jobs import (
+    RUN_BLOCK_MAX_SECONDS,
+    RUN_DETACH_SECONDS,
+    RUN_TEXT_BYTES,
+    ShellJob,
+    ShellJobs,
+)
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
@@ -777,8 +783,14 @@ class SessionTreeSupervisor:
             if op == "shell.start":
                 return info
             job = self._shell_jobs.get(parent.id, info["id"])
+            # An explicit timeout= longer than the detach threshold is the caller's own
+            # bound on how long to block (capped); without one the default applies.
+            timeout = request.get("timeout")
+            block = RUN_DETACH_SECONDS
+            if timeout is not None and timeout > RUN_DETACH_SECONDS:
+                block = min(float(timeout), RUN_BLOCK_MAX_SECONDS)
             try:
-                await asyncio.wait_for(asyncio.shield(job.task), RUN_DETACH_SECONDS)
+                await asyncio.wait_for(asyncio.shield(job.task), block)
             except asyncio.TimeoutError:
                 # Detach instead of blocking or killing: the job is already a supervisor
                 # job, so it simply continues as if start() had been called, and its
@@ -786,7 +798,7 @@ class SessionTreeSupervisor:
                 job.notify = True
                 partial = self._shell_jobs.read(job, 0, RUN_TEXT_BYTES)
                 marker = (
-                    f"[still running after {RUN_DETACH_SECONDS:g} s: job {job.info.id} continues "
+                    f"[still running after {block:g} s: job {job.info.id} continues "
                     "in the background; its completion arrives as a shell.completed inbox "
                     "event; rlm.shell.get(result.job_id) reads more output or cancels it]\n"
                 )
@@ -795,7 +807,7 @@ class SessionTreeSupervisor:
                     self._hint(
                         parent,
                         "run-detach",
-                        f"rlm.shell.run() detached after {RUN_DETACH_SECONDS:g} s: the command is "
+                        f"rlm.shell.run() detached after {block:g} s: the command is "
                         "still running as a background job. Commands that long belong in "
                         "rlm.shell.start(); keep working and collect the result from the "
                         "shell.completed inbox event.",

@@ -116,7 +116,8 @@ Use `result = await rlm.shell.run(command, cwd=..., timeout=...)` for quick comm
 results you need immediately. It waits for Bash and output capture to finish and returns a
 finished ShellResult with .ok, .text (combined stdout/stderr, up to 16 KiB), .exit_code,
 .truncated, .job_id, .error, .timed_out, and .running. .ok is True only for a clean exit 0. The command
-is a Bash string or an argv list. A run() still going after 60 s returns early with
+is a Bash string or an argv list. A run() still going after 60 s (or after your timeout=,
+up to 300 s) returns early with
 .running true, .exit_code None and the output so far; the command keeps running as a
 background job, its completion arrives as a shell.completed inbox event, and
 `rlm.shell.get(result.job_id)` reads more or cancels it. timeout is optional seconds; when

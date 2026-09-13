@@ -143,6 +143,8 @@ import asyncio
 listed = await rlm.shell.list()
 assert listed[-1].handle().id == listed[-1].id and not hasattr(listed[-1], 'read')
 assert (await listed[-1].handle().info()).id == listed[-1].id
+bounded = await rlm.shell.run('sleep 1; printf slow', timeout=5)  # timeout= > detach threshold: blocks for it
+assert bounded.ok and bounded.text == 'slow' and not bounded.running
 detached = await rlm.shell.run('printf server; sleep 30')  # no timeout=: detaches after RUN_DETACH_SECONDS
 assert detached.running and not detached.ok and detached.exit_code is None and not detached.timed_out
 assert detached.text.startswith('[still running after') and detached.text.endswith('server')

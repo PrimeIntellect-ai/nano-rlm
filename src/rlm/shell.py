@@ -181,8 +181,9 @@ async def run(
     Nonzero exit codes are returned; startup/capture failures populate error.
     truncated indicates omitted output; get(result.job_id) can read more.
     timeout (seconds) kills the whole process group when exceeded: the result then
-    has timed_out=True, exit_code None, and the output captured so far. Without a
-    timeout, a command still running after RUN_DETACH_SECONDS (60) comes back with
+    has timed_out=True, exit_code None, and the output captured so far. A command
+    still running after RUN_DETACH_SECONDS (60), or after a longer timeout you gave
+    (blocking is capped at RUN_BLOCK_MAX_SECONDS, 300), comes back with
     running=True and its partial output while the job continues in the background
     (completion posts shell.completed; get(result.job_id) reads or cancels it).
     Cancelling the cell stops waiting, not the job; list() can recover its ID.
