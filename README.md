@@ -161,7 +161,7 @@ for event in await rlm.inbox.list():
 
 Parent instructions are pushed into the child's conversation. Steering does not interrupt a running model request or tool. Queued messages wait until the child answers or calls the native `wait` tool. Both operations wake an idle persistent child; sending to a terminated child raises.
 
-Reports and `agent.completed` events enter the parent's inbox at every depth. The model sees an unread count before each inference step and chooses when to retrieve payloads. `list()` returns metadata without marking events read; `read(id)` returns the payload and marks it read. `list(unread_only=False)` includes previously read events. Completion payloads identify the agent and status; retrieve the answer with its handle's `result()`.
+Reports and `agent.completed` events enter the parent's inbox at every depth. The model sees the unread count whenever it changes or new events arrive, and chooses when to retrieve payloads. `list()` returns metadata without marking events read; `read(id)` returns the payload and marks it read. `list(unread_only=False)` includes previously read events. Completion payloads identify the agent and status; retrieve the answer with its handle's `result()`.
 
 ACP dependency edges use `agent_message` for delivered instructions and explicitly read inbox events. Spawning uses `subagent_call`; retrieving an answer uses `subagent_return`. Delivery policy and event type remain in the event records. An unread-count notification alone creates no `agent_message` edge.
 

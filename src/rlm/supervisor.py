@@ -126,6 +126,7 @@ class _Invocation:
     instructions: list[dict] = field(default_factory=list)
     inbox_error: str | None = None
     announced: int = 0
+    unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -616,6 +617,7 @@ class SessionTreeSupervisor:
 
     def inbox_notification(self, invocation_id: str) -> str | None:
         agent = self._invocations[invocation_id]
+        new_events = len(agent.inbox) > agent.announced
         agent.announced = len(agent.inbox)
         count = sum(not event["read"] for event in agent.inbox)
         notices = []
@@ -626,10 +628,14 @@ class SessionTreeSupervisor:
             agent.notes.clear()
         if agent.inbox_error:
             notices.append(agent.inbox_error)
-        if count:
+        # The unread count is announced when it changes or new events arrive, not on every
+        # turn: an event the agent has decided to leave unread would otherwise repeat the
+        # same line for the rest of the episode (streaks of 50 identical notices were seen).
+        if count and (new_events or count != agent.unread_announced):
             notices.append(
                 f"Inbox: {count} unread events. Use rlm.inbox.list() and rlm.inbox.read(event_id) to inspect them."
             )
+        agent.unread_announced = count
         return "Supervisor: " + " ".join(notices) if notices else None
 
     async def wait_for_events(self, invocation_id: str, timeout: float) -> str:
