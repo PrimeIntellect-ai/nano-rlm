@@ -27,6 +27,9 @@ RUN_TEXT_BYTES = 16 * 1024  # run() returns at most this much: head + tail of th
 # running=True and the partial output; the job carries on as a background job (it is one
 # already) and posts shell.completed when it ends. Nothing is killed unless timeout= was given.
 RUN_DETACH_SECONDS = 60.0
+# An explicit timeout= on run() is the caller saying how long it is willing to wait, so the
+# blocking bound becomes min(timeout, RUN_BLOCK_MAX_SECONDS) instead of RUN_DETACH_SECONDS.
+RUN_BLOCK_MAX_SECONDS = 300.0
 
 
 @dataclass
