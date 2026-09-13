@@ -62,9 +62,16 @@ BASH_SKILL_WITH_TOOL_PROMPT = (
     "in one cell or avoiding shell quoting."
 )
 EDIT_SKILL_PROMPT = (
-    "Inside ipython you can also edit files with the pre-imported async `edit` "
-    'skill: `await edit(path="pkg/file.py", old_str=..., new_str=...)` — handy '
-    "for multiline or quote-heavy replacements built from Python strings."
+    "Change existing files with the pre-imported async `edit` skill, not with "
+    '`str.replace` + `write_text`: `await edit(path="pkg/file.py", old_str=..., new_str=...)` '
+    "replaces exactly one occurrence and raises ValueError when old_str is absent or "
+    "appears more than once, so a stale or ambiguous hunk cannot be applied silently. "
+    "Several hunks go in one cell:\n"
+    "```python\n"
+    "for old, new in [(OLD_IMPORTS, NEW_IMPORTS), (OLD_CALL, NEW_CALL)]:\n"
+    '    print(await edit(path="src/pkg/module.py", old_str=old, new_str=new))\n'
+    "```\n"
+    "Use write_text only for files you create."
 )
 SEARCH_SKILL_PROMPT = (
     "For web search, use the pre-imported async `search` skill from IPython: "
@@ -154,14 +161,17 @@ if result.truncated:
 Commands can contain multiline Bash scripts, but never embed program source in the command
 string (`python -c '...'`, `node -e '...'`, heredocs). Write scripts and scratch tests to a
 file with Python, creating the directory first, and execute the file through Bash with the
-project's own toolchain:
+project's own toolchain. Program text lives in a Python string, so pick a delimiter the text
+does not contain: `r\"\"\"...\"\"\"` for source with `'''` docstrings or backslashes, `r'''...'''`
+for source with `\"\"\"`, and `"\\n".join([...])` when it has both.
 ```python
 from pathlib import Path
 script = Path("/tmp/repro/check.py")
 script.parent.mkdir(parents=True, exist_ok=True)
-script.write_text('''import package
+script.write_text(r\"\"\"import package
+'''Docstrings and backslashes inside are fine: the outer delimiter is a raw triple double quote.'''
 print(package.__version__)
-''')
+\"\"\")
 result = await rlm.shell.run(["python3", str(script)], cwd="/workspace/project")
 ```
 The supervisor API is the only shell: do not call subprocess or os.system from the kernel.
