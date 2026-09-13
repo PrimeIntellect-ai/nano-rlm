@@ -151,7 +151,8 @@ is that of its first failing stage, so `pytest ... | tail -20` reports pytest's 
 .text is capped at 16 KiB: longer output keeps its first and last 8 KiB around a marker
 that names the omitted byte range, so the first failure and the final summary both survive
 without piping through `tail`. Prefer `grep -n`, `sed -n 'A,Bp'`, and `head` over printing
-whole files; print the parts needed for your next decision. If .truncated is true, the output is
+whole files; print the parts needed for your next decision. A pipeline cut short by `head`
+exits 141 (SIGPIPE): the producer was interrupted, not failed. If .truncated is true, the output is
 retained (up to 16 MiB per job); read the omitted part instead of re-running the command:
 ```python
 if result.truncated:

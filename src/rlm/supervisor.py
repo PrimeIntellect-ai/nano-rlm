@@ -800,7 +800,13 @@ class SessionTreeSupervisor:
             timeout = request.get("timeout")
             block = RUN_DETACH_SECONDS
             if timeout is not None and timeout > RUN_DETACH_SECONDS:
-                block = min(float(timeout), RUN_BLOCK_MAX_SECONDS)
+                # Wait one second past the kill deadline so a timed-out job comes back as
+                # timed_out rather than as a detach racing the kill; above the cap, detach.
+                block = (
+                    float(timeout) + 1.0
+                    if timeout <= RUN_BLOCK_MAX_SECONDS
+                    else RUN_BLOCK_MAX_SECONDS
+                )
             try:
                 await asyncio.wait_for(asyncio.shield(job.task), block)
             except asyncio.TimeoutError:
@@ -814,8 +820,11 @@ class SessionTreeSupervisor:
                     "in the background; its completion arrives as a shell.completed inbox "
                     "event; rlm.shell.get(result.job_id) reads more output or cancels it]\n"
                 )
-                if parent.long_run_notes < MAX_LONG_RUN_NOTES:
-                    parent.long_run_notes += 1
+                if (
+                    parent.long_run_notes < MAX_LONG_RUN_NOTES
+                    and "run-detach" not in parent.muted_hints
+                ):
+                    parent.long_run_notes += 1  # muted detaches do not spend the budget
                     self._hint(
                         parent,
                         "run-detach",
@@ -833,6 +842,16 @@ class SessionTreeSupervisor:
                     "timed_out": False,
                     "running": True,
                 }
+            except Exception:
+                # A metadata/publication failure after the process itself finished must not
+                # turn a captured result into a broker error (cancel() has the same guard).
+                if job.info.status not in (
+                    "completed",
+                    "failed",
+                    "timed_out",
+                    "cancelled",
+                ):
+                    raise
             output = self._shell_jobs.run_text(job)
             return {
                 "text": output["text"],

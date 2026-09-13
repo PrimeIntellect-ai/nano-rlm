@@ -159,6 +159,8 @@ assert muted_run.running
 await (await rlm.shell.get(muted_run.job_id)).cancel()
 assert (await rlm.hints.unmute('run-detach')) == []
 timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)
+killed = await rlm.shell.run('printf part2; sleep 30', timeout=0.8)  # timeout above the 0.5 s detach: the wait outlives the kill
+assert killed.timed_out and not killed.running and killed.exit_code is None and killed.text == 'part2'
 assert timed.timed_out and timed.exit_code is None and timed.text == 'partial'
 assert 'timed out' in timed.error
 timed_job = await rlm.shell.start('sleep 30', timeout=0.2)

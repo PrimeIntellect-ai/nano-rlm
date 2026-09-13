@@ -426,3 +426,23 @@ async def test_inbox_notice_repeats_only_when_the_count_changes(session):
         assert supervisor.inbox_notification(owner.id) is None
     finally:
         await supervisor.aclose()
+
+
+async def test_muted_hint_is_not_queued(session):
+    supervisor = SessionTreeSupervisor(
+        root_session=session, runtime_config=_config(), cwd=str(session.dir)
+    )
+    await supervisor.start()
+    owner = supervisor._invocations[supervisor.root_id]
+    try:
+        supervisor.hint(owner.id, "run-detach", "first")
+        assert [tag for tag, _ in owner.notes] == ["run-detach"]
+        owner.notes.clear()
+        owner.muted_hints.add("run-detach")
+        supervisor.hint(owner.id, "run-detach", "second")
+        assert owner.notes == []
+        owner.muted_hints.discard("run-detach")
+        supervisor.hint(owner.id, "run-detach", "third")
+        assert [tag for tag, _ in owner.notes] == ["run-detach"]
+    finally:
+        await supervisor.aclose()

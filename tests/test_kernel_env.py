@@ -35,6 +35,15 @@ def test_kernel_env_passes_everything_except_the_blocklist():
         "PRIME_TEAM_ID": "team",
         "RLM_BASE_URL": "http://broker",
         "AWS_REGION": "eu-west-1",
+        # cursor-bot review: official password variables and credential URLs without a user part
+        "MYSQL_PWD": "x",
+        "PGPASSFILE": "/root/.pgpass",
+        "REDIS_PASS": "x",
+        "CACHE_URL": "redis://:secret@cache/0",
+        "REGISTRY_URL": "https://token@registry.example/v2",
+        "BASH_ENV": "/etc/evil.sh",
+        "ENV": "/etc/evil.sh",
+        "PWD": "/app",
     }
     env = build_kernel_env({"TASK_FLAG": "1"}, environ=environ)
     for key in (
@@ -66,6 +75,14 @@ def test_kernel_env_passes_everything_except_the_blocklist():
         "DOCKER_HOST",
         "SSH_AUTH_SOCK",
         "BUNDLE_GEMS__EXAMPLE__COM",
+        "MYSQL_PWD",
+        "PGPASSFILE",
+        "REDIS_PASS",
+        "CACHE_URL",
+        "REGISTRY_URL",
+        "BASH_ENV",
+        "ENV",
+        "PWD",
     ):
         assert key not in env, key
     assert env["NO_COLOR"] == "1"
