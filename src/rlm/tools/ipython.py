@@ -67,14 +67,18 @@ IPYTHON_TIMEOUT_MAX_SECONDS = 600
 # agent/daemon sockets. Everything else passes so that projects see the
 # toolchain the way their own tests do (PYTHONPATH, GOMODCACHE, NODE_OPTIONS, ...).
 _KERNEL_SECRET_ENV_RE = re.compile(
-    r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|COOKIE|SESSION",
+    r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|COOKIE|SESSION"
+    r"|(?:^|_)PWD$|_PW$|PASS$|PASSFILE$",  # MYSQL_PWD, PGPASSFILE, *_PASS
     re.I,
 )
-_KERNEL_SECRET_VALUE_RE = re.compile(r"://[^/\s@]+:[^/\s@]+@")  # user:pass@ in a URL
+# user:pass@, :pass@ and token-only @ credentials in a URL
+_KERNEL_SECRET_VALUE_RE = re.compile(r"://(?:[^/\s@]*:)?[^/\s@]+@")
 _KERNEL_ENV_BLOCKED_NAMES = {
     # would break or redirect the kernel's interpreter / venv / config dirs
     "PYTHONHOME",
     "PYTHONSTARTUP",
+    "BASH_ENV",  # sourced by non-interactive bash before every supervisor job
+    "ENV",  # the sh equivalent
     "PYTHONEXECUTABLE",
     "PYTHONUSERBASE",
     "PYTHONSAFEPATH",
