@@ -8,10 +8,10 @@ import json
 import keyword
 import struct
 from dataclasses import dataclass
-from typing import NotRequired, Annotated, Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from rlm.types import RLMResult
 
