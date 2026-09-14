@@ -18,7 +18,9 @@ class AgentInfo:
     parent_id: str | None
     name: str | None
     task: str
-    status: Literal["starting", "running", "idle", "completed", "failed", "cancelled"]
+    status: Literal[
+        "starting", "running", "waiting", "idle", "completed", "failed", "cancelled"
+    ]
     persistent: bool
     created_at: float
     elapsed_seconds: float
@@ -47,7 +49,9 @@ class AgentHandle:
         return history(session_dir=self.session_dir)
 
     async def result(self) -> RLMResult | None:
-        """Return the answer, or None while pending; raise for failure/cancellation."""
+        """Return the latest answer, even while running again; None before the first answer.
+
+        Terminal failure/cancellation raises. Use info/wait to inspect current activity."""
         payload = await broker.agent_request("agent.result", agent_id=self.id)
         return broker.result_from_payload(payload) if payload is not None else None
 
@@ -65,6 +69,24 @@ class AgentHandle:
         """Terminate the subtree, or retry unfinished cleanup after it has finished."""
         return AgentInfo.from_payload(
             await broker.agent_request("agent.cancel", agent_id=self.id)
+        )
+
+    async def send(self, message: str) -> str:
+        """Accept an instruction for the next answer/wait boundary and return its ID.
+
+        Undeliverable instructions produce agent.delivery_failed in the parent inbox.
+        """
+        return await broker.agent_request(
+            "agent.send", agent_id=self.id, message=message
+        )
+
+    async def steer(self, message: str) -> str:
+        """Accept an instruction for the next model/tool boundary and return its ID.
+
+        Active tools are not interrupted. Delivery failures go to the parent inbox.
+        """
+        return await broker.agent_request(
+            "agent.steer", agent_id=self.id, message=message
         )
 
 
@@ -90,6 +112,11 @@ async def get(name_or_id: str) -> AgentHandle:
         await broker.agent_request("agent.get", name_or_id=name_or_id)
     )
     return AgentHandle(info.id, info.session_dir)
+
+
+async def send_to_parent(message: str) -> str:
+    """Place a report in the immediate parent's inbox; the parent chooses when to read it."""
+    return await broker.agent_request("agent.report", message=message)
 
 
 async def list(*, recursive: bool = False) -> builtins.list[AgentInfo]:

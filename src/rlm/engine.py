@@ -110,6 +110,27 @@ def _last_assistant_text(messages: list[dict]) -> str:
     return ""
 
 
+WAIT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "wait",
+        "description": "Suspend inference until a new inbox event, parent instruction, or timeout. The IPython kernel remains free. This is a yield boundary for queued parent instructions. Unread events already announced do not wake this wait again.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "timeout": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 300,
+                    "description": "Maximum seconds to wait; default 300.",
+                }
+            },
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 class RLMEngine:
     def __init__(
         self,
@@ -230,7 +251,13 @@ class RLMEngine:
         finally:
             await self.aclose()
 
-    async def prompt(self, prompt: str) -> RLMResult:
+    async def prompt(
+        self,
+        prompt: str,
+        *,
+        message_type: str = "user",
+        event_ids: list[str] | None = None,
+    ) -> RLMResult:
         """Run one user turn while preserving conversation and kernel state."""
         if self._closed or self._close_task is not None:
             raise RuntimeError("RLM engine is closed")
@@ -276,7 +303,8 @@ class RLMEngine:
             self.session.log(
                 {
                     "id": prompt_id,
-                    "type": "user",
+                    "type": message_type,
+                    **({"event_ids": event_ids} if event_ids else {}),
                     "turn": self._turn,
                     "content": prompt,
                     "message": {"role": "user", "content": prompt},
@@ -370,6 +398,7 @@ class RLMEngine:
             try:
                 await self._supervisor.start()
                 broker_endpoint = self._supervisor.endpoint_for(self._invocation_id)
+                self._active_tool_schemas.append(WAIT_SCHEMA)
                 if self.mcp_servers or "search" in self.skills:
                     reserved_names = {"rlm", *local_skills, *discover_skills()}
                     brokered_skills = self._supervisor.write_brokered_skill_modules(
@@ -431,6 +460,35 @@ class RLMEngine:
                 self._owns_supervisor = False
             raise
 
+    def _deliver_supervisor_input(
+        self, *, include_queue: bool = False, notify: bool = True
+    ) -> bool:
+        if self._supervisor is None:
+            return False
+        instructions = self._supervisor.take_instructions(
+            self._invocation_id, include_queue=include_queue
+        )
+        for event in instructions:
+            message = {
+                "role": "user",
+                "content": f"Parent instruction:\n{event['content']}",
+            }
+            self.session.log(
+                {"type": "parent_message", "event_id": event["id"], "message": message},
+                in_context=True,
+            )
+        if notify:
+            notification = self._supervisor.inbox_notification(self._invocation_id)
+            if notification:
+                message = {"role": "user", "content": notification}
+                self.session.log(
+                    {"type": "supervisor_notification", "message": message},
+                    in_context=True,
+                )
+        if instructions:
+            self._last_good = len(self.session.messages)
+        return bool(instructions)
+
     async def _run_loop(self) -> RLMResult:
         if not self._started:
             raise RuntimeError("RLM engine is not started")
@@ -459,6 +517,8 @@ class RLMEngine:
                     )
                 )
                 break
+            self._deliver_supervisor_input()
+            messages = self.session.messages
             self._turn = turn + 1
             try:
                 response, usage = await self._complete(messages, turn)
@@ -527,6 +587,8 @@ class RLMEngine:
 
             # No tool calls → done
             if not msg.tool_calls:
+                if self._deliver_supervisor_input(include_queue=True, notify=False):
+                    continue
                 self._metrics.stop_reason = "done"
                 final_text = msg.content or ""
                 break
@@ -536,7 +598,24 @@ class RLMEngine:
             tool_args = parsed_args[0]
             t0 = time.time()
             tool = get_builtin_tool(tool_name, self.builtin_tools)
-            if tool is None:
+            if tool_name == "wait" and self._supervisor is not None:
+                timeout = tool_args.get("timeout", 300)
+                if (
+                    set(tool_args) - {"timeout"}
+                    or isinstance(timeout, bool)
+                    or not isinstance(timeout, (int, float))
+                    or not 0 <= timeout <= 300
+                ):
+                    tool_result = ToolOutcome(
+                        content="Error: wait accepts timeout between 0 and 300 seconds."
+                    )
+                else:
+                    tool_result = ToolOutcome(
+                        content=await self._supervisor.wait_for_events(
+                            self._invocation_id, timeout
+                        )
+                    )
+            elif tool is None:
                 tool_result = ToolOutcome(content=f"Error: unknown tool '{tool_name}'")
             else:
                 repl = self._repl
@@ -617,6 +696,9 @@ class RLMEngine:
             )
             messages = self.session.messages
 
+            if tool_name == "wait":
+                self._deliver_supervisor_input(include_queue=True, notify=False)
+                messages = self.session.messages
             if self._should_compact(messages, usage, content):
                 try:
                     await self._compact_branch(messages, turn)
