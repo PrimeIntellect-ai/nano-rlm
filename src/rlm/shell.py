@@ -38,11 +38,6 @@ class ShellJob:
             and self.error is None
         )
 
-    @property
-    def job_id(self) -> str:
-        """Alias of .id (kept for code written against the earlier ShellResult)."""
-        return self.id
-
     async def result(self, timeout: float | None = None) -> ShellJob:
         """Wait for the job to finish and return its finished snapshot.
 
@@ -98,11 +93,6 @@ class ShellJob:
         )
 
 
-# Names used by code written against the earlier two-type API.
-ShellResult = ShellJob
-JobHandle = ShellJob
-
-
 @dataclass(frozen=True)
 class JobInfo:
     id: str
@@ -126,17 +116,6 @@ class JobInfo:
     def timed_out(self) -> bool:
         """True when the job's timeout killed it (status == "timed_out")."""
         return self.status == "timed_out"
-
-    def handle(self) -> ShellJob:
-        """A ShellJob for this job (without output text); `await job.result()` gives
-        the finished result. A JobInfo is a metadata snapshot, not a handle."""
-        return ShellJob(
-            id=self.id,
-            exit_code=self.exit_code,
-            error=self.error,
-            timed_out=self.timed_out,
-            running=self.status in ("starting", "running"),
-        )
 
 
 @dataclass(frozen=True)
@@ -217,8 +196,8 @@ async def run(
     timeout (seconds) kills the whole process group when exceeded (timed_out=True,
     exit_code None); it does not change how long run() waits. Cancelling the cell stops
     waiting, not the job; list() can recover its ID. A job that came back with
-    running=True posts a shell.completed inbox event when it ends; finished results
-    post nothing.
+    running=True posts a quiet shell.completed inbox event when it ends (it wakes the
+    native wait tool but is not counted in the unread notice); finished results post nothing.
     """
     return ShellJob(
         **await broker.agent_request(
@@ -230,17 +209,6 @@ async def run(
             background=bool(background),
         )
     )
-
-
-async def start(
-    command: str | list[str],
-    *,
-    cwd: str | None = None,
-    timeout: float | None = None,
-    env: dict[str, str] | None = None,
-) -> ShellJob:
-    """Same as run(command, ..., background=True): register the job and return at once."""
-    return await run(command, cwd=cwd, timeout=timeout, env=env, background=True)
 
 
 async def get(job_id: str) -> ShellJob:

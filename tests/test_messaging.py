@@ -424,6 +424,11 @@ async def test_inbox_notice_repeats_only_when_the_count_changes(session):
         )
         assert "Inbox: 1 unread" in supervisor.inbox_notification(owner.id)
         assert supervisor.inbox_notification(owner.id) is None
+        # shell.completed is quiet: it is listable and wakes wait, but not announced.
+        quiet = supervisor._event(owner, "shell.completed", {"job_id": "j"}, None)
+        supervisor._publish(owner, quiet)
+        assert supervisor.inbox_notification(owner.id) is None
+        assert sum(not e["read"] for e in owner.inbox) == 2
     finally:
         await supervisor.aclose()
 

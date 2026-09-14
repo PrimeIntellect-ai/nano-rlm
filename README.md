@@ -365,7 +365,7 @@ group and sets `timed_out` — it is the kill deadline, not the wait. If output 
 `await job.read(cursor=..., max_bytes=...)` reads the retained output (16 MiB per job).
 Cancelling the waiting cell leaves the job running and discoverable with `shell.list()`;
 `shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a
-`shell.completed` inbox event (job ID, status, exit code, completeness flags and the last
+quiet `shell.completed` inbox event (job ID, status, exit code, completeness flags and the last
 4 KiB of output). `await rlm.shell.setenv(NAME='value')` sets variables for every later
 `run()` of the agent (`getenv()` reads the overlay; per-call `env=` wins). The kernel and
 Bash jobs inherit the launching process's environment (in a sandbox, the image's ENV) minus
@@ -388,9 +388,8 @@ job = await rlm.shell.get(job_id)
 chunk = await job.read(cursor=0, max_bytes=16384)   # continue from chunk.next_cursor
 ```
 
-`rlm.shell.start(command, ...)` remains as an alias of `run(..., background=True)`. Use the
-native `wait` tool when there is no other work; the `shell.completed` event can then be read
-with `rlm.inbox.read(event_id)`. A nonzero Bash exit code is a completed process;
+Use the native `wait` tool when there is no other work; `shell.completed` events wake it but
+are quiet (not counted in the unread notice), and `result()` marks them read. A nonzero Bash exit code is a completed process;
 startup/capture errors have status `failed`.
 
 `await job.cancel()` terminates its process group. Jobs survive cell completion

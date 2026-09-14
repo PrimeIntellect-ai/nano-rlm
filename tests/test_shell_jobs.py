@@ -83,7 +83,7 @@ async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch)
     client = DummyClient(
         [
             tool(
-                "job = await rlm.shell.start('sleep 0.2; [[ -z ${SHELL_TEST_PRIVATE_KEY+x} ]] || exit 90; values=(one two); [[ ${#values[@]} == 2 ]] && printf BASH_OK'); saved_id = job.id"
+                "job = await rlm.shell.run('sleep 0.2; [[ -z ${SHELL_TEST_PRIVATE_KEY+x} ]] || exit 90; values=(one two); [[ ${#values[@]} == 2 ]] && printf BASH_OK', background=True); saved_id = job.id"
             ),
             tool(
                 "del job; job = await rlm.shell.get(saved_id); assert len(await rlm.shell.list()) == 1"
@@ -102,7 +102,7 @@ output = await job.read()
 assert output.text == 'BASH_OK' and output.done
 assert (await job.read()).text == output.text
 try:
-    await rlm.shell.start('git log --all')
+    await rlm.shell.run('git log --all', background=True)
 except RuntimeError:
     pass
 else:
@@ -127,11 +127,11 @@ for bad in (['ls', 3], []):
     else:
         raise AssertionError(f'bad argv accepted: {bad!r}')
 assert not result.truncated and result.error is None
-assert (await (await rlm.shell.get(result.job_id)).read()).text == result.text
+assert (await (await rlm.shell.get(result.id)).read()).text == result.text
 result = await rlm.shell.run("printf '%20000s' x")
 assert result.truncated and result.text.endswith('x') and 'bytes omitted' in result.text
 assert result.text.startswith(' ' * 8192) and len(result.text) < 16384 + 200
-job = await rlm.shell.get(result.job_id)
+job = await rlm.shell.get(result.id)
 past = await job.read(cursor=10**6)
 assert past.text == '' and past.done and past.next_cursor == 20000
 big = await job.read(cursor=0, max_bytes=10**6)
@@ -141,8 +141,8 @@ assert failed.exit_code is None and failed.error
 assert not [e for e in await rlm.inbox.list() if e['type'] == 'shell.completed'], 'run() must not post inbox events'
 import asyncio
 listed = await rlm.shell.list()
-assert listed[-1].handle().id == listed[-1].id and not hasattr(listed[-1], 'read')
-assert (await listed[-1].handle().info()).id == listed[-1].id
+assert not hasattr(listed[-1], 'read') and not hasattr(listed[-1], 'handle')
+assert (await (await rlm.shell.get(listed[-1].id)).info()).id == listed[-1].id
 snap = await rlm.shell.run('sleep 1; printf slow', timeout=5)  # timeout= is the kill deadline, not the wait
 assert snap.running and snap.exit_code is None and not snap.ok and snap.text.startswith('[still running after')
 bounded = await snap.result()  # result() waits for it
@@ -153,7 +153,7 @@ assert detached.running and not detached.ok and detached.exit_code is None and n
 assert detached.text.startswith('[still running after') and detached.text.endswith('server')
 still = await detached.result(timeout=0.2)  # bounded wait, still running
 assert still.running and still.text.startswith('[still running after waiting 0.2 s')
-bg = await rlm.shell.get(detached.job_id)
+bg = await rlm.shell.get(detached.id)
 assert bg.running and bg.text == '' and (await bg.info()).status == 'running'
 await bg.cancel()
 assert (await bg.info()).status == 'cancelled'
@@ -171,16 +171,20 @@ a_job = await rlm.shell.run('sleep 0.2; printf A', background=True)
 b_job = await rlm.shell.run('sleep 0.1; printf B', background=True)
 a_res, b_res = await asyncio.gather(a_job.result(), b_job.result())
 assert a_res.text == 'A' and b_res.text == 'B' and a_res.ok and b_res.ok
-completed = [await rlm.inbox.read(e['id']) for e in await rlm.inbox.list() if e['type'] == 'shell.completed']
+all_completed = [e for e in await rlm.inbox.list(unread_only=False) if e['type'] == 'shell.completed']
+read_before = {e['id'] for e in all_completed if e['read']}
+completed = [await rlm.inbox.read(e['id']) for e in all_completed]
 by_job = {e['content']['job_id']: e['content'] for e in completed}
 assert by_job[quick.id]['text'] == 'BG' and by_job[quick.id]['exit_code'] == 0  # the event carries the tail
 assert by_job[detached.id]['status'] == 'cancelled'
+assert {e['content']['job_id'] for e in completed if e['id'] in read_before} >= {quick.id, a_job.id, b_job.id, snap.id}  # result() marked them read
+assert detached.id not in {e['content']['job_id'] for e in completed if e['id'] in read_before}  # cancelled without result(): still unread, but quiet
 timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)
 killed = await (await rlm.shell.run('printf part2; sleep 30', timeout=0.8)).result()  # kill lands after the 0.5 s wait
 assert killed.timed_out and not killed.running and killed.exit_code is None and killed.text == 'part2'
 assert timed.timed_out and timed.exit_code is None and timed.text == 'partial'
 assert 'timed out' in timed.error
-timed_job = await rlm.shell.start('sleep 30', timeout=0.2)
+timed_job = await rlm.shell.run('sleep 30', timeout=0.2, background=True)
 await asyncio.sleep(0.6)
 info = await timed_job.info()
 assert info.status == 'timed_out' and info.timeout == 0.2 and info.timed_out
