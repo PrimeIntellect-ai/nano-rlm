@@ -157,12 +157,18 @@ whole files; print the parts needed for your next decision. A pipeline cut short
 exits 141 (SIGPIPE): the producer was interrupted, not failed. If .truncated is true, the
 output is retained (up to 16 MiB per job): `chunk = await job.read(cursor=8192,
 max_bytes=65536)` returns .text, .next_cursor, .done and .truncated; cursors count bytes.
-Commands can contain multiline Bash scripts, but never embed program source in the command
-string (`python -c '...'`, `node -e '...'`, heredocs). Write scripts and scratch tests to a
-file with Python, creating the directory first, and execute the file through Bash with the
-project's own toolchain. Program text lives in a Python string, so pick a delimiter the text
-does not contain: `r\"\"\"...\"\"\"` for source with `'''` docstrings or backslashes, `r'''...'''`
-for source with `\"\"\"`, and `"\\n".join([...])` when it has both.
+Multi-line commands (heredocs, `python -c`, small scripts) are fine. Write the command as a
+triple-quoted raw string so quotes, backslashes and newlines inside need no escaping, using
+the triple quote the text does not contain (`r'''...'''` for text with `\"\"\"`, `r\"\"\"...\"\"\"`
+for text with `'''`):
+```python
+r = await rlm.shell.run(r'''python3 - <<'EOF'
+import package
+print(package.__version__, "quotes 'inside' need no escaping")
+EOF''', cwd="/workspace/project")
+```
+Longer scripts and scratch tests go to a file with the same delimiter rule, then run with the
+project's own toolchain:
 ```python
 from pathlib import Path
 script = Path("/tmp/repro/check.py")

@@ -148,11 +148,20 @@ MAX_PLAN_REPLY_NUDGES = 1
 MAX_QUOTE_NESTING_HINTS = 2
 _QUOTE_NESTING_RE = re.compile(r"Cell In\[\d+\][\s\S]{0,400}?SyntaxError: ")
 _TRIPLE_QUOTE_RE = re.compile(r"\"\"\"|'''")
+# A plain-quoted string that runs past its line: a heredoc or multi-line command pasted into
+# `run("...")`. By far the commonest collision on the 500-task runs.
+_PLAIN_MULTILINE_RE = re.compile(r"[\"'][^\"'\n]*\n")
 QUOTE_NESTING_HINT = (
     "That SyntaxError comes from program text nested inside a Python string literal. Pick a "
     'delimiter the text does not contain: r"""...""" for source with \'\'\' or backslashes, '
     "r'''...''' for source with \"\"\", or \"\\n\".join([...]) for both; for existing files use "
     "the edit skill with short old_str/new_str hunks."
+)
+MULTILINE_COMMAND_HINT = (
+    "That SyntaxError comes from a multi-line command inside a plain-quoted Python string. "
+    "Write multi-line commands (heredocs, python -c, scripts) as a triple-quoted raw string: "
+    "r'''...''' (or r\"\"\"...\"\"\" when the text contains '''), so quotes, backslashes and "
+    "newlines inside need no escaping."
 )
 PLAN_REPLY_NUDGE = (
     "Your last reply reads as a plan, not a final answer, and made no tool call. If the "
@@ -519,17 +528,24 @@ class RLMEngine:
 
     def _note_quote_nesting(self, tool_output: str, code: str) -> None:
         """Hint (at most MAX_QUOTE_NESTING_HINTS times) when the cell's own code fails to parse
-        while it is building program text in a triple-quoted literal: the kernel reports the
-        cell (`Cell In[n]`), not a file, so the failure is the literal nesting, not the program."""
+        while it is building program text in a string literal: the kernel reports the cell
+        (`Cell In[n]`), not a file, so the failure is the literal nesting, not the program.
+        Two shapes: a collision inside a triple-quoted literal, and a multi-line command
+        pasted into a plain-quoted one."""
         if (
             self._supervisor is None
             or self._quote_nesting_hints >= MAX_QUOTE_NESTING_HINTS
-            or not _TRIPLE_QUOTE_RE.search(code or "")
             or not _QUOTE_NESTING_RE.search(tool_output or "")
         ):
             return
+        if _TRIPLE_QUOTE_RE.search(code or ""):
+            text = QUOTE_NESTING_HINT
+        elif "\n" in (code or "") and _PLAIN_MULTILINE_RE.search(code or ""):
+            text = MULTILINE_COMMAND_HINT
+        else:
+            return  # an ordinary Python mistake, not literal nesting
         self._quote_nesting_hints += 1
-        self._supervisor.hint(self._invocation_id, "quote-nesting", QUOTE_NESTING_HINT)
+        self._supervisor.hint(self._invocation_id, "quote-nesting", text)
 
     def _deliver_kernel_notices(self) -> None:
         if self._repl is None:
