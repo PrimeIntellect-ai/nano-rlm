@@ -15,14 +15,18 @@ MAX_READ_BYTES = 65_536
 
 
 @dataclass(frozen=True)
-class ShellResult:
-    text: str
-    exit_code: int | None
-    job_id: str
-    truncated: bool
-    error: str | None
+class ShellJob:
+    """A supervisor-owned Bash job: the snapshot run() or result() returned, plus the
+    methods that wait for, read, or cancel the job. Fields describe the job at the moment
+    the object was returned; `await job.result()` returns a fresh, finished snapshot."""
+
+    id: str
+    text: str = ""
+    exit_code: int | None = None
+    truncated: bool = False
+    error: str | None = None
     timed_out: bool = False
-    running: bool = False  # run() detached: the job continues in the background
+    running: bool = True
 
     @property
     def ok(self) -> bool:
@@ -34,24 +38,69 @@ class ShellResult:
             and self.error is None
         )
 
+    @property
+    def job_id(self) -> str:
+        """Alias of .id (kept for code written against the earlier ShellResult)."""
+        return self.id
+
+    async def result(self, timeout: float | None = None) -> ShellJob:
+        """Wait for the job to finish and return its finished snapshot.
+
+        Blocks inside the cell for up to `timeout` seconds (default and cap:
+        RUN_BLOCK_MAX_SECONDS, 300). A job still running afterwards comes back with
+        running=True and its output so far; call result() again later. Repeatable and
+        non-consuming: on a finished job it returns the same result every time.
+        """
+        return ShellJob(
+            **await broker.agent_request(
+                "shell.result", job_id=self.id, timeout=_timeout(timeout)
+            )
+        )
+
+    async def info(self) -> JobInfo:
+        return JobInfo(**await broker.agent_request("shell.info", job_id=self.id))
+
+    async def read(self, *, cursor: int = 0, max_bytes: int = 16_384) -> JobOutput:
+        """Read combined stdout/stderr using a byte cursor; reads do not consume output.
+
+        Chunks decode as UTF-8 with replacement. A cursor may split a multibyte
+        character; the output file retains the exact captured bytes. max_bytes is
+        clamped to MAX_READ_BYTES (65536); continue with next_cursor for more.
+        """
+        return JobOutput(
+            **await broker.agent_request(
+                "shell.read",
+                job_id=self.id,
+                cursor=cursor,
+                max_bytes=max(1, min(int(max_bytes), MAX_READ_BYTES)),
+            )
+        )
+
+    async def cancel(self) -> JobInfo:
+        """Terminate the job's process group and collect remaining output."""
+        return JobInfo(**await broker.agent_request("shell.cancel", job_id=self.id))
+
     def __getattr__(self, name: str):
         # Frozen dataclass: only unknown attributes reach here. Point common
-        # JobHandle/subprocess habits at the right place instead of a bare error.
-        if name in ("read", "info", "cancel", "wait"):
-            raise AttributeError(
-                f"ShellResult has no {name}(); run() already finished. Use .text/"
-                ".exit_code, or `await rlm.shell.get(result.job_id)` for a JobHandle, "
-                "or rlm.shell.start() for background work."
-            )
+        # subprocess habits at the right place instead of a bare error.
         if name in ("stdout", "stderr", "output"):
             raise AttributeError(
-                f"ShellResult has no .{name}; stdout and stderr are combined in .text."
+                f"ShellJob has no .{name}; stdout and stderr are combined in .text."
             )
         if name in ("returncode", "status"):
-            raise AttributeError(f"ShellResult has no .{name}; use .exit_code.")
+            raise AttributeError(f"ShellJob has no .{name}; use .exit_code.")
+        if name == "wait":
+            raise AttributeError(
+                "ShellJob has no wait(); `await job.result()` waits for the job."
+            )
         raise AttributeError(
             f"{type(self).__name__!r} object has no attribute {name!r}"
         )
+
+
+# Names used by code written against the earlier two-type API.
+ShellResult = ShellJob
+JobHandle = ShellJob
 
 
 @dataclass(frozen=True)
@@ -78,9 +127,16 @@ class JobInfo:
         """True when the job's timeout killed it (status == "timed_out")."""
         return self.status == "timed_out"
 
-    def handle(self) -> "JobHandle":
-        """The JobHandle for this job; a JobInfo is a snapshot, not a handle."""
-        return JobHandle(self.id)
+    def handle(self) -> ShellJob:
+        """A ShellJob for this job (without output text); `await job.result()` gives
+        the finished result. A JobInfo is a metadata snapshot, not a handle."""
+        return ShellJob(
+            id=self.id,
+            exit_code=self.exit_code,
+            error=self.error,
+            timed_out=self.timed_out,
+            running=self.status in ("starting", "running"),
+        )
 
 
 @dataclass(frozen=True)
@@ -89,34 +145,6 @@ class JobOutput:
     next_cursor: int
     done: bool
     truncated: bool
-
-
-@dataclass(frozen=True)
-class JobHandle:
-    id: str
-
-    async def info(self) -> JobInfo:
-        return JobInfo(**await broker.agent_request("shell.info", job_id=self.id))
-
-    async def read(self, *, cursor: int = 0, max_bytes: int = 16_384) -> JobOutput:
-        """Read combined stdout/stderr using a byte cursor; reads do not consume output.
-
-        Chunks decode as UTF-8 with replacement. A cursor may split a multibyte
-        character; the output file retains the exact captured bytes. max_bytes is
-        clamped to MAX_READ_BYTES (65536); continue with next_cursor for more.
-        """
-        return JobOutput(
-            **await broker.agent_request(
-                "shell.read",
-                job_id=self.id,
-                cursor=cursor,
-                max_bytes=max(1, min(int(max_bytes), MAX_READ_BYTES)),
-            )
-        )
-
-    async def cancel(self) -> JobInfo:
-        """Terminate the job's process group and collect remaining output."""
-        return JobInfo(**await broker.agent_request("shell.cancel", job_id=self.id))
 
 
 def _command(command: str | builtins.list[str]) -> str:
@@ -164,8 +192,8 @@ def _timeout(timeout: float | None) -> float | None:
         return None
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise TypeError("timeout must be a number of seconds or None")
-    if timeout <= 0:
-        raise ValueError("timeout must be positive seconds")
+    if timeout < 0:
+        raise ValueError("timeout must be a non-negative number of seconds")
     return float(timeout)
 
 
@@ -175,27 +203,31 @@ async def run(
     cwd: str | None = None,
     timeout: float | None = None,
     env: dict[str, str] | None = None,
-) -> ShellResult:
-    """Wait for Bash and return combined output (up to 16 KiB) and its exit code.
+    background: bool = False,
+) -> ShellJob:
+    """Run Bash under the supervisor and return a ShellJob.
 
-    Nonzero exit codes are returned; startup/capture failures populate error.
-    truncated indicates omitted output; get(result.job_id) can read more.
-    timeout (seconds) kills the whole process group when exceeded: the result then
-    has timed_out=True, exit_code None, and the output captured so far. A command
-    still running after RUN_DETACH_SECONDS (60), or after a longer timeout you gave
-    (blocking is capped at RUN_BLOCK_MAX_SECONDS, 300), comes back with
-    running=True and its partial output while the job continues in the background
-    (completion posts shell.completed; get(result.job_id) reads or cancels it).
-    Cancelling the cell stops waiting, not the job; list() can recover its ID.
-    Only start() publishes a completion event to the inbox; run() returns directly.
+    Without background=True this waits up to RUN_DETACH_SECONDS (15) for the command
+    to finish; a finished job has running=False, exit_code, ok, text (combined output,
+    up to 16 KiB: first and last 8 KiB around a marker naming the omitted bytes),
+    truncated, error and timed_out. A command still going after the wait comes back with
+    running=True, exit_code None and the output so far, and keeps running as a
+    background job. background=True returns at once, always with running=True.
+    Either way `await job.result()` waits (up to 300 s per call) for the finished result.
+    timeout (seconds) kills the whole process group when exceeded (timed_out=True,
+    exit_code None); it does not change how long run() waits. Cancelling the cell stops
+    waiting, not the job; list() can recover its ID. A job that came back with
+    running=True posts a shell.completed inbox event when it ends; finished results
+    post nothing.
     """
-    return ShellResult(
+    return ShellJob(
         **await broker.agent_request(
             "shell.run",
             command=_command(command),
             cwd=cwd,
             timeout=_timeout(timeout),
             env=_env(env),
+            background=bool(background),
         )
     )
 
@@ -206,28 +238,17 @@ async def start(
     cwd: str | None = None,
     timeout: float | None = None,
     env: dict[str, str] | None = None,
-) -> JobHandle:
-    """Register a Bash job and return immediately. Defaults to the agent's cwd.
+) -> ShellJob:
+    """Same as run(command, ..., background=True): register the job and return at once."""
+    return await run(command, cwd=cwd, timeout=timeout, env=env, background=True)
 
-    Jobs survive cell completion. Completion posts an inbox event. No interactive
-    stdin is provided; stdout and stderr share one captured stream. timeout
-    (seconds) kills the process group when exceeded; the job's status becomes
-    timed_out.
-    """
-    info = await broker.agent_request(
-        "shell.start",
-        command=_command(command),
-        cwd=cwd,
-        timeout=_timeout(timeout),
-        env=_env(env),
+
+async def get(job_id: str) -> ShellJob:
+    """Recover a job owned by this agent as a ShellJob snapshot (finished jobs carry
+    their result; running ones have running=True). Works after kernel restarts."""
+    return ShellJob(
+        **await broker.agent_request("shell.result", job_id=job_id, timeout=0.0)
     )
-    return JobHandle(info["id"])
-
-
-async def get(job_id: str) -> JobHandle:
-    """Recover a job owned by this agent, including completed jobs."""
-    info = await broker.agent_request("shell.info", job_id=job_id)
-    return JobHandle(info["id"])
 
 
 async def list() -> builtins.list[JobInfo]:

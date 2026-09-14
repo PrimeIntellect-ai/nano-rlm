@@ -2,7 +2,7 @@
 
 A minimal CLI coding agent with a persistent IPython execution environment and optional recursive sub-agents. For a full-fledged coding agent built on the same RLM principles, see [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, Bash commands via `rlm.shell.run`, and background jobs via `rlm.shell.start`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
+By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, and Bash commands and background jobs via `rlm.shell.run`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
 
 For convenience, rlm ships built-in *skills* that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via the contract's `builtin_tools`).
 
@@ -351,41 +351,47 @@ result = await rlm.shell.run("git status --short")
 print(result.text, result.exit_code)
 ```
 
-`run(command, cwd=..., timeout=..., env=...)` returns `ok`, combined stdout/stderr `text` (up to
-16 KiB: the first and last 8 KiB around an omitted-range marker when longer), `exit_code`,
-`job_id`, `truncated`, `error`, and `timed_out`. The command is a Bash string or an argv
-list. Nonzero exit codes are returned; startup/capture errors populate `error`; an exceeded
-`timeout` (seconds) kills the process group and sets `timed_out`; a `run()` still going after 60 s (or after
-your longer `timeout`, capped at 300 s of blocking)
-returns early with `running=True` and partial text while the job continues in the background. If output is truncated,
-recover the job with `await rlm.shell.get(result.job_id)` to read more or inspect its
-metadata. Cancelling the waiting cell leaves the job running and discoverable with
-`shell.list()`. Both calls run Bash under the supervisor; only `start()` publishes a
-`shell.completed` inbox event. `await rlm.shell.setenv(NAME='value')` sets variables for every later `run()`/`start()` of the
-agent (`getenv()` reads the overlay; per-call `env=` wins). The kernel and Bash jobs inherit the launching process's environment
-(in a sandbox, the image's ENV) minus a blocklist: credential-looking names, values with
-URL-embedded credentials, variables that would redirect the kernel's own interpreter or
-venv (PYTHONHOME, UV_PYTHON, ...), and agent/daemon sockets.
+`run(command, cwd=..., timeout=..., env=..., background=False)` returns a `ShellJob`: a
+snapshot with `running`, `ok`, combined stdout/stderr `text` (up to 16 KiB: the first and last
+8 KiB around an omitted-range marker when longer), `exit_code`, `id`, `truncated`, `error`
+and `timed_out`, plus the methods `result()`, `read()`, `info()` and `cancel()`. The command
+is a Bash string or an argv list. Without `background=True`, `run()` waits up to 15 s; a
+command still going then comes back with `running=True` and the output so far while the job
+continues. `background=True` returns at once. `await job.result(timeout=...)` waits (up to
+300 s per call) and returns the finished snapshot, again with `running=True` if the job is
+still not done; it is repeatable and never consumes output. Nonzero exit codes are returned;
+startup/capture errors populate `error`; an exceeded `timeout` (seconds) kills the process
+group and sets `timed_out` — it is the kill deadline, not the wait. If output is truncated,
+`await job.read(cursor=..., max_bytes=...)` reads the retained output (16 MiB per job).
+Cancelling the waiting cell leaves the job running and discoverable with `shell.list()`;
+`shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a
+`shell.completed` inbox event (job ID, status, exit code, completeness flags and the last
+4 KiB of output). `await rlm.shell.setenv(NAME='value')` sets variables for every later
+`run()` of the agent (`getenv()` reads the overlay; per-call `env=` wins). The kernel and
+Bash jobs inherit the launching process's environment (in a sandbox, the image's ENV) minus
+a blocklist: credential-looking names, values with URL-embedded credentials, variables that
+would redirect the kernel's own interpreter or venv (PYTHONHOME, UV_PYTHON, ...), and
+agent/daemon sockets.
 
-For long commands or work that should run alongside other tasks, use `start()`:
+For long commands or work that should run alongside other tasks, pass `background=True`
+and collect with `result()`:
 
 ```python
-job = await rlm.shell.start("uv run pytest tests/", cwd="/workspace/project")
-job_id = job.id
-await job.info()
+job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project", background=True)
+# ... other work ...
+res = await job.result()
+print(res.exit_code, res.text)
 
-# In a later cell, recover the same job and inspect its output.
+# Several jobs at once, and recovery of a job in a later cell:
+a, b = await asyncio.gather(job_a.result(), job_b.result())
 job = await rlm.shell.get(job_id)
-chunk = await job.read(cursor=0, max_bytes=16384)
-print(chunk.text)
-# Continue from chunk.next_cursor; reading is repeatable.
-await rlm.shell.list()
+chunk = await job.read(cursor=0, max_bytes=16384)   # continue from chunk.next_cursor
 ```
 
-Use the native `wait` tool when there is no other work. Termination produces a
-`shell.completed` inbox event with the job ID, status, exit code, and output
-completeness flags. Read it with `rlm.inbox.read(event_id)`. A nonzero Bash exit
-code is a completed process; startup/capture errors have status `failed`.
+`rlm.shell.start(command, ...)` remains as an alias of `run(..., background=True)`. Use the
+native `wait` tool when there is no other work; the `shell.completed` event can then be read
+with `rlm.inbox.read(event_id)`. A nonzero Bash exit code is a completed process;
+startup/capture errors have status `failed`.
 
 `await job.cancel()` terminates its process group. Jobs survive cell completion
 and lost handle variables; owner termination cancels them. Commands run in

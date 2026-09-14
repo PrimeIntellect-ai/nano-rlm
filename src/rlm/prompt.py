@@ -42,8 +42,8 @@ PROJECT_ENV_PROMPT = (
     "(tests, repros, imports) goes through bash with the project's interpreter."
 )
 IPYTHON_CONTROL_PROMPT = (
-    "Use `rlm.shell.run` for quick Bash results and `rlm.shell.start` for background work. "
-    + PROJECT_ENV_PROMPT
+    "Use `rlm.shell.run` for Bash; `background=True` returns at once and `await job.result()` "
+    "collects any job. " + PROJECT_ENV_PROMPT
 )
 KERNEL_PACKAGES_PROMPT = (
     "Pre-installed in the kernel venv: " + ", ".join(BASE_TOOLKIT) + ". "
@@ -54,7 +54,7 @@ BASH_SKILL_PROMPT = (
     "For short, blocking shell work, use `out = await bash('''command here''')` — always "
     "triple-quote the command so shell quotes and multi-line scripts never "
     "need escaping. It returns the output as a string, useful for further Python processing. "
-    "Use rlm.shell.start for supervisor-owned background work."
+    "Use rlm.shell.run(..., background=True) for supervisor-owned background work."
 )
 BASH_SKILL_WITH_TOOL_PROMPT = (
     "Inside ipython you can also run shell with `await bash(command=...)` — "
@@ -118,47 +118,45 @@ Reconstruct them and recover handles through the registries below. Never blindly
 an interrupted cell: file writes and accepted spawn/send/job requests may already have
 happened. Compaction alone preserves the kernel and supervisor resources.
 
-## Bash commands and background jobs
-Use `result = await rlm.shell.run(command, cwd=..., timeout=...)` for quick commands whose
-results you need immediately. It waits for Bash and output capture to finish and returns a
-finished ShellResult with .ok, .text (combined stdout/stderr, up to 16 KiB), .exit_code,
-.truncated, .job_id, .error, .timed_out, and .running. .ok is True only for a clean exit 0. The command
-is a Bash string or an argv list. A run() still going after 60 s (or after your timeout=,
-up to 300 s) returns early with
-.running true, .exit_code None and the output so far; the command keeps running as a
-background job, its completion arrives as a shell.completed inbox event, and
-`rlm.shell.get(result.job_id)` reads more or cancels it. timeout is optional seconds; when
-exceeded the process group is killed, .timed_out is true, and .exit_code is None. It is not a handle:
-there is no .read() or .info() on it; `rlm.shell.start` is the call that returns a JobHandle.
+## Bash commands and jobs
+`job = await rlm.shell.run(command, cwd=..., timeout=..., env=..., background=False)` runs Bash
+under the supervisor and returns a ShellJob. Without background=True it waits up to 15 s. A
+command that finished has .running False, .exit_code, .ok (True only for a clean exit 0),
+.text (combined stdout/stderr, up to 16 KiB), .truncated, .error (startup/capture failure)
+and .timed_out. A command still going after 15 s comes back with .running True, .exit_code
+None and the output so far, and keeps running. background=True returns at once, always with
+.running True. The same object collects the result either way: `res = await job.result()`
+waits up to 300 s (or its timeout=) for the command to finish and returns a finished
+ShellJob, again with .running True if it is still not done. result() is repeatable and never
+consumes output. timeout= on run() kills the process group after that many seconds
+(.timed_out True, .exit_code None); it does not change how long run() waits. The command is
+a Bash string or an argv list.
+```python
+r = await rlm.shell.run("git status --short")            # quick: finished within 15 s
+if not r.ok:
+    print("FAILED", r.exit_code, r.text)
+job = await rlm.shell.run("go test ./...", cwd="/workspace/project", timeout=900, background=True)
+# ... other work in this or later cells ...
+res = await job.result()                                  # waits (up to 300 s) for the finished job
+print(res.exit_code, res.text)
+first, second = await asyncio.gather(job_a.result(), job_b.result())   # several jobs at once
+```
 Act on the exit code before reading the text: a nonzero .exit_code means the command failed
 even if .text looks plausible, so branch on it rather than only printing it. Pass cwd=
 instead of prefixing `cd dir &&`. Environment variables the project needs (PYTHONPATH,
 GOFLAGS, ...) are set once with `await rlm.shell.setenv(PYTHONPATH="/app/lib")` and apply
-to every later run()/start(); `env={...}` applies to one call. Batch independent inspections in one cell when you already
-know what you need to inspect:
-```python
-for command in ["git status --short", "git diff --stat"]:
-    result = await rlm.shell.run(command)
-    if not result.ok:
-        print("FAILED", command, result.exit_code, result.text)
-    else:
-        print(result.text)
-```
-Startup/capture failures populate .error. Bash runs with pipefail on: a pipeline's exit code
-is that of its first failing stage, so `pytest ... | tail -20` reports pytest's failure, and a
-`grep` with no match makes the pipeline exit 1.
+to every later run(); `env={...}` applies to one call. Startup/capture failures populate
+.error. Bash runs with pipefail on: a pipeline's exit code is that of its first failing
+stage, so `pytest ... | tail -20` reports pytest's failure, and a `grep` with no match makes
+the pipeline exit 1.
 
 .text is capped at 16 KiB: longer output keeps its first and last 8 KiB around a marker
 that names the omitted byte range, so the first failure and the final summary both survive
 without piping through `tail`. Prefer `grep -n`, `sed -n 'A,Bp'`, and `head` over printing
 whole files; print the parts needed for your next decision. A pipeline cut short by `head`
-exits 141 (SIGPIPE): the producer was interrupted, not failed. If .truncated is true, the output is
-retained (up to 16 MiB per job); read the omitted part instead of re-running the command:
-```python
-if result.truncated:
-    job = await rlm.shell.get(result.job_id)
-    chunk = await job.read(cursor=8192, max_bytes=65536)
-```
+exits 141 (SIGPIPE): the producer was interrupted, not failed. If .truncated is true, the
+output is retained (up to 16 MiB per job): `chunk = await job.read(cursor=8192,
+max_bytes=65536)` returns .text, .next_cursor, .done and .truncated; cursors count bytes.
 Commands can contain multiline Bash scripts, but never embed program source in the command
 string (`python -c '...'`, `node -e '...'`, heredocs). Write scripts and scratch tests to a
 file with Python, creating the directory first, and execute the file through Bash with the
@@ -173,38 +171,24 @@ script.write_text(r\"\"\"import package
 '''Docstrings and backslashes inside are fine: the outer delimiter is a raw triple double quote.'''
 print(package.__version__)
 \"\"\")
-result = await rlm.shell.run(["python3", str(script)], cwd="/workspace/project")
+r = await rlm.shell.run(["python3", str(script)], cwd="/workspace/project")
 ```
 The supervisor API is the only shell: do not call subprocess or os.system from the kernel.
 Reuse Python variables and helpers across cells.
 
-Use `job = await rlm.shell.start(command, cwd=..., timeout=...)` for anything likely to take longer than
-about a minute (a full test suite, a build, an install) or for work you want to run
-alongside other tasks. It returns a JobHandle promptly, before completion; keep working or
-call native `wait`, then collect the result from the shell.completed inbox event described
-below. Use job handles for output subscriptions, reading progress, and cancellation. Before
-your final answer, `await rlm.shell.list()` must show no running job whose result you still
-need.
-Both calls run supervisor-owned Bash, with no stdin/PTY. Default cwd is this agent's
-working directory; relative cwd resolves against it. Cancelling a cell awaiting run()
-stops waiting but leaves the job running. Jobs survive kernel restarts; recover their IDs
-with shell.list(). Only start() publishes a shell.completed inbox event; run() returns its
-result directly and posts nothing to the inbox.
-`await rlm.shell.list()` returns JobInfo snapshots, not handles; `item.handle()` or
-`await rlm.shell.get(job_id)` gives the JobHandle for reading or cancelling.
-`job.id` is stable. `await job.info()` returns metadata with .status, .exit_code,
-.output_complete, .output_truncated, .timeout, .timed_out, and .error. Status is starting, running,
-completed, failed, cancelled, or timed_out. Nonzero exit codes are completed processes;
-failed means startup/capture failure; timed_out means the job's timeout killed it. `await job.cancel()` stops
-the process group. Owner termination cancels its jobs, including background descendants.
-Keep Bash alive until its work finishes; detached processes are outside this guarantee.
-
-`chunk = await job.read(cursor=0, max_bytes=16384)` returns .text, .next_cursor, .done,
-and .truncated. Reads are repeatable, not consuming; save next_cursor for the next read.
-Cursors count bytes, not characters. Reads allow at most 65536 bytes and capture retains
-16 MiB per job. .done means the job ended and this read reached the retained output's end;
-it does not imply success or exhaustive output. Check the job's exit code and capture flags.
-IPython `!`/`%%bash` and any enabled blocking bash skill/tool are not supervisor-owned jobs.
+Jobs run supervisor-owned Bash with no stdin/PTY. Default cwd is this agent's working
+directory; relative cwd resolves against it. Cancelling a cell that is awaiting run() or
+result() stops waiting but leaves the job running. Jobs survive kernel restarts:
+`await rlm.shell.list()` returns JobInfo snapshots (.id, .command, .status, .exit_code,
+.timeout, .error; status is starting, running, completed, failed, cancelled, or timed_out;
+nonzero exit codes are completed processes, failed means startup/capture failure), and
+`await rlm.shell.get(job_id)` or `item.handle()` recovers the ShellJob for a lost variable.
+`await job.cancel()` stops the process group. Owner termination cancels its jobs. Keep Bash
+alive until its work finishes; detached processes are outside this guarantee. Before your
+final answer, `await rlm.shell.list()` must show no running job whose result you still need.
+Only a job handed back with .running True posts a shell.completed inbox event when it ends;
+finished results post nothing. IPython `!`/`%%bash` and any enabled blocking bash
+skill/tool are not supervisor-owned jobs.
 
 Agent cleanup errors are reported separately in AgentInfo.cleanup_error; completed answers remain readable. Use cancel() to retry unfinished cleanup.
 
@@ -225,23 +209,17 @@ with timeout at most 300 seconds. It suspends inference without holding a cell o
 New arrivals wake it; already-announced unread events do not. Inspect existing unread
 events before waiting for more. Avoid polling/sleep loops in Python to wait for agents/jobs.
 
-Bash completion arrives automatically as type `shell.completed`, with
-`event["content"]["job_id"]`; recover the job to read output and inspect its outcome.
-For example, start a job in one cell:
-```python
-job = await rlm.shell.start("uv run pytest tests/", cwd="/workspace/project")
-```
-Continue other work, or call native `wait`. In a later cell, inspect relevant arrivals:
+A job that was handed back running posts `shell.completed` when it ends, with content
+job_id, status, exit_code and text (the last 4 KiB of output). Normally you keep the job
+variable and call `await job.result()` when you need the outcome; the inbox route is for
+when you have called native `wait` with nothing else to do:
 ```python
 for item in await rlm.inbox.list():
     if item["type"] == "shell.completed":
         event = await rlm.inbox.read(item["id"])
-        job = await rlm.shell.get(event["content"]["job_id"])
-        info = await job.info()
-        chunk = await job.read()
-        print(info.status, info.exit_code, chunk.text)
+        res = await (await rlm.shell.get(event["content"]["job_id"])).result()
+        print(res.exit_code, res.text)
 ```
-Adapt the command and cwd to the actual task. Continue reading with next_cursor if needed.
 
 ## Subscriptions
 `await rlm.watch.job(job)` observes newly captured output from an owned job.

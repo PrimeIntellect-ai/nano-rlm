@@ -8,7 +8,7 @@ from typing import Literal
 
 from rlm import broker
 from rlm.agent import AgentHandle
-from rlm.shell import JobHandle
+from rlm.shell import ShellJob
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ async def agent(target: AgentHandle) -> SubscriptionHandle:
     return SubscriptionHandle(info["id"])
 
 
-async def job(target: JobHandle) -> SubscriptionHandle:
+async def job(target: ShellJob) -> SubscriptionHandle:
     """Watch future captured output from a Bash job owned by this agent."""
     info = await broker.agent_request("watch.job", job_id=target.id)
     return SubscriptionHandle(info["id"])
