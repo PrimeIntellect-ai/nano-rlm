@@ -127,7 +127,7 @@ class ChildSessionAggregate:
         default_factory=ProgrammaticToolCallStats
     )
     num_sessions: int = 0
-    """Recursive count of descendant sub-agent sessions (spawned via rlm())."""
+    """Recursive count of descendant sub-agent sessions (spawned via rlm.agent.spawn)."""
 
     def absorb(self, tool_stats: ProgrammaticToolCallStats) -> None:
         """Combine a child session's stats into this aggregate."""

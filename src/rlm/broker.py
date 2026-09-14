@@ -39,12 +39,47 @@ _JSON_TO_PY = {
 }
 
 
-class BrokerRunRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid")
-    op: Literal["rlm.run"]
+class BrokerAgentSpawnRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.spawn"]
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
-    prompt: str
+    task: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1)] | None
+    persistent: bool
+
+
+class BrokerAgentGetRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.get"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name_or_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerAgentListRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.list"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    recursive: bool
+
+
+class BrokerAgentHandleRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.info", "agent.result", "agent.cancel"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerAgentWaitRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.wait"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+    timeout: Annotated[float, Field(ge=0, le=300, allow_inf_nan=False)]
 
 
 class BrokerSkillRequest(TypedDict):
@@ -57,7 +92,12 @@ class BrokerSkillRequest(TypedDict):
 
 
 BrokerRequest = Annotated[
-    BrokerRunRequest | BrokerSkillRequest,
+    BrokerAgentSpawnRequest
+    | BrokerAgentGetRequest
+    | BrokerAgentListRequest
+    | BrokerAgentHandleRequest
+    | BrokerAgentWaitRequest
+    | BrokerSkillRequest,
     Field(discriminator="op"),
 ]
 _REQUEST_ADAPTER = TypeAdapter(BrokerRequest)
@@ -65,7 +105,7 @@ _REQUEST_ADAPTER = TypeAdapter(BrokerRequest)
 
 class _BrokerSuccess(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid")
-    result: dict[str, Any] | str
+    result: dict[str, Any] | list[dict[str, Any]] | str | None
 
 
 class _BrokerFailure(TypedDict):
@@ -110,10 +150,6 @@ def configure(endpoint: BrokerEndpoint | None) -> None:
     _endpoint = endpoint
 
 
-def is_configured() -> bool:
-    return _endpoint is not None
-
-
 def set_scope(scope_id: str | None) -> None:
     global _scope_id
     _scope_id = scope_id
@@ -145,24 +181,20 @@ async def write_frame(
     await writer.drain()
 
 
-async def run(prompt: str) -> RLMResult:
-    """Run a recursive RLM through the trusted session supervisor."""
+async def agent_request(op: str, **arguments: Any) -> Any:
+    """Invoke an agent operation using the current cell's identity."""
     if _endpoint is None or _scope_id is None:
-        raise RuntimeError("recursive RLM calls are unavailable outside an active cell")
-    if not isinstance(prompt, str):
-        raise TypeError("prompt must be a string")
-    response = await _request(
+        raise RuntimeError("agent operations are unavailable outside an active cell")
+    request = parse_request(
         {
-            "op": "rlm.run",
+            "op": op,
             "capability": _endpoint.capability,
             "scope_id": _scope_id,
-            "prompt": prompt,
+            **arguments,
         }
     )
-    result = response.get("result")
-    if not isinstance(result, dict):
-        raise RuntimeError("invalid response from RLM supervisor")
-    return result_from_payload(result)
+    response = await _request(request)
+    return response["result"]
 
 
 async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
