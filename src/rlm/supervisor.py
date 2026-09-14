@@ -653,7 +653,9 @@ class SessionTreeSupervisor:
             (tag, f'{text} (Mute this hint with await rlm.hints.mute("{tag}").)')
         )
 
-    def inbox_notification(self, invocation_id: str) -> str | None:
+    def inbox_notice(self, invocation_id: str) -> dict | None:
+        """Pending runtime notices for the agent's next turn as a structured record:
+        {"text", "hints": [tags], "unread": int | None, "error": bool}. Clears them."""
         agent = self._invocations[invocation_id]
         # shell.completed is quiet: the agent holds the job and collects it with
         # job.result(); announcing it only pulled agents into the inbox for nothing
@@ -664,23 +666,40 @@ class SessionTreeSupervisor:
         agent.announced_loud = len(loud)
         agent.announced = len(agent.inbox)
         count = sum(not event["read"] for event in loud)
-        notices = []
+        notices: list[str] = []
+        hints: list[str] = []
         if agent.notes:
-            notices.extend(
-                text for tag, text in agent.notes if tag not in agent.muted_hints
-            )
+            for tag, text in agent.notes:
+                if tag not in agent.muted_hints:
+                    notices.append(text)
+                    hints.append(tag)
             agent.notes.clear()
+        error = bool(agent.inbox_error)
         if agent.inbox_error:
             notices.append(agent.inbox_error)
         # The unread count is announced when it changes or new events arrive, not on every
         # turn: an event the agent has decided to leave unread would otherwise repeat the
         # same line for the rest of the episode (streaks of 50 identical notices were seen).
+        unread = None
         if count and (new_events or count != agent.unread_announced):
+            unread = count
             notices.append(
                 f"Inbox: {count} unread events. Use rlm.inbox.list() and rlm.inbox.read(event_id) to inspect them."
             )
         agent.unread_announced = count
-        return "Supervisor: " + " ".join(notices) if notices else None
+        if not notices:
+            return None
+        return {
+            "text": " ".join(notices),
+            "hints": hints,
+            "unread": unread,
+            "error": error,
+        }
+
+    def inbox_notification(self, invocation_id: str) -> str | None:
+        """The notices as one line (see inbox_notice for the structured form)."""
+        notice = self.inbox_notice(invocation_id)
+        return "Supervisor: " + notice["text"] if notice else None
 
     async def wait_for_events(self, invocation_id: str, timeout: float) -> str:
         agent = self._invocations[invocation_id]

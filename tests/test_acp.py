@@ -317,14 +317,15 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
 
     assert result.answer == "continued"
     assert result.turns == 1
+    wrapped = f'<runtime_event kind="recovery">\n{notice}\n</runtime_event>'
     assert session.messages[-3:] == [
         {"role": "user", "content": "continue"},
-        {"role": "user", "content": notice},
+        {"role": "user", "content": wrapped},
         {"role": "assistant", "content": "continued"},
     ]
 
     assert any(
-        message.get("content") == notice for message in client.calls[-1]["messages"]
+        message.get("content") == wrapped for message in client.calls[-1]["messages"]
     )
 
 

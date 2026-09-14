@@ -32,10 +32,18 @@ async def test_empty_reply_is_nudged_then_recovers(session):
     result = await engine.run("add")
     assert result.answer == "done"
     nudges = [r for r in _records(session) if r.get("type") == "empty_reply_nudge"]
-    assert len(nudges) == 1 and nudges[0]["message"]["content"] == EMPTY_REPLY_NUDGE
+    assert len(nudges) == 1 and EMPTY_REPLY_NUDGE in nudges[0]["message"]["content"]
+    assert nudges[0]["message"]["content"].startswith(
+        '<runtime_event kind="nudge" reason="empty_reply">'
+    )
+    assert nudges[0]["provenance"] == {
+        "source": "runtime",
+        "kind": "nudge",
+        "reason": "empty_reply",
+    }
     # the nudge reached the model as a user message on the next call
     assert any(
-        m.get("content") == EMPTY_REPLY_NUDGE for m in client.calls[1]["messages"]
+        EMPTY_REPLY_NUDGE in str(m.get("content")) for m in client.calls[1]["messages"]
     )
 
 
@@ -91,9 +99,14 @@ async def test_plan_like_reply_is_nudged_once(session):
     result = await engine.run("add")
     assert result.answer == "done"
     nudges = [r for r in _records(session) if r.get("type") == "plan_reply_nudge"]
-    assert len(nudges) == 2 and nudges[0]["message"]["content"] == PLAN_REPLY_NUDGE
+    assert len(nudges) == 2 and PLAN_REPLY_NUDGE in nudges[0]["message"]["content"]
+    assert nudges[0]["provenance"] == {
+        "source": "runtime",
+        "kind": "nudge",
+        "reason": "plan_reply",
+    }
     assert any(
-        m.get("content") == PLAN_REPLY_NUDGE for m in client.calls[1]["messages"]
+        PLAN_REPLY_NUDGE in str(m.get("content")) for m in client.calls[1]["messages"]
     )
 
 

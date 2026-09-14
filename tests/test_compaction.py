@@ -289,7 +289,9 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert client.calls[3]["tool_choice"] == "none"
     retry_messages = client.calls[4]["messages"]
     assert len(retry_messages) == 2
-    assert retry_messages[1]["content"].startswith(SUMMARY_FRAMING)
+    assert retry_messages[1]["content"].startswith(
+        '<runtime_event kind="compaction">\n' + SUMMARY_FRAMING
+    )
     assert str(session.dir / "messages.jsonl") in retry_messages[1]["content"]
     records = [
         json.loads(line)

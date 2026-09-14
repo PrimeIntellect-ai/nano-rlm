@@ -121,12 +121,14 @@ print('MESSAGING_OK')
         queued_instruction = next(
             i
             for i, m in enumerate(messages)
-            if m.get("content") == "Parent instruction:\nqueued task"
+            if "queued task" in str(m.get("content"))
+            and str(m.get("content")).startswith('<agent_input from="parent"')
         )
         steering_instruction = next(
             i
             for i, m in enumerate(messages)
-            if m.get("content") == "Parent instruction:\nsteering task"
+            if "steering task" in str(m.get("content"))
+            and 'kind="steer"' in str(m.get("content"))
         )
         assert steering_instruction < initial_answer < queued_instruction
         assert any(
@@ -451,3 +453,43 @@ async def test_muted_hint_is_not_queued(session):
         assert [tag for tag, _ in owner.notes] == ["run-detach"]
     finally:
         await supervisor.aclose()
+
+
+def test_runtime_event_and_agent_input_delimiters():
+    from rlm.provenance import agent_input, runtime_event
+
+    message, provenance = runtime_event(
+        "notice",
+        "Inbox: 2 unread events.",
+        unread=2,
+        hints=["env-prefix", "quote-nesting"],
+    )
+    assert message["role"] == "user"
+    assert message["content"] == (
+        '<runtime_event kind="notice" unread="2" hints="env-prefix,quote-nesting">\n'
+        "Inbox: 2 unread events.\n</runtime_event>"
+    )
+    assert provenance == {
+        "source": "runtime",
+        "kind": "notice",
+        "unread": 2,
+        "hints": ["env-prefix", "quote-nesting"],
+    }
+    # empty attributes are dropped, quotes are escaped
+    message, provenance = runtime_event("recovery", 'said "hi"', hints=[], unread=None)
+    assert (
+        message["content"]
+        == '<runtime_event kind="recovery">\nsaid "hi"\n</runtime_event>'
+    )
+    assert provenance == {"source": "runtime", "kind": "recovery"}
+    message, provenance = agent_input("do x", agent="abc", kind="steer")
+    assert (
+        message["content"]
+        == '<agent_input from="parent" agent="abc" kind="steer">\ndo x\n</agent_input>'
+    )
+    assert provenance == {
+        "source": "agent",
+        "from": "parent",
+        "kind": "steer",
+        "agent": "abc",
+    }

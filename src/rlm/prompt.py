@@ -108,8 +108,11 @@ Finishing or cancelling a cell, losing a handle variable, or restarting IPython 
 cancel those resources. Recover handles through their registries. Terminating an agent
 cleans up its children, jobs, and subscriptions.
 
-Parent instructions are delivered automatically. Child reports and watcher events enter
-your inbox; lightweight notifications let you choose when to read them. Agents share a
+Parent instructions are delivered automatically, wrapped in `<agent_input from="parent">`
+tags; runtime notices, hints, nudges and kernel-recovery notices arrive wrapped in
+`<runtime_event kind="...">` tags. Both share the user role with the task but are not the
+user. Child reports and watcher events enter your inbox; lightweight notifications let you
+choose when to read them. Agents share a
 filesystem as trusted collaborators; handles enforce orchestration ownership, not
 filesystem isolation.
 

@@ -22,6 +22,7 @@ from rlm.client import (
     make_client,
     model_call_headers,
 )
+from rlm.provenance import agent_input, runtime_event
 from rlm.compaction import (
     CHECKPOINT_PROMPT,
     TOOL_OUTPUT_MAX_BYTES,
@@ -553,10 +554,12 @@ class RLMEngine:
         notices = self._pending_kernel_notices + self._repl.take_recovery_notices()
         self._pending_kernel_notices = []
         for notice in notices:
+            message, provenance = runtime_event("recovery", notice)
             self.session.log(
                 {
                     "type": "kernel_recovery",
-                    "message": {"role": "user", "content": notice},
+                    "message": message,
+                    "provenance": provenance,
                 },
                 in_context=True,
             )
@@ -571,20 +574,36 @@ class RLMEngine:
             self._invocation_id, include_queue=include_queue
         )
         for event in instructions:
-            message = {
-                "role": "user",
-                "content": f"Parent instruction:\n{event['content']}",
-            }
+            message, provenance = agent_input(
+                event["content"],
+                agent=event.get("sender_id"),
+                kind="steer" if event.get("type") == "steer" else "instruction",
+            )
             self.session.log(
-                {"type": "parent_message", "event_id": event["id"], "message": message},
+                {
+                    "type": "parent_message",
+                    "event_id": event["id"],
+                    "message": message,
+                    "provenance": provenance,
+                },
                 in_context=True,
             )
         if notify:
-            notification = self._supervisor.inbox_notification(self._invocation_id)
-            if notification:
-                message = {"role": "user", "content": notification}
+            notice = self._supervisor.inbox_notice(self._invocation_id)
+            if notice:
+                message, provenance = runtime_event(
+                    "notice",
+                    notice["text"],
+                    unread=notice["unread"],
+                    hints=notice["hints"],
+                    error="true" if notice["error"] else None,
+                )
                 self.session.log(
-                    {"type": "supervisor_notification", "message": message},
+                    {
+                        "type": "supervisor_notification",
+                        "message": message,
+                        "provenance": provenance,
+                    },
                     in_context=True,
                 )
         if instructions:
@@ -712,10 +731,14 @@ class RLMEngine:
                     and self._empty_reply_nudges < MAX_EMPTY_REPLY_NUDGES
                 ):
                     self._empty_reply_nudges += 1
+                    message, provenance = runtime_event(
+                        "nudge", EMPTY_REPLY_NUDGE, reason="empty_reply"
+                    )
                     self.session.log(
                         {
                             "type": "empty_reply_nudge",
-                            "message": {"role": "user", "content": EMPTY_REPLY_NUDGE},
+                            "message": message,
+                            "provenance": provenance,
                         },
                         in_context=True,
                     )
@@ -727,10 +750,14 @@ class RLMEngine:
                     and self._plan_reply_nudges < MAX_PLAN_REPLY_NUDGES
                 ):
                     self._plan_reply_nudges += 1
+                    message, provenance = runtime_event(
+                        "nudge", PLAN_REPLY_NUDGE, reason="plan_reply"
+                    )
                     self.session.log(
                         {
                             "type": "plan_reply_nudge",
-                            "message": {"role": "user", "content": PLAN_REPLY_NUDGE},
+                            "message": message,
+                            "provenance": provenance,
                         },
                         in_context=True,
                     )
@@ -1201,8 +1228,11 @@ class RLMEngine:
             "Search or read relevant records with Python when the summary lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
             "identifies the user record whose attempt was rolled back."
         )
+        compaction_message, _provenance = runtime_event(
+            "compaction", compacted_user_content
+        )
         window = self.session.replace_context(
-            [system_msg, {"role": "user", "content": compacted_user_content}],
+            [system_msg, compaction_message],
             reason="compaction",
         )
         self._last_good = len(self.session.messages)
