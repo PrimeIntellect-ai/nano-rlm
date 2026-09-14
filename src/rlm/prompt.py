@@ -42,7 +42,7 @@ PROJECT_ENV_PROMPT = (
     "(tests, repros, imports) goes through bash with the project's interpreter."
 )
 IPYTHON_CONTROL_PROMPT = (
-    "Use `rlm.shell.run` for Bash; `wait=` is how long to wait (0 returns at once) and "
+    "Use `rlm.shell.run` for Bash; `yield_after=` is how long it waits before yielding a handle (0 = at once) and "
     "`await job.result()` collects any job. " + PROJECT_ENV_PROMPT
 )
 KERNEL_PACKAGES_PROMPT = (
@@ -54,7 +54,7 @@ BASH_SKILL_PROMPT = (
     "For short, blocking shell work, use `out = await bash('''command here''')` — always "
     "triple-quote the command so shell quotes and multi-line scripts never "
     "need escaping. It returns the output as a string, useful for further Python processing. "
-    "Use rlm.shell.run(..., wait=0) for supervisor-owned background work."
+    "Use rlm.shell.run(..., yield_after=0) for supervisor-owned background work."
 )
 BASH_SKILL_WITH_TOOL_PROMPT = (
     "Inside ipython you can also run shell with `await bash(command=...)` — "
@@ -119,24 +119,24 @@ an interrupted cell: file writes and accepted spawn/send/job requests may alread
 happened. Compaction alone preserves the kernel and supervisor resources.
 
 ## Bash commands and jobs
-`job = await rlm.shell.run(command, cwd=..., env=..., wait=10, timeout=None)` runs Bash
-under the supervisor and returns a ShellJob. wait is how long to wait for the command: 10 s
-by default, 0 returns at once, at most 300. A command that finished has .running False,
+`job = await rlm.shell.run(command, cwd=..., env=..., yield_after=10, timeout=None)` runs
+Bash under the supervisor and returns a ShellJob. yield_after is how long to wait before the
+call yields a handle instead of a result: 10 s by default, 0 returns at once, at most 300. A command that finished has .running False,
 .exit_code, .ok (True only for a clean exit 0), .text (combined stdout/stderr, up to 16 KiB),
 .truncated, .error (startup/capture failure) and .timed_out. A command still going when the wait ends
 comes back with .running True, .exit_code None and the output so far, and keeps running;
-`res = await job.result()` waits up to 300 s (or its wait=) and returns a finished
+`res = await job.result()` waits up to 300 s (or its yield_after=) and returns a finished
 ShellJob, again with .running True if it is still not done. result() is repeatable and never
 consumes output. A ShellJob is a snapshot: its .running and .text do not change by
 themselves, result() returns a fresh one. result() already waits, so never call native
-`wait` for a job you hold. Nothing is killed by a wait; timeout=, if given, kills the process
+`wait` for a job you hold. Nothing is killed by yielding; timeout=, if given, kills the process
 group after that many seconds (.timed_out True, .exit_code None), and `await job.cancel()`
 stops a job at any time. The command is a Bash string or an argv list.
 ```python
-r = await rlm.shell.run("git status --short")                  # finished within the 10 s wait
+r = await rlm.shell.run("git status --short")                  # finished within 10 s
 if not r.ok:
     print("FAILED", r.exit_code, r.text)
-job = await rlm.shell.run("go test ./...", cwd="/workspace/project", wait=0)   # returns at once
+job = await rlm.shell.run("go test ./...", cwd="/workspace/project", yield_after=0)   # handle at once
 # ... other work in this or later cells ...
 res = await job.result()                                        # waits (up to 300 s) for the finished job
 print(res.exit_code, res.text)

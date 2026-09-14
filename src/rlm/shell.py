@@ -38,18 +38,18 @@ class ShellJob:
             and self.error is None
         )
 
-    async def result(self, wait: float | None = None, **rejected) -> ShellJob:
+    async def result(self, yield_after: float | None = None, **rejected) -> ShellJob:
         """Wait for the job to finish and return its finished snapshot.
 
-        Blocks inside the cell for up to `wait` seconds (default and cap: 300). A job
-        still running afterwards comes back with running=True and its output so far;
-        call result() again later. Repeatable and non-consuming: on a finished job it
+        Blocks inside the cell for up to `yield_after` seconds (default and cap: 300),
+        then yields the handle again: a job still running comes back with running=True
+        and its output so far; call result() again later. Repeatable and non-consuming: on a finished job it
         returns the same result every time.
         """
         _reject_kwargs("result", rejected)
         return ShellJob(
             **await broker.agent_request(
-                "shell.result", job_id=self.id, wait=_wait(wait)
+                "shell.result", job_id=self.id, yield_after=_yield_after(yield_after)
             )
         )
 
@@ -167,14 +167,14 @@ async def getenv() -> dict[str, str]:
     return await broker.agent_request("shell.getenv", variables=None)
 
 
-def _wait(wait: float | None) -> float | None:
-    if wait is None:
+def _yield_after(seconds: float | None) -> float | None:
+    if seconds is None:
         return None
-    if isinstance(wait, bool) or not isinstance(wait, (int, float)):
-        raise TypeError("wait must be a number of seconds or None")
-    if wait < 0:
-        raise ValueError("wait must be a non-negative number of seconds")
-    return float(wait)
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        raise TypeError("yield_after must be a number of seconds or None")
+    if seconds < 0:
+        raise ValueError("yield_after must be a non-negative number of seconds")
+    return float(seconds)
 
 
 def _timeout(timeout: float | None) -> float | None:
@@ -192,7 +192,10 @@ def _reject_kwargs(name: str, rejected: dict) -> None:
     costs the agent a cell, a bare TypeError costs it another."""
     if not rejected:
         return
-    hints = {"background": "use wait=0 to return at once"}
+    hints = {
+        "background": "use yield_after=0 to return at once",
+        "wait": "use yield_after=<seconds> for how long to wait before the call yields a handle",
+    }
     key = next(iter(rejected))
     raise TypeError(
         f"{name}() got an unexpected keyword argument {key!r}: "
@@ -205,14 +208,14 @@ async def run(
     *,
     cwd: str | None = None,
     env: dict[str, str] | None = None,
-    wait: float | None = None,
+    yield_after: float | None = None,
     timeout: float | None = None,
     **rejected,
 ) -> ShellJob:
     """Run Bash under the supervisor and return a ShellJob.
 
-    wait is how long to wait for the command, in seconds: default 10, 0 returns at once,
-    values above 300 are capped at 300. A command that finished has running=False,
+    yield_after is how long to wait before yielding a handle instead of a result, in
+    seconds: default 10, 0 returns at once, values above 300 are capped at 300. A command that finished has running=False,
     exit_code, ok, text (combined output, up to 16 KiB: first and last 8 KiB around a
     marker naming the omitted bytes), truncated, error and timed_out. A command still
     going when the wait ends comes back with running=True, exit_code None and the output
@@ -230,7 +233,7 @@ async def run(
             "shell.run",
             command=_command(command),
             cwd=cwd,
-            wait=_wait(wait),
+            yield_after=_yield_after(yield_after),
             timeout=_timeout(timeout),
             env=_env(env),
         )
@@ -241,7 +244,7 @@ async def get(job_id: str) -> ShellJob:
     """Recover a job owned by this agent as a ShellJob snapshot (finished jobs carry
     their result; running ones have running=True). Works after kernel restarts."""
     return ShellJob(
-        **await broker.agent_request("shell.result", job_id=job_id, wait=0.0)
+        **await broker.agent_request("shell.result", job_id=job_id, yield_after=0.0)
     )
 
 

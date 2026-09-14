@@ -33,8 +33,8 @@ IPYTHON_SCHEMA = {
         "description": (
             "Execute Python in a persistent kernel, including top-level await. "
             "Use the pre-imported rlm API to manage agents, Bash jobs, inboxes, and subscriptions "
-            "as described in the runtime guide. Use await rlm.shell.run(command, wait=10) for Bash: "
-            "it waits up to wait seconds (0 returns at once, max 300) and returns a ShellJob "
+            "as described in the runtime guide. Use await rlm.shell.run(command, yield_after=10) for Bash: "
+            "it waits up to yield_after seconds (0 returns at once, max 300) and returns a ShellJob "
             "with .text, .exit_code and .running; await job.result() collects a job that is still "
             "running. Commands support multiline Bash and survive kernel restart. "
             "Variables persist across cells and compaction, but are lost on kernel restart. "

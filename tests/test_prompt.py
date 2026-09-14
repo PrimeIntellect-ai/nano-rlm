@@ -59,7 +59,7 @@ def test_ipython_control_prompt_included_for_ipython_tool():
 
     assert IPYTHON_CONTROL_PROMPT in prompt
     assert (
-        "await rlm.shell.run(command, cwd=..., env=..., wait=10, timeout=None)"
+        "await rlm.shell.run(command, cwd=..., env=..., yield_after=10, timeout=None)"
         in prompt
     )
     assert "res = await job.result()" in prompt
