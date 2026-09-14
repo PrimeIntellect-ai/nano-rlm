@@ -465,6 +465,10 @@ class RLMEngine:
                 self._owns_supervisor = False
             raise
 
+    def _publish_agent_step(self, start: int) -> None:
+        if self._supervisor is not None:
+            self._supervisor.agent_step(self._invocation_id, start)
+
     def _deliver_kernel_notices(self) -> None:
         if self._repl is None:
             return
@@ -573,6 +577,7 @@ class RLMEngine:
                             "args": err if args is None else args,
                         }
                     )
+            step_start = self.session.message_count
             self.session.log_assistant(turn, tool_calls_log, msg_dict)
             messages = self.session.messages
 
@@ -582,6 +587,7 @@ class RLMEngine:
                     self.session.log_tool_result(
                         turn, tc.function.name, feedback, 0.0, call_id=tc.id
                     )
+                self._publish_agent_step(step_start)
                 continue
 
             if msg.tool_calls and parsed_args[0] is None:
@@ -595,7 +601,11 @@ class RLMEngine:
                 self.session.log_tool_result(
                     turn, tool_name, feedback, 0.0, call_id=tc.id
                 )
+                self._publish_agent_step(step_start)
                 continue
+
+            if not msg.tool_calls:
+                self._publish_agent_step(step_start)
 
             # Token budget check
             if (
@@ -715,6 +725,7 @@ class RLMEngine:
                 call_id=tc.id,
                 context_content=content,
             )
+            self._publish_agent_step(step_start)
             self._deliver_kernel_notices()
             messages = self.session.messages
 

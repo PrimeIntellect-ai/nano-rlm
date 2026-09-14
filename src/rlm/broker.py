@@ -149,6 +149,46 @@ class BrokerShellReadRequest(TypedDict):
     max_bytes: Annotated[int, Field(ge=1, le=65_536)]
 
 
+class BrokerWatchAgentRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["watch.agent"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerWatchJobRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["watch.job"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    job_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerWatchPathRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["watch.path"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    path: Annotated[str, Field(min_length=1, max_length=4096)]
+    recursive: bool
+
+
+class BrokerWatchListRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["watch.list"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerWatchHandleRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["watch.get", "watch.cancel"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    subscription_id: Annotated[str, Field(min_length=1)]
+
+
 class BrokerSkillRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid")
     op: Literal["skill.call"]
@@ -172,7 +212,12 @@ BrokerRequest = Annotated[
     | BrokerShellRunRequest
     | BrokerShellListRequest
     | BrokerShellHandleRequest
-    | BrokerShellReadRequest,
+    | BrokerShellReadRequest
+    | BrokerWatchAgentRequest
+    | BrokerWatchJobRequest
+    | BrokerWatchPathRequest
+    | BrokerWatchListRequest
+    | BrokerWatchHandleRequest,
     Field(discriminator="op"),
 ]
 _REQUEST_ADAPTER = TypeAdapter(BrokerRequest)

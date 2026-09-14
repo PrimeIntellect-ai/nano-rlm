@@ -218,6 +218,16 @@ def build_system_prompt(
             ]
         )
 
+    if has_ipython:
+        parts.extend(
+            [
+                "",
+                "Subscriptions: `await rlm.watch.agent(child)` watches a direct child's conversation after complete assistant/tool steps; `await rlm.watch.job(job)` watches new captured Bash output; `await rlm.watch.path(path, recursive=False)` watches an existing file/directory. They return handles with .id and async .cancel(). There is no events parameter. Child/job completion notifications remain automatic.",
+                "Subscriptions observe future activity, batch arrivals over 200 ms, and publish watch.agent/job/path events into your inbox. Each event has subscription_id; its content has target. Agent events carry an exclusive start:end history-message range; job events carry start:end output byte cursors; path events carry paths and truncated. Retrieve details through child.history(), job.read(), or files. No event payload is pushed into the conversation.",
+                "Use `await rlm.watch.list()` for metadata/status or `await rlm.watch.get(subscription_id)` to recover a handle after kernel restart. Cancellation stops future events and drops an unpublished batch; inbox events already published remain readable. Owner termination cancels its subscriptions. A removed path or watcher failure stops that subscription and posts watch.failed; register again after recreation. Limits: 64 active / 1024 total subscriptions per tree; oversized path batches are truncated explicitly.",
+            ]
+        )
+
     if _should_include_git_history_guard(active_tools, allow_git):
         parts.extend(["", GIT_HISTORY_GUARD_PROMPT])
 

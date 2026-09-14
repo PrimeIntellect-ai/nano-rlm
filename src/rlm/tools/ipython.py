@@ -396,8 +396,8 @@ import rlm
         self._recovery_notices.append(
             f"Supervisor: Your IPython kernel {reason} and has been restarted. "
             "Python variables, imports, and in-kernel tasks were lost. Your conversation, inbox, "
-            "agents, and shell jobs remain available. Recreate the variables you need and recover "
-            "handles through rlm.agent.list/get and rlm.shell.list/get. Inbox read state is unchanged. "
+            "agents, shell jobs, and subscriptions remain available. Recreate the variables you need and recover "
+            "handles through rlm.agent.list/get, rlm.shell.list/get, and rlm.watch.list/get. Inbox read state is unchanged. "
             + (
                 "The interrupted cell may have produced partial side effects; it was not replayed. "
                 if self._cell_submitted
