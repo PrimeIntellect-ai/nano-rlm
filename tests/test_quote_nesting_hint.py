@@ -54,3 +54,37 @@ async def test_nested_quote_syntax_error_is_hinted_then_muted(session):
         str(m.get("content"))[:80] for m in last_call_hints
     ]
     assert 'rlm.hints.mute("quote-nesting")' in hints[0]
+
+
+async def test_multiline_command_in_plain_quotes_gets_the_command_hint(session):
+    # the dominant collision on the 500-task runs: a heredoc pasted into run("...")
+    bad = "r = await rlm.shell.run(\"python3 - <<'EOF'\nprint(1)\nEOF\")"
+    plain_mistake = "print(1"  # an ordinary SyntaxError: no hint
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[DummyToolCall("ipython", {"code": plain_mistake})]
+            ),
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": bad})]),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )  # type: ignore
+    try:
+        await engine.prompt("run a heredoc")
+    finally:
+        await engine.aclose()
+    users = [
+        str(m.get("content", ""))
+        for m in client.calls[-1]["messages"]
+        if m.get("role") == "user"
+    ]
+    command_hints = [
+        u for u in users if "multi-line command inside a plain-quoted" in u
+    ]
+    assert len(command_hints) == 1 and "r'''...'''" in command_hints[0]
+    assert not any("nested inside a Python string literal" in u for u in users)
+    # the ordinary mistake earned nothing: only one hint in the whole conversation
+    assert sum("quote-nesting" in u for u in users) == 1
