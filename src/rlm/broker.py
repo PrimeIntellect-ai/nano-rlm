@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import TypedDict
 
 from rlm.types import RLMResult
 
@@ -122,9 +122,9 @@ class BrokerShellRunRequest(TypedDict):
     scope_id: Annotated[str, Field(min_length=1)]
     command: Annotated[str, Field(min_length=1, max_length=65_536)]
     cwd: str | None
+    wait: Annotated[float, Field(ge=0)] | None
     timeout: Annotated[float, Field(gt=0)] | None
     env: dict[str, str] | None
-    background: NotRequired[bool]
 
 
 class BrokerShellResultRequest(TypedDict):
@@ -133,7 +133,7 @@ class BrokerShellResultRequest(TypedDict):
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
     job_id: Annotated[str, Field(min_length=1)]
-    timeout: Annotated[float, Field(ge=0)] | None
+    wait: Annotated[float, Field(ge=0)] | None
 
 
 class BrokerShellEnvRequest(TypedDict):

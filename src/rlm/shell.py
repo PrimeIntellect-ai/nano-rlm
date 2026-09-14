@@ -38,17 +38,18 @@ class ShellJob:
             and self.error is None
         )
 
-    async def result(self, timeout: float | None = None) -> ShellJob:
+    async def result(self, wait: float | None = None, **rejected) -> ShellJob:
         """Wait for the job to finish and return its finished snapshot.
 
-        Blocks inside the cell for up to `timeout` seconds (default and cap:
-        RUN_BLOCK_MAX_SECONDS, 300). A job still running afterwards comes back with
-        running=True and its output so far; call result() again later. Repeatable and
-        non-consuming: on a finished job it returns the same result every time.
+        Blocks inside the cell for up to `wait` seconds (default and cap: 300). A job
+        still running afterwards comes back with running=True and its output so far;
+        call result() again later. Repeatable and non-consuming: on a finished job it
+        returns the same result every time.
         """
+        _reject_kwargs("result", rejected)
         return ShellJob(
             **await broker.agent_request(
-                "shell.result", job_id=self.id, timeout=_timeout(timeout)
+                "shell.result", job_id=self.id, wait=_wait(wait)
             )
         )
 
@@ -166,47 +167,72 @@ async def getenv() -> dict[str, str]:
     return await broker.agent_request("shell.getenv", variables=None)
 
 
+def _wait(wait: float | None) -> float | None:
+    if wait is None:
+        return None
+    if isinstance(wait, bool) or not isinstance(wait, (int, float)):
+        raise TypeError("wait must be a number of seconds or None")
+    if wait < 0:
+        raise ValueError("wait must be a non-negative number of seconds")
+    return float(wait)
+
+
 def _timeout(timeout: float | None) -> float | None:
     if timeout is None:
         return None
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise TypeError("timeout must be a number of seconds or None")
-    if timeout < 0:
-        raise ValueError("timeout must be a non-negative number of seconds")
+    if timeout <= 0:
+        raise ValueError("timeout must be positive seconds")
     return float(timeout)
+
+
+def _reject_kwargs(name: str, rejected: dict) -> None:
+    """Name the replacement for an argument this API used to have: an unknown kwarg
+    costs the agent a cell, a bare TypeError costs it another."""
+    if not rejected:
+        return
+    hints = {"background": "use wait=0 to return at once"}
+    key = next(iter(rejected))
+    raise TypeError(
+        f"{name}() got an unexpected keyword argument {key!r}: "
+        + hints.get(key, "see help(rlm.shell.run)")
+    )
 
 
 async def run(
     command: str | list[str],
     *,
     cwd: str | None = None,
-    timeout: float | None = None,
     env: dict[str, str] | None = None,
-    background: bool = False,
+    wait: float | None = None,
+    timeout: float | None = None,
+    **rejected,
 ) -> ShellJob:
     """Run Bash under the supervisor and return a ShellJob.
 
-    Without background=True this waits up to RUN_DETACH_SECONDS (15) for the command
-    to finish; a finished job has running=False, exit_code, ok, text (combined output,
-    up to 16 KiB: first and last 8 KiB around a marker naming the omitted bytes),
-    truncated, error and timed_out. A command still going after the wait comes back with
-    running=True, exit_code None and the output so far, and keeps running as a
-    background job. background=True returns at once, always with running=True.
-    Either way `await job.result()` waits (up to 300 s per call) for the finished result.
-    timeout (seconds) kills the whole process group when exceeded (timed_out=True,
-    exit_code None); it does not change how long run() waits. Cancelling the cell stops
-    waiting, not the job; list() can recover its ID. A job that came back with
-    running=True posts a quiet shell.completed inbox event when it ends (it wakes the
-    native wait tool but is not counted in the unread notice); finished results post nothing.
+    wait is how long to wait for the command, in seconds: default 10, 0 returns at once,
+    values above 300 are capped at 300. A command that finished has running=False,
+    exit_code, ok, text (combined output, up to 16 KiB: first and last 8 KiB around a
+    marker naming the omitted bytes), truncated, error and timed_out. A command still
+    going when the wait ends comes back with running=True, exit_code None and the output
+    so far, and keeps running; `await job.result()` waits (up to 300 s per call) for the
+    finished result. timeout, if given, kills the process group after that many seconds
+    (timed_out=True, exit_code None); `await job.cancel()` stops a job at any time.
+    Cancelling the cell stops waiting, not the job; list() can recover its ID. A job
+    handed back running posts a quiet shell.completed inbox event when it ends (it wakes
+    the native wait tool but is not counted in the unread notice); finished results post
+    nothing.
     """
+    _reject_kwargs("run", rejected)
     return ShellJob(
         **await broker.agent_request(
             "shell.run",
             command=_command(command),
             cwd=cwd,
+            wait=_wait(wait),
             timeout=_timeout(timeout),
             env=_env(env),
-            background=bool(background),
         )
     )
 
@@ -215,7 +241,7 @@ async def get(job_id: str) -> ShellJob:
     """Recover a job owned by this agent as a ShellJob snapshot (finished jobs carry
     their result; running ones have running=True). Works after kernel restarts."""
     return ShellJob(
-        **await broker.agent_request("shell.result", job_id=job_id, timeout=0.0)
+        **await broker.agent_request("shell.result", job_id=job_id, wait=0.0)
     )
 
 

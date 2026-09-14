@@ -50,6 +50,8 @@ from rlm.types import ProgrammaticToolCallStats, RLMResult
 # When a blocking run() detaches (see RUN_DETACH_SECONDS) the supervisor explains the
 # unusual result once per occurrence, at most MAX_LONG_RUN_NOTES times per agent.
 MAX_LONG_RUN_NOTES = 3
+# A native wait while holding a running job earns a pointer at result(), at most this often.
+MAX_WAIT_HELD_JOB_HINTS = 2
 # shell.completed events carry this much of the end of the output.
 COMPLETED_TAIL_BYTES = 4 * 1024
 # A `VAR=value cmd` prefix repeated this many times on one variable earns a hint that
@@ -129,6 +131,7 @@ class _Invocation:
     inbox_error: str | None = None
     announced: int = 0  # events seen by the last notice/wait (all types; wakes wait)
     announced_loud: int = 0  # events that count toward the unread notice
+    wait_hints: int = 0  # wait-held-job hints spent
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -609,6 +612,32 @@ class SessionTreeSupervisor:
                     "later run()/start(), and `env={...}` to one call.",
                 )
 
+    def _note_wait_with_held_jobs(self, agent: _Invocation) -> None:
+        """A native wait while the agent holds a running job it was handed back is a
+        detour (wait -> inbox -> get -> result, 1.1 per episode): point at result()."""
+        if (
+            agent.wait_hints >= MAX_WAIT_HELD_JOB_HINTS
+            or "wait-held-job" in agent.muted_hints
+        ):
+            return
+        held = [
+            job
+            for job in self._shell_jobs.jobs.values()
+            if job.info.owner_id == agent.id and job.finished is None and job.notify
+        ]
+        if not held:
+            return
+        agent.wait_hints += 1
+        job = held[0]
+        self._hint(
+            agent,
+            "wait-held-job",
+            f"You called wait while holding running job {job.info.id}: "
+            f"`res = {self._collect_expr(job)}` waits for it directly (up to 300 s per "
+            "call) and returns its output. Native wait is for events from agents or "
+            "watches, not for jobs you hold.",
+        )
+
     def hint(self, invocation_id: str, tag: str, text: str) -> None:
         """Queue a tagged hint for an agent from outside the supervisor (engine-side observations)."""
         agent = self._invocations.get(invocation_id)
@@ -655,6 +684,7 @@ class SessionTreeSupervisor:
 
     async def wait_for_events(self, invocation_id: str, timeout: float) -> str:
         agent = self._invocations[invocation_id]
+        self._note_wait_with_held_jobs(agent)
 
         def ready():
             return len(agent.inbox) > agent.announced or bool(agent.instructions)
@@ -767,6 +797,13 @@ class SessionTreeSupervisor:
         )
 
     @staticmethod
+    def _collect_expr(job: JobRecord) -> str:
+        """The exact expression that collects a job by id. Markers and hints quote it
+        verbatim: GLM copies the variable name it is shown, and `job` was wrong in 27 %
+        of episodes (NameError) when the caller had bound the snapshot to `r`."""
+        return f'await (await rlm.shell.get("{job.info.id}")).result()'
+
+    @staticmethod
     def _raise_unless_finished(job: JobRecord) -> None:
         """A metadata/publication failure after the process itself finished must not
         turn a captured result into a broker error (cancel() has the same guard)."""
@@ -785,17 +822,19 @@ class SessionTreeSupervisor:
             "running": False,
         }
 
-    def _running_payload(self, job: JobRecord, marker: str) -> dict:
-        partial = (
+    def _running_payload(
+        self, job: JobRecord, marker: str, *, partial: bool = True
+    ) -> dict:
+        output = (
             self._shell_jobs.read(job, 0, RUN_TEXT_BYTES)
-            if marker
+            if marker and partial
             else {"text": "", "truncated": False}
         )
         return {
             "id": job.info.id,
-            "text": marker + partial["text"],
+            "text": marker + output["text"],
             "exit_code": None,
-            "truncated": bool(marker),
+            "truncated": bool(marker and partial),
             "error": None,
             "timed_out": False,
             "running": True,
@@ -827,7 +866,12 @@ class SessionTreeSupervisor:
                 raise PermissionError(refusal(blocked))
             self._note_env_prefixes(parent, command)
             cwd = Path(parent.cwd) / (request["cwd"] or ".")
-            background = bool(request.get("background"))
+            wait = request.get("wait")
+            block = (
+                RUN_DETACH_SECONDS
+                if wait is None
+                else min(float(wait), RUN_BLOCK_MAX_SECONDS)
+            )
             info = self._shell_jobs.start(
                 owner_id=parent.id,
                 command=command,
@@ -839,49 +883,59 @@ class SessionTreeSupervisor:
                     **(request.get("env") or {}),
                 },
                 source_request_id=self._scopes[request["scope_id"]].request_id,
+                # wait= bounds how long run() blocks; timeout= is the kill deadline.
                 timeout=request.get("timeout"),
                 # A result handed back synchronously needs no inbox event on top; a job
                 # handed back while still running posts shell.completed when it ends.
-                notify=background,
+                notify=block == 0,
             )
             job = self._shell_jobs.get(parent.id, info["id"])
-            if background:
-                return self._running_payload(job, "")
-            # Wait a bounded time, then hand the job back running rather than blocking
-            # further or killing it: timeout= is the kill deadline, not the wait.
+            if block == 0:
+                return self._running_payload(
+                    job,
+                    f"[started: job {job.info.id}; `res = {self._collect_expr(job)}` "
+                    "(or .result() on this object) returns the output when it finishes]\n",
+                    partial=False,
+                )
+            # Wait the caller's bound, then hand the job back running rather than
+            # blocking further or killing it.
             try:
-                await asyncio.wait_for(asyncio.shield(job.task), RUN_DETACH_SECONDS)
+                await asyncio.wait_for(asyncio.shield(job.task), block)
             except asyncio.TimeoutError:
                 job.notify = True
                 if (
-                    parent.long_run_notes < MAX_LONG_RUN_NOTES
+                    wait is None
+                    and parent.long_run_notes < MAX_LONG_RUN_NOTES
                     and "run-detach" not in parent.muted_hints
                 ):
                     parent.long_run_notes += 1  # muted detaches do not spend the budget
                     self._hint(
                         parent,
                         "run-detach",
-                        f"rlm.shell.run() returned after {RUN_DETACH_SECONDS:g} s with the "
-                        "command still running (job.running is True). Collect it when you "
-                        "need it with `res = await job.result()`, and pass background=True "
-                        "to skip the wait for commands you expect to take long.",
+                        f"rlm.shell.run() returned after the default {RUN_DETACH_SECONDS:g} s "
+                        "wait with the command still running (.running is True on the "
+                        f"object it returned). Collect it with `res = {self._collect_expr(job)}` "
+                        "(or .result() on that object; it waits up to 300 s per call, so no "
+                        "native wait is needed). Pass wait=300 to wait longer up front, or "
+                        "wait=0 to return at once for commands you expect to take long.",
                     )
                 return self._running_payload(
                     job,
-                    f"[still running after {RUN_DETACH_SECONDS:g} s: job {job.info.id} "
-                    "continues in the background; `await job.result()` waits for it "
-                    "(up to 300 s per call), `await job.cancel()` stops it]\n",
+                    f"[still running after {block:g} s: job {job.info.id} "
+                    f"continues in the background; `res = {self._collect_expr(job)}` "
+                    "waits for it (up to 300 s per call; .result() on this object does the "
+                    "same); .cancel() on it stops it]\n",
                 )
             except Exception:
                 self._raise_unless_finished(job)
             return self._finished_payload(job)
         if op == "shell.result":
             job = self._shell_jobs.get(parent.id, request["job_id"])
-            timeout = request.get("timeout")
+            wait = request.get("wait")
             block = (
                 RUN_BLOCK_MAX_SECONDS
-                if timeout is None
-                else min(float(timeout), RUN_BLOCK_MAX_SECONDS)
+                if wait is None
+                else min(float(wait), RUN_BLOCK_MAX_SECONDS)
             )
             if not job.task.done():
                 try:
@@ -890,8 +944,8 @@ class SessionTreeSupervisor:
                     job.notify = True
                     marker = (
                         f"[still running after waiting {block:g} s: job {job.info.id} "
-                        "continues in the background; `await job.result()` waits again, "
-                        "`await job.cancel()` stops it]\n"
+                        f"continues in the background; `{self._collect_expr(job)}` waits "
+                        "again; .cancel() on it stops it]\n"
                         if block
                         else ""
                     )
