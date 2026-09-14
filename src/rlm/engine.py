@@ -218,6 +218,8 @@ class RLMEngine:
 
         # IPython REPL (started lazily in single-agent execution)
         self._repl: IPythonREPL | None = None
+        self._pending_kernel_notices: list[str] = []
+        self._prompt_kernel_notices: list[str] = []
 
         # Turn index (0-based) at the start of the current branch. Used to
         # report "turns since last compaction" when a compaction fires.
@@ -277,6 +279,7 @@ class RLMEngine:
             )
 
         self._has_result = False
+        self._prompt_kernel_notices = []
 
         if not self._started:
             try:
@@ -314,6 +317,7 @@ class RLMEngine:
             self._last_good = len(self.session.messages)
             result = await self._run_loop()
         except BaseException as exc:
+            self._pending_kernel_notices.extend(self._prompt_kernel_notices)
             attempted_turns = self._turn - turn_before
             try:
                 try:
@@ -461,6 +465,21 @@ class RLMEngine:
                 self._owns_supervisor = False
             raise
 
+    def _deliver_kernel_notices(self) -> None:
+        if self._repl is None:
+            return
+        notices = self._pending_kernel_notices + self._repl.take_recovery_notices()
+        self._pending_kernel_notices = []
+        for notice in notices:
+            self.session.log(
+                {
+                    "type": "kernel_recovery",
+                    "message": {"role": "user", "content": notice},
+                },
+                in_context=True,
+            )
+            self._prompt_kernel_notices.append(notice)
+
     def _deliver_supervisor_input(
         self, *, include_queue: bool = False, notify: bool = True
     ) -> bool:
@@ -518,6 +537,7 @@ class RLMEngine:
                     )
                 )
                 break
+            self._deliver_kernel_notices()
             self._deliver_supervisor_input()
             messages = self.session.messages
             self._turn = turn + 1
@@ -695,6 +715,7 @@ class RLMEngine:
                 call_id=tc.id,
                 context_content=content,
             )
+            self._deliver_kernel_notices()
             messages = self.session.messages
 
             if tool_name == "wait":
@@ -981,6 +1002,11 @@ class RLMEngine:
         checkpoint_prompt = CHECKPOINT_PROMPT
         if self._repl is not None:
             checkpoint_prompt += REPL_NOTE
+        if self._prompt_kernel_notices:
+            checkpoint_prompt += (
+                "\n\nPreserve this latest kernel recovery warning in the continuation summary:\n"
+                + self._prompt_kernel_notices[-1]
+            )
         compaction = self._semantic_edges.begin_compaction(self._invocation_id)
         try:
             # A rejected checkpoint falls back to the last good snapshot (which has a

@@ -20,11 +20,12 @@ Be concise and concrete: prefer runnable commands over descriptions.
 Reply with the summary as plain text. Do not call any tools - summarize from the conversation as it stands."""
 
 REPL_NOTE = (
-    "\n\n"
-    "Note: the IPython kernel stays running across this compaction. "
-    "All variables, imports, and in-memory data are preserved. "
-    "Mention important variable names and what they contain so the "
-    "next LLM knows what's available."
+    "\n\nCompaction itself preserves the IPython kernel and supervisor-owned resources. "
+    "Record useful Python variable names and what they contain, but account for any recovery "
+    "notice: variables lost in a restart must not be described as still available. "
+    "Conversation history remains queryable. Preserve resource names/IDs so handles can be "
+    "recovered through the registries. After compaction, refresh resource metadata and inbox "
+    "state before deciding whether to repeat work or wait."
 )
 
 SUMMARY_FRAMING = """Another language model started to solve this problem and produced \
