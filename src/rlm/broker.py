@@ -122,7 +122,7 @@ class BrokerShellRunRequest(TypedDict):
     scope_id: Annotated[str, Field(min_length=1)]
     command: Annotated[str, Field(min_length=1, max_length=65_536)]
     cwd: str | None
-    wait: Annotated[float, Field(ge=0)] | None
+    yield_after: Annotated[float, Field(ge=0)] | None
     timeout: Annotated[float, Field(gt=0)] | None
     env: dict[str, str] | None
 
@@ -133,7 +133,7 @@ class BrokerShellResultRequest(TypedDict):
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
     job_id: Annotated[str, Field(min_length=1)]
-    wait: Annotated[float, Field(ge=0)] | None
+    yield_after: Annotated[float, Field(ge=0)] | None
 
 
 class BrokerShellEnvRequest(TypedDict):

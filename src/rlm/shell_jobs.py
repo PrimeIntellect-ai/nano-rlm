@@ -23,11 +23,11 @@ MAX_JOBS = 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DRAIN_SECONDS = 2.0
 RUN_TEXT_BYTES = 16 * 1024  # run() returns at most this much: head + tail of the output
-# A run() without wait= that has not finished after this many seconds returns
+# A run() without yield_after= that has not finished after this many seconds returns
 # with running=True and the partial output; the job carries on (it is a supervisor job
 # already) and posts shell.completed when it ends. Nothing is killed unless timeout= was given.
 RUN_DETACH_SECONDS = 10.0
-# job.result(wait=) blocks inside the cell for at most this long per call.
+# job.result(yield_after=) blocks inside the cell for at most this long per call.
 RUN_BLOCK_MAX_SECONDS = 300.0
 
 

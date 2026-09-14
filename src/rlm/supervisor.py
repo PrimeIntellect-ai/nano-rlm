@@ -866,11 +866,11 @@ class SessionTreeSupervisor:
                 raise PermissionError(refusal(blocked))
             self._note_env_prefixes(parent, command)
             cwd = Path(parent.cwd) / (request["cwd"] or ".")
-            wait = request.get("wait")
+            yield_after = request.get("yield_after")
             block = (
                 RUN_DETACH_SECONDS
-                if wait is None
-                else min(float(wait), RUN_BLOCK_MAX_SECONDS)
+                if yield_after is None
+                else min(float(yield_after), RUN_BLOCK_MAX_SECONDS)
             )
             info = self._shell_jobs.start(
                 owner_id=parent.id,
@@ -883,7 +883,7 @@ class SessionTreeSupervisor:
                     **(request.get("env") or {}),
                 },
                 source_request_id=self._scopes[request["scope_id"]].request_id,
-                # wait= bounds how long run() blocks; timeout= is the kill deadline.
+                # yield_after= bounds how long run() blocks; timeout= is the kill deadline.
                 timeout=request.get("timeout"),
                 # A result handed back synchronously needs no inbox event on top; a job
                 # handed back while still running posts shell.completed when it ends.
@@ -904,7 +904,7 @@ class SessionTreeSupervisor:
             except asyncio.TimeoutError:
                 job.notify = True
                 if (
-                    wait is None
+                    yield_after is None
                     and parent.long_run_notes < MAX_LONG_RUN_NOTES
                     and "run-detach" not in parent.muted_hints
                 ):
@@ -916,26 +916,25 @@ class SessionTreeSupervisor:
                         "wait with the command still running (.running is True on the "
                         f"object it returned). Collect it with `res = {self._collect_expr(job)}` "
                         "(or .result() on that object; it waits up to 300 s per call, so no "
-                        "native wait is needed). Pass wait=300 to wait longer up front, or "
-                        "wait=0 to return at once for commands you expect to take long.",
+                        "native wait is needed). Pass yield_after=300 to wait longer up front, "
+                        "or yield_after=0 to return at once for commands you expect to take long.",
                     )
                 return self._running_payload(
                     job,
-                    f"[still running after {block:g} s: job {job.info.id} "
-                    f"continues in the background; `res = {self._collect_expr(job)}` "
-                    "waits for it (up to 300 s per call; .result() on this object does the "
-                    "same); .cancel() on it stops it]\n",
+                    f"[yielded after {block:g} s: job {job.info.id} is still running; "
+                    f"`res = {self._collect_expr(job)}` waits for it (up to 300 s per call; "
+                    ".result() on this object does the same); .cancel() on it stops it]\n",
                 )
             except Exception:
                 self._raise_unless_finished(job)
             return self._finished_payload(job)
         if op == "shell.result":
             job = self._shell_jobs.get(parent.id, request["job_id"])
-            wait = request.get("wait")
+            yield_after = request.get("yield_after")
             block = (
                 RUN_BLOCK_MAX_SECONDS
-                if wait is None
-                else min(float(wait), RUN_BLOCK_MAX_SECONDS)
+                if yield_after is None
+                else min(float(yield_after), RUN_BLOCK_MAX_SECONDS)
             )
             if not job.task.done():
                 try:
@@ -943,9 +942,8 @@ class SessionTreeSupervisor:
                 except asyncio.TimeoutError:
                     job.notify = True
                     marker = (
-                        f"[still running after waiting {block:g} s: job {job.info.id} "
-                        f"continues in the background; `{self._collect_expr(job)}` waits "
-                        "again; .cancel() on it stops it]\n"
+                        f"[yielded after {block:g} s: job {job.info.id} is still running; "
+                        f"`{self._collect_expr(job)}` waits again; .cancel() on it stops it]\n"
                         if block
                         else ""
                     )
