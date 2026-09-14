@@ -127,7 +127,8 @@ class _Invocation:
     inbox: list[dict] = field(default_factory=list)
     instructions: list[dict] = field(default_factory=list)
     inbox_error: str | None = None
-    announced: int = 0
+    announced: int = 0  # events seen by the last notice/wait (all types; wakes wait)
+    announced_loud: int = 0  # events that count toward the unread notice
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -625,9 +626,15 @@ class SessionTreeSupervisor:
 
     def inbox_notification(self, invocation_id: str) -> str | None:
         agent = self._invocations[invocation_id]
-        new_events = len(agent.inbox) > agent.announced
+        # shell.completed is quiet: the agent holds the job and collects it with
+        # job.result(); announcing it only pulled agents into the inbox for nothing
+        # (142 of 149 inbox cells in the first release-gate episodes followed a notice).
+        # It still wakes a native wait through len(inbox) > announced.
+        loud = [event for event in agent.inbox if event["type"] != "shell.completed"]
+        new_events = len(loud) > agent.announced_loud
+        agent.announced_loud = len(loud)
         agent.announced = len(agent.inbox)
-        count = sum(not event["read"] for event in agent.inbox)
+        count = sum(not event["read"] for event in loud)
         notices = []
         if agent.notes:
             notices.extend(
@@ -809,7 +816,7 @@ class SessionTreeSupervisor:
             return dict(parent.shell_env)
         if op == "shell.getenv":
             return dict(parent.shell_env)
-        if op in ("shell.run", "shell.start"):
+        if op == "shell.run":
             command = request["command"]
             if not command.strip():
                 raise ValueError("empty command")
@@ -820,7 +827,7 @@ class SessionTreeSupervisor:
                 raise PermissionError(refusal(blocked))
             self._note_env_prefixes(parent, command)
             cwd = Path(parent.cwd) / (request["cwd"] or ".")
-            background = op == "shell.start" or bool(request.get("background"))
+            background = bool(request.get("background"))
             info = self._shell_jobs.start(
                 owner_id=parent.id,
                 command=command,
@@ -891,6 +898,14 @@ class SessionTreeSupervisor:
                     return self._running_payload(job, marker)
                 except Exception:
                     self._raise_unless_finished(job)
+            # Collected through the handle: its completion event needs no separate read.
+            for event in parent.inbox:
+                if (
+                    event["type"] == "shell.completed"
+                    and not event["read"]
+                    and event["content"].get("job_id") == job.info.id
+                ):
+                    event["read"] = True
             return self._finished_payload(job)
         if op == "shell.list":
             return [

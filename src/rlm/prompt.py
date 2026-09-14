@@ -182,12 +182,13 @@ result() stops waiting but leaves the job running. Jobs survive kernel restarts:
 `await rlm.shell.list()` returns JobInfo snapshots (.id, .command, .status, .exit_code,
 .timeout, .error; status is starting, running, completed, failed, cancelled, or timed_out;
 nonzero exit codes are completed processes, failed means startup/capture failure), and
-`await rlm.shell.get(job_id)` or `item.handle()` recovers the ShellJob for a lost variable.
+`await rlm.shell.get(job_id)` recovers the ShellJob for a lost variable.
 `await job.cancel()` stops the process group. Owner termination cancels its jobs. Keep Bash
 alive until its work finishes; detached processes are outside this guarantee. Before your
 final answer, `await rlm.shell.list()` must show no running job whose result you still need.
 Only a job handed back with .running True posts a shell.completed inbox event when it ends;
-finished results post nothing. IPython `!`/`%%bash` and any enabled blocking bash
+finished results post nothing. Those events are quiet: they wake native `wait` but are not
+counted in the unread notice, because `await job.result()` already collects the job. IPython `!`/`%%bash` and any enabled blocking bash
 skill/tool are not supervisor-owned jobs.
 
 Agent cleanup errors are reported separately in AgentInfo.cleanup_error; completed answers remain readable. Use cancel() to retry unfinished cleanup.
@@ -209,10 +210,10 @@ with timeout at most 300 seconds. It suspends inference without holding a cell o
 New arrivals wake it; already-announced unread events do not. Inspect existing unread
 events before waiting for more. Avoid polling/sleep loops in Python to wait for agents/jobs.
 
-A job that was handed back running posts `shell.completed` when it ends, with content
-job_id, status, exit_code and text (the last 4 KiB of output). Normally you keep the job
-variable and call `await job.result()` when you need the outcome; the inbox route is for
-when you have called native `wait` with nothing else to do:
+A job that was handed back running posts a quiet `shell.completed` when it ends, with content
+job_id, status, exit_code and text (the last 4 KiB of output); `await job.result()` marks it
+read. Keep the job variable and call `result()` when you need the outcome; the inbox route is
+only for a job whose variable you lost after native `wait`:
 ```python
 for item in await rlm.inbox.list():
     if item["type"] == "shell.completed":
