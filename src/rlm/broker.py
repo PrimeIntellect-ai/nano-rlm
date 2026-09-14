@@ -8,7 +8,7 @@ import json
 import keyword
 import struct
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal
+from typing import NotRequired, Annotated, Any, Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 from typing_extensions import TypedDict
@@ -124,6 +124,16 @@ class BrokerShellRunRequest(TypedDict):
     cwd: str | None
     timeout: Annotated[float, Field(gt=0)] | None
     env: dict[str, str] | None
+    background: NotRequired[bool]
+
+
+class BrokerShellResultRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["shell.result"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    job_id: Annotated[str, Field(min_length=1)]
+    timeout: Annotated[float, Field(ge=0)] | None
 
 
 class BrokerShellEnvRequest(TypedDict):
@@ -228,6 +238,7 @@ BrokerRequest = Annotated[
     | BrokerInboxListRequest
     | BrokerInboxReadRequest
     | BrokerShellRunRequest
+    | BrokerShellResultRequest
     | BrokerShellListRequest
     | BrokerShellHandleRequest
     | BrokerShellEnvRequest

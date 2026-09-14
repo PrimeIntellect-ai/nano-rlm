@@ -23,26 +23,23 @@ MAX_JOBS = 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DRAIN_SECONDS = 2.0
 RUN_TEXT_BYTES = 16 * 1024  # run() returns at most this much: head + tail of the output
-# A blocking run() that has not finished after this many seconds returns early with
-# running=True and the partial output; the job carries on as a background job (it is one
+# A run() without background=True that has not finished after this many seconds returns
+# with running=True and the partial output; the job carries on (it is a supervisor job
 # already) and posts shell.completed when it ends. Nothing is killed unless timeout= was given.
-RUN_DETACH_SECONDS = 60.0
-# An explicit timeout= on run() is the caller saying how long it is willing to wait, so the
-# blocking bound becomes min(timeout, RUN_BLOCK_MAX_SECONDS) instead of RUN_DETACH_SECONDS.
+RUN_DETACH_SECONDS = 15.0
+# job.result(timeout=) blocks inside the cell for at most this long per call.
 RUN_BLOCK_MAX_SECONDS = 300.0
 
 
 @dataclass
-class ShellJob:
+class JobRecord:
     info: JobInfo
     source_request_id: str | None
     started: float = field(default_factory=time.monotonic)
     finished: float | None = None
     cancel_requested: bool = False
     timed_out: bool = False  # set by the loop when the deadline fires; JobInfo.timed_out derives from status
-    notify: bool = (
-        True  # publish shell.completed to the owner's inbox (start(); not run())
-    )
+    notify: bool = True  # publish shell.completed to the owner's inbox (jobs handed back with running=True)
     task: asyncio.Task | None = None
 
     def snapshot(self) -> dict:
@@ -58,10 +55,10 @@ class ShellJob:
 class ShellJobs:
     def __init__(
         self,
-        publish: Callable[[ShellJob], None],
-        output: Callable[[ShellJob, int], None] | None = None,
+        publish: Callable[[JobRecord], None],
+        output: Callable[[JobRecord, int], None] | None = None,
     ):
-        self.jobs: dict[str, ShellJob] = {}
+        self.jobs: dict[str, JobRecord] = {}
         self.publish = publish
         self.output = output
 
@@ -86,7 +83,7 @@ class ShellJobs:
         directory.mkdir(parents=True)
         output = directory / "output.bin"
         output.touch(exist_ok=False)
-        job = ShellJob(
+        job = JobRecord(
             JobInfo(
                 id=job_id,
                 owner_id=owner_id,
@@ -119,13 +116,13 @@ class ShellJobs:
                 exc_info=(type(error), error, error.__traceback__),
             )
 
-    def get(self, owner_id: str, job_id: str) -> ShellJob:
+    def get(self, owner_id: str, job_id: str) -> JobRecord:
         job = self.jobs.get(job_id)
         if job is None or job.info.owner_id != owner_id:
             raise PermissionError("unknown job or job is not owned by this agent")
         return job
 
-    def read(self, job: ShellJob, cursor: int, max_bytes: int) -> dict:
+    def read(self, job: JobRecord, cursor: int, max_bytes: int) -> dict:
         if cursor < 0:
             raise ValueError("cursor must be >= 0")
         # A cursor past the retained output is not an error: it returns an empty
@@ -142,7 +139,7 @@ class ShellJobs:
             "truncated": job.info.output_truncated,
         }
 
-    def run_text(self, job: ShellJob) -> dict:
+    def run_text(self, job: JobRecord) -> dict:
         """Text for a finished run(): the whole output when it fits RUN_TEXT_BYTES,
         otherwise its first and last halves around an explicit gap marker (test
         runners put the failure at the top and the summary at the bottom)."""
@@ -159,11 +156,11 @@ class ShellJobs:
         omitted = total - 2 * half
         marker = (
             f"\n[... {omitted} bytes omitted; output is retained up to 16 MiB: "
-            f"job = await rlm.shell.get(result.job_id); await job.read(cursor={half}) ...]\n"
+            f"await job.read(cursor={half}, max_bytes=65536) on this job ...]\n"
         )
         return {"text": head + marker + tail, "truncated": True}
 
-    async def cancel(self, job: ShellJob) -> dict:
+    async def cancel(self, job: JobRecord) -> dict:
         job.cancel_requested = True
         try:
             await asyncio.shield(job.task)
@@ -195,7 +192,7 @@ class ShellJobs:
         except ProcessLookupError:
             pass
 
-    async def _run(self, job: ShellJob, env: dict[str, str]) -> None:
+    async def _run(self, job: JobRecord, env: dict[str, str]) -> None:
         process = None
         try:
             if job.cancel_requested:

@@ -37,7 +37,7 @@ from rlm.shell_jobs import (
     RUN_BLOCK_MAX_SECONDS,
     RUN_DETACH_SECONDS,
     RUN_TEXT_BYTES,
-    ShellJob,
+    JobRecord,
     ShellJobs,
 )
 from rlm.subscriptions import Subscription, Subscriptions
@@ -50,6 +50,8 @@ from rlm.types import ProgrammaticToolCallStats, RLMResult
 # When a blocking run() detaches (see RUN_DETACH_SECONDS) the supervisor explains the
 # unusual result once per occurrence, at most MAX_LONG_RUN_NOTES times per agent.
 MAX_LONG_RUN_NOTES = 3
+# shell.completed events carry this much of the end of the output.
+COMPLETED_TAIL_BYTES = 4 * 1024
 # A `VAR=value cmd` prefix repeated this many times on one variable earns a hint that
 # rlm.shell.setenv() applies it to every later command (once per variable, tag env-prefix).
 ENV_PREFIX_HINT_AFTER = 3
@@ -688,7 +690,7 @@ class SessionTreeSupervisor:
             "agent", agent_id, start, self._invocations[agent_id].session.message_count
         )
 
-    def _publish_job_output(self, job: ShellJob, start: int) -> None:
+    def _publish_job_output(self, job: JobRecord, start: int) -> None:
         self._subscriptions.activity("job", job.info.id, start, job.info.output_bytes)
 
     async def _watch_operation(self, parent: _Invocation, request: dict) -> Any:
@@ -728,7 +730,7 @@ class SessionTreeSupervisor:
                 return await self._subscriptions.cancel(sub)
         return asdict(sub.info)
 
-    def _publish_job(self, job: ShellJob) -> None:
+    def _publish_job(self, job: JobRecord) -> None:
         self._subscriptions.finish("job", job.info.id)
         owner = self._invocations[job.info.owner_id]
         if self._closed or owner.capability not in self._capabilities or not job.notify:
@@ -745,10 +747,52 @@ class SessionTreeSupervisor:
                     "output_complete": job.info.output_complete,
                     "output_truncated": job.info.output_truncated,
                     "error": job.info.error,
+                    # The last lines of output ride along so a completion can be judged
+                    # from the event alone; `await job.result()` gives the full text.
+                    "text": self._shell_jobs.read(
+                        job,
+                        max(0, job.info.output_bytes - COMPLETED_TAIL_BYTES),
+                        COMPLETED_TAIL_BYTES,
+                    )["text"],
                 },
                 job.source_request_id,
             ),
         )
+
+    @staticmethod
+    def _raise_unless_finished(job: JobRecord) -> None:
+        """A metadata/publication failure after the process itself finished must not
+        turn a captured result into a broker error (cancel() has the same guard)."""
+        if job.info.status not in ("completed", "failed", "timed_out", "cancelled"):
+            raise
+
+    def _finished_payload(self, job: JobRecord) -> dict:
+        output = self._shell_jobs.run_text(job)
+        return {
+            "id": job.info.id,
+            "text": output["text"],
+            "exit_code": job.info.exit_code,
+            "truncated": output["truncated"],
+            "error": job.info.error,
+            "timed_out": job.info.status == "timed_out",
+            "running": False,
+        }
+
+    def _running_payload(self, job: JobRecord, marker: str) -> dict:
+        partial = (
+            self._shell_jobs.read(job, 0, RUN_TEXT_BYTES)
+            if marker
+            else {"text": "", "truncated": False}
+        )
+        return {
+            "id": job.info.id,
+            "text": marker + partial["text"],
+            "exit_code": None,
+            "truncated": bool(marker),
+            "error": None,
+            "timed_out": False,
+            "running": True,
+        }
 
     async def _shell_operation(self, parent: _Invocation, request: dict) -> Any:
         op = request["op"]
@@ -776,6 +820,7 @@ class SessionTreeSupervisor:
                 raise PermissionError(refusal(blocked))
             self._note_env_prefixes(parent, command)
             cwd = Path(parent.cwd) / (request["cwd"] or ".")
+            background = op == "shell.start" or bool(request.get("background"))
             info = self._shell_jobs.start(
                 owner_id=parent.id,
                 command=command,
@@ -788,38 +833,19 @@ class SessionTreeSupervisor:
                 },
                 source_request_id=self._scopes[request["scope_id"]].request_id,
                 timeout=request.get("timeout"),
-                # run() hands its result back synchronously; an inbox event on top only
-                # makes the agent drain notifications it has already consumed.
-                notify=op == "shell.start",
+                # A result handed back synchronously needs no inbox event on top; a job
+                # handed back while still running posts shell.completed when it ends.
+                notify=background,
             )
-            if op == "shell.start":
-                return info
             job = self._shell_jobs.get(parent.id, info["id"])
-            # An explicit timeout= longer than the detach threshold is the caller's own
-            # bound on how long to block (capped); without one the default applies.
-            timeout = request.get("timeout")
-            block = RUN_DETACH_SECONDS
-            if timeout is not None and timeout > RUN_DETACH_SECONDS:
-                # Wait one second past the kill deadline so a timed-out job comes back as
-                # timed_out rather than as a detach racing the kill; above the cap, detach.
-                block = (
-                    float(timeout) + 1.0
-                    if timeout <= RUN_BLOCK_MAX_SECONDS
-                    else RUN_BLOCK_MAX_SECONDS
-                )
+            if background:
+                return self._running_payload(job, "")
+            # Wait a bounded time, then hand the job back running rather than blocking
+            # further or killing it: timeout= is the kill deadline, not the wait.
             try:
-                await asyncio.wait_for(asyncio.shield(job.task), block)
+                await asyncio.wait_for(asyncio.shield(job.task), RUN_DETACH_SECONDS)
             except asyncio.TimeoutError:
-                # Detach instead of blocking or killing: the job is already a supervisor
-                # job, so it simply continues as if start() had been called, and its
-                # completion now posts a shell.completed event like any background job.
                 job.notify = True
-                partial = self._shell_jobs.read(job, 0, RUN_TEXT_BYTES)
-                marker = (
-                    f"[still running after {block:g} s: job {job.info.id} continues "
-                    "in the background; its completion arrives as a shell.completed inbox "
-                    "event; rlm.shell.get(result.job_id) reads more output or cancels it]\n"
-                )
                 if (
                     parent.long_run_notes < MAX_LONG_RUN_NOTES
                     and "run-detach" not in parent.muted_hints
@@ -828,40 +854,44 @@ class SessionTreeSupervisor:
                     self._hint(
                         parent,
                         "run-detach",
-                        f"rlm.shell.run() detached after {block:g} s: the command is "
-                        "still running as a background job. Commands that long belong in "
-                        "rlm.shell.start(); keep working and collect the result from the "
-                        "shell.completed inbox event.",
+                        f"rlm.shell.run() returned after {RUN_DETACH_SECONDS:g} s with the "
+                        "command still running (job.running is True). Collect it when you "
+                        "need it with `res = await job.result()`, and pass background=True "
+                        "to skip the wait for commands you expect to take long.",
                     )
-                return {
-                    "text": marker + partial["text"],
-                    "exit_code": None,
-                    "job_id": job.info.id,
-                    "truncated": True,
-                    "error": None,
-                    "timed_out": False,
-                    "running": True,
-                }
+                return self._running_payload(
+                    job,
+                    f"[still running after {RUN_DETACH_SECONDS:g} s: job {job.info.id} "
+                    "continues in the background; `await job.result()` waits for it "
+                    "(up to 300 s per call), `await job.cancel()` stops it]\n",
+                )
             except Exception:
-                # A metadata/publication failure after the process itself finished must not
-                # turn a captured result into a broker error (cancel() has the same guard).
-                if job.info.status not in (
-                    "completed",
-                    "failed",
-                    "timed_out",
-                    "cancelled",
-                ):
-                    raise
-            output = self._shell_jobs.run_text(job)
-            return {
-                "text": output["text"],
-                "exit_code": job.info.exit_code,
-                "job_id": job.info.id,
-                "truncated": output["truncated"],
-                "error": job.info.error,
-                "timed_out": job.info.status == "timed_out",
-                "running": False,
-            }
+                self._raise_unless_finished(job)
+            return self._finished_payload(job)
+        if op == "shell.result":
+            job = self._shell_jobs.get(parent.id, request["job_id"])
+            timeout = request.get("timeout")
+            block = (
+                RUN_BLOCK_MAX_SECONDS
+                if timeout is None
+                else min(float(timeout), RUN_BLOCK_MAX_SECONDS)
+            )
+            if not job.task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(job.task), block)
+                except asyncio.TimeoutError:
+                    job.notify = True
+                    marker = (
+                        f"[still running after waiting {block:g} s: job {job.info.id} "
+                        "continues in the background; `await job.result()` waits again, "
+                        "`await job.cancel()` stops it]\n"
+                        if block
+                        else ""
+                    )
+                    return self._running_payload(job, marker)
+                except Exception:
+                    self._raise_unless_finished(job)
+            return self._finished_payload(job)
         if op == "shell.list":
             return [
                 job.snapshot()

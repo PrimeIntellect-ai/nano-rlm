@@ -58,8 +58,12 @@ def test_ipython_control_prompt_included_for_ipython_tool():
     prompt = _prompt([_Tool("ipython")])
 
     assert IPYTHON_CONTROL_PROMPT in prompt
-    assert "await rlm.shell.start(command, cwd=..., timeout=...)" in prompt
-    assert "await rlm.shell.run(command, cwd=..., timeout=...)" in prompt
+    assert (
+        "await rlm.shell.run(command, cwd=..., timeout=..., env=..., background=False)"
+        in prompt
+    )
+    assert "res = await job.result()" in prompt
+    assert "rlm.shell.start" not in prompt
     assert "project's interpreter" in prompt
 
 
@@ -124,7 +128,7 @@ def test_runtime_guidance_matches_agent_capabilities():
     assert "rlm.watch.agent(" not in leaf
     assert "become idle" in leaf
     assert '"parent_id": "root"' in leaf
-    assert "rlm.shell.start" in leaf
+    assert "rlm.shell.run(" in leaf
 
     native = build_system_prompt(
         "/repo",
@@ -135,7 +139,7 @@ def test_runtime_guidance_matches_agent_capabilities():
         active_tools=[_Tool("bash")],
     )
     assert "rlm.agent.spawn(" not in native
-    assert "rlm.shell.start" not in native
+    assert "rlm.shell.run(" not in native
     assert "await search" not in native
     assert "native bash tool" in native
     assert GIT_HISTORY_GUARD_PROMPT in native
