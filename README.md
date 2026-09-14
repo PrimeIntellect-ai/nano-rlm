@@ -351,33 +351,34 @@ result = await rlm.shell.run("git status --short")
 print(result.text, result.exit_code)
 ```
 
-`run(command, cwd=..., timeout=..., env=..., background=False)` returns a `ShellJob`: a
-snapshot with `running`, `ok`, combined stdout/stderr `text` (up to 16 KiB: the first and last
-8 KiB around an omitted-range marker when longer), `exit_code`, `id`, `truncated`, `error`
-and `timed_out`, plus the methods `result()`, `read()`, `info()` and `cancel()`. The command
-is a Bash string or an argv list. Without `background=True`, `run()` waits up to 15 s; a
-command still going then comes back with `running=True` and the output so far while the job
-continues. `background=True` returns at once. `await job.result(timeout=...)` waits (up to
-300 s per call) and returns the finished snapshot, again with `running=True` if the job is
-still not done; it is repeatable and never consumes output. Nonzero exit codes are returned;
-startup/capture errors populate `error`; an exceeded `timeout` (seconds) kills the process
-group and sets `timed_out` — it is the kill deadline, not the wait. If output is truncated,
+`run(command, cwd=..., env=..., wait=10, timeout=None)` returns a `ShellJob`: a snapshot with `running`,
+`ok`, combined stdout/stderr `text` (up to 16 KiB: the first and last 8 KiB around an
+omitted-range marker when longer), `exit_code`, `id`, `truncated`, `error` and `timed_out`, plus the
+methods `result()`, `read()`, `info()` and `cancel()`. `wait` is how long `run()` waits:
+10 s by default, 0 returns at once, capped at 300. A command still going when the wait ends
+comes back with `running=True` and the output so far while the job continues; nothing is
+killed by a wait. `timeout`, if given, kills the process group after that many seconds and
+sets `timed_out`. `await job.result(wait=...)` waits (up to 300 s per call) and returns
+the finished snapshot, again with `running=True` if the job is still not done; it is
+repeatable and never consumes output. The command is a Bash string or an argv list. Nonzero
+exit codes are returned; startup/capture errors populate `error`. If output is truncated,
 `await job.read(cursor=..., max_bytes=...)` reads the retained output (16 MiB per job).
 Cancelling the waiting cell leaves the job running and discoverable with `shell.list()`;
-`shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a
-quiet `shell.completed` inbox event (job ID, status, exit code, completeness flags and the last
-4 KiB of output). `await rlm.shell.setenv(NAME='value')` sets variables for every later
-`run()` of the agent (`getenv()` reads the overlay; per-call `env=` wins). The kernel and
-Bash jobs inherit the launching process's environment (in a sandbox, the image's ENV) minus
-a blocklist: credential-looking names, values with URL-embedded credentials, variables that
-would redirect the kernel's own interpreter or venv (PYTHONHOME, UV_PYTHON, ...), and
-agent/daemon sockets.
+`shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a quiet
+`shell.completed` inbox event (job ID, status, exit code, completeness flags and the last
+4 KiB of output); quiet means it wakes the native `wait` tool but is not counted in the unread
+notice, and `result()` marks it read. `await rlm.shell.setenv(NAME='value')` sets variables
+for every later `run()` of the agent (`getenv()` reads the overlay; per-call `env=` wins).
+The kernel and Bash jobs inherit the launching process's environment (in a sandbox, the
+image's ENV) minus a blocklist: credential-looking names, values with URL-embedded
+credentials, variables that would redirect the kernel's own interpreter or venv (PYTHONHOME,
+UV_PYTHON, ...), and agent/daemon sockets.
 
-For long commands or work that should run alongside other tasks, pass `background=True`
-and collect with `result()`:
+For long commands or work that should run alongside other tasks, pass `wait=0` and
+collect with `result()`:
 
 ```python
-job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project", background=True)
+job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project", wait=0)
 # ... other work ...
 res = await job.result()
 print(res.exit_code, res.text)
@@ -388,8 +389,8 @@ job = await rlm.shell.get(job_id)
 chunk = await job.read(cursor=0, max_bytes=16384)   # continue from chunk.next_cursor
 ```
 
-Use the native `wait` tool when there is no other work; `shell.completed` events wake it but
-are quiet (not counted in the unread notice), and `result()` marks them read. A nonzero Bash exit code is a completed process;
+Use the native `wait` tool when there is no other work and you hold no running job; a held
+job is collected with `result()`. A nonzero Bash exit code is a completed process;
 startup/capture errors have status `failed`.
 
 `await job.cancel()` terminates its process group. Jobs survive cell completion

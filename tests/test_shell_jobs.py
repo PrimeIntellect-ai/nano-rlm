@@ -83,7 +83,7 @@ async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch)
     client = DummyClient(
         [
             tool(
-                "job = await rlm.shell.run('sleep 0.2; [[ -z ${SHELL_TEST_PRIVATE_KEY+x} ]] || exit 90; values=(one two); [[ ${#values[@]} == 2 ]] && printf BASH_OK', background=True); saved_id = job.id"
+                "job = await rlm.shell.run('sleep 1.5; [[ -z ${SHELL_TEST_PRIVATE_KEY+x} ]] || exit 90; values=(one two); [[ ${#values[@]} == 2 ]] && printf BASH_OK', wait=0); saved_id = job.id"
             ),
             tool(
                 "del job; job = await rlm.shell.get(saved_id); assert len(await rlm.shell.list()) == 1"
@@ -102,7 +102,7 @@ output = await job.read()
 assert output.text == 'BASH_OK' and output.done
 assert (await job.read()).text == output.text
 try:
-    await rlm.shell.run('git log --all', background=True)
+    await rlm.shell.run('git log --all', wait=0)
 except RuntimeError:
     pass
 else:
@@ -143,15 +143,16 @@ import asyncio
 listed = await rlm.shell.list()
 assert not hasattr(listed[-1], 'read') and not hasattr(listed[-1], 'handle')
 assert (await (await rlm.shell.get(listed[-1].id)).info()).id == listed[-1].id
-snap = await rlm.shell.run('sleep 1; printf slow', timeout=5)  # timeout= is the kill deadline, not the wait
+snap = await rlm.shell.run('sleep 1; printf slow', wait=0.2)  # timeout= is the wait bound; the job keeps running
 assert snap.running and snap.exit_code is None and not snap.ok and snap.text.startswith('[still running after')
 bounded = await snap.result()  # result() waits for it
 assert bounded.ok and bounded.text == 'slow' and not bounded.running and bounded.id == snap.id
 assert (await snap.result()).text == 'slow'  # repeatable
 detached = await rlm.shell.run('printf server; sleep 30')  # detaches after RUN_DETACH_SECONDS
-assert detached.running and not detached.ok and detached.exit_code is None and not detached.timed_out
+assert detached.running and not detached.ok and detached.exit_code is None
 assert detached.text.startswith('[still running after') and detached.text.endswith('server')
-still = await detached.result(timeout=0.2)  # bounded wait, still running
+assert f'rlm.shell.get("{detached.id}")).result()' in detached.text and 'await job.' not in detached.text  # no invented variable name
+still = await detached.result(wait=0.2)  # bounded wait, still running
 assert still.running and still.text.startswith('[still running after waiting 0.2 s')
 bg = await rlm.shell.get(detached.id)
 assert bg.running and bg.text == '' and (await bg.info()).status == 'running'
@@ -163,12 +164,13 @@ muted_run = await rlm.shell.run('sleep 30')  # detaches again, but the hint is m
 assert muted_run.running
 await muted_run.cancel()
 assert (await rlm.hints.unmute('run-detach')) == []
-quick = await rlm.shell.run('printf BG', background=True)
-assert quick.running and quick.text == '' and quick.exit_code is None
+quick = await rlm.shell.run('printf BG', wait=0)
+assert quick.running and quick.text.startswith('[started: job ' + quick.id) and quick.exit_code is None and not quick.truncated
+assert f'await (await rlm.shell.get("{quick.id}")).result()' in quick.text  # copyable collection expression
 res = await quick.result()
 assert res.ok and res.text == 'BG' and (await quick.result()).text == 'BG'
-a_job = await rlm.shell.run('sleep 0.2; printf A', background=True)
-b_job = await rlm.shell.run('sleep 0.1; printf B', background=True)
+a_job = await rlm.shell.run('sleep 0.2; printf A', wait=0)
+b_job = await rlm.shell.run('sleep 0.1; printf B', wait=0)
 a_res, b_res = await asyncio.gather(a_job.result(), b_job.result())
 assert a_res.text == 'A' and b_res.text == 'B' and a_res.ok and b_res.ok
 all_completed = [e for e in await rlm.inbox.list(unread_only=False) if e['type'] == 'shell.completed']
@@ -179,17 +181,37 @@ assert by_job[quick.id]['text'] == 'BG' and by_job[quick.id]['exit_code'] == 0  
 assert by_job[detached.id]['status'] == 'cancelled'
 assert {e['content']['job_id'] for e in completed if e['id'] in read_before} >= {quick.id, a_job.id, b_job.id, snap.id}  # result() marked them read
 assert detached.id not in {e['content']['job_id'] for e in completed if e['id'] in read_before}  # cancelled without result(): still unread, but quiet
-timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)
-killed = await (await rlm.shell.run('printf part2; sleep 30', timeout=0.8)).result()  # kill lands after the 0.5 s wait
+bounded_wait = await rlm.shell.run('printf partial; sleep 30', wait=0.3)  # a wait bound never kills
+assert bounded_wait.running and bounded_wait.exit_code is None and bounded_wait.text.endswith('partial')
+assert (await bounded_wait.info()).status == 'running' and (await bounded_wait.info()).timeout is None
+await bounded_wait.cancel()
+assert (await bounded_wait.info()).status == 'cancelled'
+long_wait = await rlm.shell.run('printf capped', wait=10**6)  # above the cap: clamped to 300 s, finishes anyway
+assert long_wait.ok and long_wait.text == 'capped'
+timed = await rlm.shell.run('printf partial; sleep 30', timeout=0.3)  # timeout= kills; the default wait outlives it
+assert timed.timed_out and not timed.running and timed.exit_code is None and timed.text == 'partial' and 'timed out' in timed.error
+killed = await rlm.shell.run('printf part2; sleep 30', wait=0.2, timeout=0.8)  # wait ends first, kill lands later
+assert killed.running and not killed.timed_out
+killed = await killed.result()
 assert killed.timed_out and not killed.running and killed.exit_code is None and killed.text == 'part2'
-assert timed.timed_out and timed.exit_code is None and timed.text == 'partial'
-assert 'timed out' in timed.error
-timed_job = await rlm.shell.run('sleep 30', timeout=0.2, background=True)
+timed_job = await rlm.shell.run('sleep 30', wait=0, timeout=0.2)
 await asyncio.sleep(0.6)
 info = await timed_job.info()
 assert info.status == 'timed_out' and info.timeout == 0.2 and info.timed_out
 try:
-    await rlm.shell.run('true', timeout=-1)
+    await rlm.shell.run('true', wait=-1)
+except ValueError:
+    pass
+else:
+    raise AssertionError('negative wait accepted')
+try:
+    await rlm.shell.run('true', background=True)
+except TypeError as exc:
+    assert 'wait=0' in str(exc), str(exc)
+else:
+    raise AssertionError('background kwarg accepted')
+try:
+    await rlm.shell.run('true', wait=-1)
 except ValueError:
     pass
 else:
@@ -239,10 +261,19 @@ print('SHELL_OK')
             for call in client.calls
             for m in call["messages"]
             if m.get("role") == "user"
-            and "job.running is True" in str(m.get("content", ""))
+            and "command still running (.running is True" in str(m.get("content", ""))
         ]
         assert hint_msgs, "detach hint never reached the model"
-        assert "await job.result()" in hint_msgs[0]
+        assert ")).result()" in hint_msgs[0] and "await job." not in hint_msgs[0]
+        wait_hints = [
+            str(m.get("content", ""))
+            for m in client.calls[-1]["messages"]
+            if m.get("role") == "user"
+            and "You called wait while holding running job" in str(m.get("content", ""))
+        ]
+        assert (
+            len(wait_hints) == 1 and 'rlm.hints.mute("wait-held-job")' in wait_hints[0]
+        )
         assert 'rlm.hints.mute("run-detach")' in hint_msgs[0]
         assert len(set(hint_msgs)) == 1  # the second detach happened after mute()
         env_hints = [

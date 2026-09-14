@@ -42,8 +42,8 @@ PROJECT_ENV_PROMPT = (
     "(tests, repros, imports) goes through bash with the project's interpreter."
 )
 IPYTHON_CONTROL_PROMPT = (
-    "Use `rlm.shell.run` for Bash; `background=True` returns at once and `await job.result()` "
-    "collects any job. " + PROJECT_ENV_PROMPT
+    "Use `rlm.shell.run` for Bash; `wait=` is how long to wait (0 returns at once) and "
+    "`await job.result()` collects any job. " + PROJECT_ENV_PROMPT
 )
 KERNEL_PACKAGES_PROMPT = (
     "Pre-installed in the kernel venv: " + ", ".join(BASE_TOOLKIT) + ". "
@@ -54,7 +54,7 @@ BASH_SKILL_PROMPT = (
     "For short, blocking shell work, use `out = await bash('''command here''')` — always "
     "triple-quote the command so shell quotes and multi-line scripts never "
     "need escaping. It returns the output as a string, useful for further Python processing. "
-    "Use rlm.shell.run(..., background=True) for supervisor-owned background work."
+    "Use rlm.shell.run(..., wait=0) for supervisor-owned background work."
 )
 BASH_SKILL_WITH_TOOL_PROMPT = (
     "Inside ipython you can also run shell with `await bash(command=...)` — "
@@ -119,25 +119,26 @@ an interrupted cell: file writes and accepted spawn/send/job requests may alread
 happened. Compaction alone preserves the kernel and supervisor resources.
 
 ## Bash commands and jobs
-`job = await rlm.shell.run(command, cwd=..., timeout=..., env=..., background=False)` runs Bash
-under the supervisor and returns a ShellJob. Without background=True it waits up to 15 s. A
-command that finished has .running False, .exit_code, .ok (True only for a clean exit 0),
-.text (combined stdout/stderr, up to 16 KiB), .truncated, .error (startup/capture failure)
-and .timed_out. A command still going after 15 s comes back with .running True, .exit_code
-None and the output so far, and keeps running. background=True returns at once, always with
-.running True. The same object collects the result either way: `res = await job.result()`
-waits up to 300 s (or its timeout=) for the command to finish and returns a finished
+`job = await rlm.shell.run(command, cwd=..., env=..., wait=10, timeout=None)` runs Bash
+under the supervisor and returns a ShellJob. wait is how long to wait for the command: 10 s
+by default, 0 returns at once, at most 300. A command that finished has .running False,
+.exit_code, .ok (True only for a clean exit 0), .text (combined stdout/stderr, up to 16 KiB),
+.truncated, .error (startup/capture failure) and .timed_out. A command still going when the wait ends
+comes back with .running True, .exit_code None and the output so far, and keeps running;
+`res = await job.result()` waits up to 300 s (or its wait=) and returns a finished
 ShellJob, again with .running True if it is still not done. result() is repeatable and never
-consumes output. timeout= on run() kills the process group after that many seconds
-(.timed_out True, .exit_code None); it does not change how long run() waits. The command is
-a Bash string or an argv list.
+consumes output. A ShellJob is a snapshot: its .running and .text do not change by
+themselves, result() returns a fresh one. result() already waits, so never call native
+`wait` for a job you hold. Nothing is killed by a wait; timeout=, if given, kills the process
+group after that many seconds (.timed_out True, .exit_code None), and `await job.cancel()`
+stops a job at any time. The command is a Bash string or an argv list.
 ```python
-r = await rlm.shell.run("git status --short")            # quick: finished within 15 s
+r = await rlm.shell.run("git status --short")                  # finished within the 10 s wait
 if not r.ok:
     print("FAILED", r.exit_code, r.text)
-job = await rlm.shell.run("go test ./...", cwd="/workspace/project", timeout=900, background=True)
+job = await rlm.shell.run("go test ./...", cwd="/workspace/project", wait=0)   # returns at once
 # ... other work in this or later cells ...
-res = await job.result()                                  # waits (up to 300 s) for the finished job
+res = await job.result()                                        # waits (up to 300 s) for the finished job
 print(res.exit_code, res.text)
 first, second = await asyncio.gather(job_a.result(), job_b.result())   # several jobs at once
 ```
@@ -211,8 +212,9 @@ A read flag means retrieved, not completed or acted upon.
 Supervisor notifications show the unread count when it changes, plus occasional one-line hints about
 runtime use, each with a tag; `await rlm.hints.mute("tag")` stops a hint you have understood.
 You choose when to inspect payloads.
-When work remains but nothing is actionable, call the native `wait` tool (outside Python),
-with timeout at most 300 seconds. It suspends inference without holding a cell open.
+When work remains but nothing is actionable and you hold no running job (a held job is
+collected with `await job.result()`), call the native `wait` tool (outside Python), with
+timeout at most 300 seconds. It suspends inference without holding a cell open.
 New arrivals wake it; already-announced unread events do not. Inspect existing unread
 events before waiting for more. Avoid polling/sleep loops in Python to wait for agents/jobs.
 
