@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from rlm.types import RLMResult
 
@@ -183,6 +183,8 @@ class BrokerWatchAgentRequest(TypedDict):
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
     agent_id: Annotated[str, Field(min_length=1)]
+    every_turns: NotRequired[Annotated[int, Field(gt=0)] | None]
+    every_tokens: NotRequired[Annotated[int, Field(gt=0)] | None]
 
 
 class BrokerWatchJobRequest(TypedDict):
