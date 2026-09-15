@@ -130,13 +130,14 @@ researcher = await rlm.agent.get("researcher")  # Recover by sibling name or ID
 Names are unique among siblings and remain reserved for the session, including after completion. Immutable IDs are shown alongside names. Metadata includes the parent ID, initial task, status, persistence flag, creation time, elapsed lifetime in seconds, session directory, and any failure. `list(recursive=True)` includes descendants, but only direct children can be retrieved as handles or controlled through the supervisor.
 
 ```python
-status = await researcher.wait(timeout=30)
-result = await researcher.result()
-if result is not None:
+result = await researcher.result(yield_after=60)
+if result.running:
+    print("still working, answer so far:", result.answer)
+else:
     print(result.answer)
 ```
 
-`result()` returns the latest successful `RLMResult`, including while a persistent agent is running again, or `None` before its first answer. Terminal failure or cancellation raises. Use `info()` or `wait()` for current activity; a retained answer does not mean a follow-up has finished. `wait()` returns current metadata after an outcome or its timeout (default 30 seconds, range 0–300). It waits inside the Python cell and uses the cell's normal execution timeout. Cancelling or timing out a wait does not cancel the agent.
+`result()` waits up to `yield_after` seconds (default 300) for the agent to finish and returns an `AgentResult` (`status`, `answer`, `usage`, `turns`, `session_dir`, `running`). `answer` is `None` while the agent is still working on its first answer; a persistent agent's latest answer stays available while it runs again. Terminal failure or cancellation raises. Use `info()` or `wait()` for current activity; a retained answer does not mean a follow-up has finished. `wait()` returns current metadata after an outcome or its timeout (default 30 seconds, range 0–300). It waits inside the Python cell and uses the cell's normal execution timeout. Cancelling or timing out a wait does not cancel the agent.
 
 `await researcher.cancel()` terminates the agent and its descendants and waits for cleanup. Ordinary agents release their kernels after answering. An agent spawned with `persistent=True` becomes idle after answering and retains its conversation and kernel; a parent instruction or new inbox event wakes it. Parent termination tears down all descendants, including persistent agents. Closing the ACP session tears down the tree. Cancelling an individual prompt or cell leaves its accepted children registered and recoverable.
 

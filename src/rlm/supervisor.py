@@ -22,6 +22,7 @@ from rlm.broker import (
     BrokerEndpoint,
     parse_request,
     read_frame,
+    agent_result_to_payload,
     result_to_payload,
     write_frame,
 )
@@ -45,7 +46,7 @@ from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
-from rlm.types import ProgrammaticToolCallStats, RLMResult
+from rlm.types import AgentResult, ProgrammaticToolCallStats, RLMResult, TokenUsage
 
 # When a blocking run() detaches (see RUN_DETACH_SECONDS) the supervisor explains the
 # unusual result once per occurrence, at most MAX_LONG_RUN_NOTES times per agent.
@@ -1125,15 +1126,27 @@ class SessionTreeSupervisor:
         elif op == "agent.cancel":
             await self._terminate(child)
         elif op == "agent.result":
-            if child.status in {"failed", "cancelled"}:
-                self.semantic_edges.finish_subagent(child.id)
-                raise RuntimeError(child.error or "agent cancelled")
-            if child.result is None:
-                return None
-            self.semantic_edges.finish_subagent(
-                child.id, request_id=child.result_request_id
+            yield_after = min(request["yield_after"], RUN_BLOCK_MAX_SECONDS)
+            if not child.done.is_set() and yield_after > 0:
+                try:
+                    await asyncio.wait_for(
+                        child.done.wait(), timeout=request["yield_after"]
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            if child.result is not None:
+                self.semantic_edges.finish_subagent(
+                    child.id, request_id=child.result_request_id
+                )
+            return agent_result_to_payload(
+                AgentResult(
+                    status=child.status,
+                    answer=None if child.result is None else child.result.answer,
+                    session_dir=child.session.dir,
+                    usage=TokenUsage() if child.result is None else child.result.usage,
+                    turns=child.turns,
+                )
             )
-            return result_to_payload(child.result)
         return self._info(child)
 
     async def _start_skill_call(
