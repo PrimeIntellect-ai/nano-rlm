@@ -272,8 +272,10 @@ only direct children can be controlled. Finished children remain discoverable. R
 (.answer, .usage, .turns, .session_dir), or None before its first answer. The latest answer
 remains available while a persistent child runs again; use info/wait for current activity.
 Terminal failure/cancellation raises.
-Child completion/failure posts `agent.completed` automatically;
-`event["content"]["agent_id"]` identifies the child and ["status"] gives its state. Inspect the event and recover the handle rather than assuming success.
+Child completion/failure posts `agent.completed` automatically; its content has
+["agent_id"], ["name"], ["status"], ["turns"], ["error"] and ["answer"] (the last 4 KiB of
+the child's answer), so the event alone tells you what came back; `await child.result()`
+has the full answer. Inspect the event rather than assuming success.
 `await child.history()` returns a fresh history snapshot. `await child.cancel()` terminates
 that child and its descendants. Terminating a parent ends its whole subtree.
 
@@ -290,8 +292,12 @@ result; prefer native wait when you have no other work. Cell timeouts still appl
 `await rlm.watch.agent(child)` watches a direct child's conversation after complete
 assistant/tool steps, including final answers. Its `watch.agent` event content identifies
 the child via target and gives start:end indices for
-`(await child.history()).messages[start:end]`. It observes progress without waiting for an explicit
-report. Read history, then steer if needed; the subscription itself does not direct the child.
+`(await child.history()).messages[start:end]`. `await rlm.watch.agent(child, every_turns=10)` (and/or
+`every_tokens=50000`) instead posts a `watch.progress` event each time the child's own model
+calls or new tokens cross the next multiple, with ["turns"], ["tokens"], ["name"], ["status"]
+and the same start:end slice — the way to keep a long-running child in view: read its recent
+history, then `await child.steer("report what you have and stop")` if it should wrap up. The
+subscription itself does not direct the child.
 """
 
 HISTORY_PROMPT = """## Conversation history
