@@ -31,12 +31,14 @@ IPYTHON_SCHEMA = {
     "function": {
         "name": "ipython",
         "description": (
-            "Execute code in a persistent IPython session. Variables, imports, "
-            "and function definitions persist across calls. "
-            "Use !command for shell commands (e.g. !ls -la, !cat file.py, !pip install foo). "
-            "Use !python3 to run code with the project's own packages "
-            "(e.g. !python3 -m pytest, !python3 -c 'import numpy'). "
-            "Use %%bash for multi-line shell scripts."
+            "Execute Python in a persistent kernel, including top-level await. "
+            "Use the pre-imported rlm API to manage agents, Bash jobs, inboxes, and subscriptions "
+            "as described in the runtime guide. Use await rlm.shell.run(command, yield_after=10) for Bash: "
+            "it waits up to yield_after seconds (0 returns at once, max 300) and returns a ShellJob "
+            "with .text, .exit_code and .running; await job.result() collects a job that is still "
+            "running. Commands support multiline Bash and survive kernel restart. "
+            "Variables persist across cells and compaction, but are lost on kernel restart. "
+            "Read recovery notices and reconstruct state before retrying interrupted work."
         ),
         "parameters": {
             "type": "object",
@@ -57,6 +59,84 @@ IPYTHON_SCHEMA = {
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 IPYTHON_TIMEOUT_MAX_SECONDS = 600
+# The kernel and supervisor-owned Bash inherit this process's environment (in a
+# sandbox: the image's ENV plus whatever the launcher added; locally: the developer's
+# shell) minus a blocklist. Blocked: credential-looking names, values that embed URL
+# credentials, launcher provider/infra configuration (OPENAI_*, PRIME_*, RLM_*, AWS_*, ...),
+# variables that would break or redirect the kernel's own interpreter and venv, and
+# agent/daemon sockets. Everything else passes so that projects see the
+# toolchain the way their own tests do (PYTHONPATH, GOMODCACHE, NODE_OPTIONS, ...).
+_KERNEL_SECRET_ENV_RE = re.compile(
+    r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|COOKIE|SESSION"
+    r"|(?:^|_)PWD$|_PW$|PASS$|PASSFILE$",  # MYSQL_PWD, PGPASSFILE, *_PASS
+    re.I,
+)
+# user:pass@, :pass@ and token-only @ credentials in a URL
+_KERNEL_SECRET_VALUE_RE = re.compile(r"://(?:[^/\s@]*:)?[^/\s@]+@")
+_KERNEL_ENV_BLOCKED_NAMES = {
+    # would break or redirect the kernel's interpreter / venv / config dirs
+    "PYTHONHOME",
+    "PYTHONSTARTUP",
+    "BASH_ENV",  # sourced by non-interactive bash before every supervisor job
+    "ENV",  # the sh equivalent
+    "PYTHONEXECUTABLE",
+    "PYTHONUSERBASE",
+    "PYTHONSAFEPATH",
+    "UV_PROJECT_ENVIRONMENT",
+    "UV_PYTHON",
+    "UV_RUN_RECURSION_DEPTH",
+    "PIP_TARGET",
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "IPYTHONDIR",
+    "JUPYTER_CONFIG_DIR",
+    "JUPYTER_DATA_DIR",
+    "JUPYTER_RUNTIME_DIR",
+    # host/daemon access that has nothing to do with the task
+    "DOCKER_HOST",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GPG_AGENT_INFO",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "KUBECONFIG",
+}
+_KERNEL_ENV_BLOCKED_PREFIXES = (
+    "BUNDLE_",  # Bundler stores user:password per host
+    # provider / infrastructure configuration of the launcher, not of the task
+    "OPENAI_",
+    "ANTHROPIC_",
+    "PRIME_",
+    "RLM_",
+    "VLLM_",
+    "HF_",
+    "HUGGING",
+    "WANDB_",
+    "AWS_",
+    "AZURE_",
+    "GOOGLE_",
+    "GCP_",
+    "GITHUB_",
+    "GH_",
+    "SLACK_",
+    "SENTRY_",
+    "DATADOG_",
+    "DD_",
+    "OTEL_",
+    "STRIPE_",
+    "TWILIO_",
+)
+
+
+def _passes_kernel_env(key: str, value: str) -> bool:
+    if key in _KERNEL_BASE_ENV_NAMES:
+        return True
+    if key in _KERNEL_ENV_BLOCKED_NAMES or key.startswith(_KERNEL_ENV_BLOCKED_PREFIXES):
+        return False
+    if _KERNEL_SECRET_ENV_RE.search(key) or _KERNEL_SECRET_VALUE_RE.search(value):
+        return False
+    return True
+
+
 _KERNEL_BASE_ENV_NAMES = {
     "CURL_CA_BUNDLE",
     "HOME",
@@ -80,7 +160,7 @@ def build_kernel_env(
     environ: Mapping[str, str] | None = None,
     private_dir: str | None = None,
 ) -> dict[str, str]:
-    """Build a minimal kernel environment plus explicitly supplied task variables."""
+    """Build the kernel environment: inherited minus the blocklist, plus explicit task variables."""
     source = os.environ if environ is None else environ
     explicit = dict(task_env or {})
     invalid_types = [
@@ -91,9 +171,7 @@ def build_kernel_env(
     if invalid_types:
         raise TypeError("kernel environment keys and values must be strings")
     kernel_env = {
-        key: value
-        for key, value in source.items()
-        if key in _KERNEL_BASE_ENV_NAMES or key.startswith("LC_")
+        key: value for key, value in source.items() if _passes_kernel_env(key, value)
     }
     kernel_env.update(explicit)
     kernel_env["NO_COLOR"] = "1"
@@ -262,6 +340,7 @@ class IPythonREPL:
 
         setup_code = f"""\
 import os, sys, asyncio, types, json, time, functools, inspect
+from pathlib import Path
 os.chdir({self.cwd!r})
 if {bool(session_dir)!r}:
     sys.path.append({session_dir!r})

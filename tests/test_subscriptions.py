@@ -110,7 +110,7 @@ child = await rlm.agent.spawn('initial', name='worker', persistent=True)
 await child.wait(timeout=10)
 activity = await rlm.watch.agent(child)
 files = await rlm.watch.path('watched')
-job = await rlm.shell.run('sleep 0.5; printf output; printf changed > watched/result')
+job = await rlm.shell.run('sleep 0.5; printf output; printf changed > watched/result', yield_after=0)
 output = await rlm.watch.job(job)
 await child.send('continue')
 import os
@@ -136,7 +136,7 @@ for item in events:
     assert event['subscription_id'] in {s.id for s in subscriptions}
     content = event['content']
     if item['type'] == 'watch.agent':
-        assert child.history().messages[content['start']:content['end']]
+        assert (await child.history()).messages[content['start']:content['end']]
     elif item['type'] == 'watch.job':
         job = await rlm.shell.get(content['target'])
         chunk = await job.read(cursor=content['start'])

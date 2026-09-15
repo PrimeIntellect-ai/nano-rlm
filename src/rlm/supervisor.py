@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import secrets
+import shlex
 import shutil
 import tempfile
 import time
@@ -31,13 +33,54 @@ from rlm.mcp import (
     MCPToolDescriptor,
     write_skill_modules,
 )
-from rlm.shell_jobs import ShellJob, ShellJobs
+from rlm.shell_jobs import (
+    RUN_BLOCK_MAX_SECONDS,
+    RUN_DETACH_SECONDS,
+    RUN_TEXT_BYTES,
+    JobRecord,
+    ShellJobs,
+)
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
 from rlm.types import ProgrammaticToolCallStats, RLMResult
+
+# When a blocking run() detaches (see RUN_DETACH_SECONDS) the supervisor explains the
+# unusual result once per occurrence, at most MAX_LONG_RUN_NOTES times per agent.
+MAX_LONG_RUN_NOTES = 3
+# A native wait while holding a running job earns a pointer at result(), at most this often.
+MAX_WAIT_HELD_JOB_HINTS = 2
+# shell.completed events carry this much of the end of the output.
+COMPLETED_TAIL_BYTES = 4 * 1024
+# A `VAR=value cmd` prefix repeated this many times on one variable earns a hint that
+# rlm.shell.setenv() applies it to every later command (once per variable, tag env-prefix).
+ENV_PREFIX_HINT_AFTER = 3
+_ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+
+
+def _leading_env_assignments(command: str) -> list[tuple[str, str]]:
+    """`VAR=value` words that prefix the first simple command of a Bash string, after any
+    leading `cd dir &&` and an optional `env`; the model's way of setting PYTHONPATH per call."""
+    first = re.split(r"\s*(?:&&|\|\||;|\|)\s*", command.strip(), maxsplit=1)
+    segment = first[0]
+    if segment.startswith("cd ") and len(first) > 1:
+        segment = re.split(r"\s*(?:&&|\|\||;|\|)\s*", first[1].strip(), maxsplit=1)[0]
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        words = segment.split()
+    if words and words[0] == "env":
+        words = words[1:]
+    out: list[tuple[str, str]] = []
+    for word in words:
+        match = _ENV_ASSIGNMENT_RE.match(word)
+        if not match:
+            break
+        out.append((match.group(1), match.group(2)))
+    return out
+
 
 if TYPE_CHECKING:
     from rlm.engine import RLMEngine
@@ -70,6 +113,14 @@ class _Invocation:
     cleanup_error: str | None = None
     released: bool = False
     result: RLMResult | None = None
+    shell_env: dict[str, str] = field(default_factory=dict)  # rlm.shell.setenv overlay
+    notes: list[tuple[str, str]] = field(
+        default_factory=list
+    )  # (tag, text) for next turn
+    muted_hints: set[str] = field(default_factory=set)  # rlm.hints.mute()
+    long_run_notes: int = 0
+    env_prefixes: dict[str, int] = field(default_factory=dict)  # VAR -> prefix count
+    env_prefix_hinted: set[str] = field(default_factory=set)
     result_request_id: str | None = None
     engine: RLMEngine | None = None
     runner: asyncio.Task[None] | None = None
@@ -78,7 +129,10 @@ class _Invocation:
     inbox: list[dict] = field(default_factory=list)
     instructions: list[dict] = field(default_factory=list)
     inbox_error: str | None = None
-    announced: int = 0
+    announced: int = 0  # events seen by the last notice/wait (all types; wakes wait)
+    announced_loud: int = 0  # events that count toward the unread notice
+    wait_hints: int = 0  # wait-held-job hints spent
+    unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -334,6 +388,16 @@ class SessionTreeSupervisor:
                 return agent
         raise PermissionError("agent is not a direct child of the caller")
 
+    def agent_context(self, invocation_id: str) -> dict[str, Any]:
+        """Runtime identity for this agent's prompt, without broker credentials."""
+        agent = self._invocations[invocation_id]
+        return {
+            "id": agent.id,
+            "parent_id": agent.parent_id,
+            "name": agent.name,
+            "persistent": agent.persistent,
+        }
+
     def _info(self, agent: _Invocation) -> dict[str, Any]:
         return {
             "id": agent.id,
@@ -532,21 +596,112 @@ class SessionTreeSupervisor:
                 )
         return selected
 
-    def inbox_notification(self, invocation_id: str) -> str | None:
+    def _note_env_prefixes(self, agent: _Invocation, command: str) -> None:
+        """Count `VAR=value` command prefixes; the ENV_PREFIX_HINT_AFTER-th use of one
+        variable earns a one-time hint pointing at rlm.shell.setenv()."""
+        for name, value in _leading_env_assignments(command):
+            count = agent.env_prefixes.get(name, 0) + 1
+            agent.env_prefixes[name] = count
+            if count == ENV_PREFIX_HINT_AFTER and name not in agent.env_prefix_hinted:
+                agent.env_prefix_hinted.add(name)
+                self._hint(
+                    agent,
+                    "env-prefix",
+                    f"`{name}=...` has prefixed {count} commands so far; "
+                    f"`await rlm.shell.setenv({name}={value!r})` applies it to every "
+                    "later run()/start(), and `env={...}` to one call.",
+                )
+
+    def _note_wait_with_held_jobs(self, agent: _Invocation) -> None:
+        """A native wait while the agent holds a running job it was handed back is a
+        detour (wait -> inbox -> get -> result): point at result()."""
+        if (
+            agent.wait_hints >= MAX_WAIT_HELD_JOB_HINTS
+            or "wait-held-job" in agent.muted_hints
+        ):
+            return
+        held = [
+            job
+            for job in self._shell_jobs.jobs.values()
+            if job.info.owner_id == agent.id and job.finished is None and job.notify
+        ]
+        if not held:
+            return
+        agent.wait_hints += 1
+        job = held[0]
+        self._hint(
+            agent,
+            "wait-held-job",
+            f"You called wait while holding running job {job.info.id}: "
+            f"`res = {self._collect_expr(job)}` waits for it directly (up to 300 s per "
+            "call) and returns its output. Native wait is for events from agents or "
+            "watches, not for jobs you hold.",
+        )
+
+    def hint(self, invocation_id: str, tag: str, text: str) -> None:
+        """Queue a tagged hint for an agent from outside the supervisor (engine-side observations)."""
+        agent = self._invocations.get(invocation_id)
+        if agent is not None:
+            self._hint(agent, tag, text)
+
+    @staticmethod
+    def _hint(agent: _Invocation, tag: str, text: str) -> None:
+        """Queue a tagged one-line hint for the agent's next turn unless the tag is muted."""
+        if tag in agent.muted_hints:
+            return
+        agent.notes.append(
+            (tag, f'{text} (Mute this hint with await rlm.hints.mute("{tag}").)')
+        )
+
+    def inbox_notice(self, invocation_id: str) -> dict | None:
+        """Pending runtime notices for the agent's next turn as a structured record:
+        {"text", "hints": [tags], "unread": int | None, "error": bool}. Clears them."""
         agent = self._invocations[invocation_id]
+        # shell.completed is quiet: the agent holds the job and collects it with
+        # job.result(). It still wakes a native wait through len(inbox) > announced.
+        loud = [event for event in agent.inbox if event["type"] != "shell.completed"]
+        new_events = len(loud) > agent.announced_loud
+        agent.announced_loud = len(loud)
         agent.announced = len(agent.inbox)
-        count = sum(not event["read"] for event in agent.inbox)
-        notices = []
+        count = sum(not event["read"] for event in loud)
+        notices: list[str] = []
+        hints: list[str] = []
+        if agent.notes:
+            for tag, text in agent.notes:
+                if tag not in agent.muted_hints:
+                    notices.append(text)
+                    hints.append(tag)
+            agent.notes.clear()
+        error = bool(agent.inbox_error)
         if agent.inbox_error:
             notices.append(agent.inbox_error)
-        if count:
+        # The unread count is announced when it changes or new events arrive, not on every
+        # turn: an event the agent has decided to leave unread would otherwise repeat the
+        # same line for the rest of the episode.
+        unread = None
+        if count and (new_events or count != agent.unread_announced):
+            unread = count
             notices.append(
                 f"Inbox: {count} unread events. Use rlm.inbox.list() and rlm.inbox.read(event_id) to inspect them."
             )
-        return "Supervisor: " + " ".join(notices) if notices else None
+        agent.unread_announced = count
+        if not notices:
+            return None
+        return {
+            "text": " ".join(notices),
+            "hints": hints,
+            "unread": unread,
+            "error": error,
+        }
+
+    def inbox_notification(self, invocation_id: str) -> str | None:
+        """The notices as one line (see inbox_notice for the structured form)."""
+        notice = self.inbox_notice(invocation_id)
+        return "Supervisor: " + notice["text"] if notice else None
 
     async def wait_for_events(self, invocation_id: str, timeout: float) -> str:
         agent = self._invocations[invocation_id]
+        self._note_wait_with_held_jobs(agent)
 
         def ready():
             return len(agent.inbox) > agent.announced or bool(agent.instructions)
@@ -589,7 +744,7 @@ class SessionTreeSupervisor:
             "agent", agent_id, start, self._invocations[agent_id].session.message_count
         )
 
-    def _publish_job_output(self, job: ShellJob, start: int) -> None:
+    def _publish_job_output(self, job: JobRecord, start: int) -> None:
         self._subscriptions.activity("job", job.info.id, start, job.info.output_bytes)
 
     async def _watch_operation(self, parent: _Invocation, request: dict) -> Any:
@@ -629,10 +784,10 @@ class SessionTreeSupervisor:
                 return await self._subscriptions.cancel(sub)
         return asdict(sub.info)
 
-    def _publish_job(self, job: ShellJob) -> None:
+    def _publish_job(self, job: JobRecord) -> None:
         self._subscriptions.finish("job", job.info.id)
         owner = self._invocations[job.info.owner_id]
-        if self._closed or owner.capability not in self._capabilities:
+        if self._closed or owner.capability not in self._capabilities or not job.notify:
             return
         self._publish(
             owner,
@@ -646,13 +801,76 @@ class SessionTreeSupervisor:
                     "output_complete": job.info.output_complete,
                     "output_truncated": job.info.output_truncated,
                     "error": job.info.error,
+                    # The last lines of output ride along so a completion can be judged
+                    # from the event alone; `await job.result()` gives the full text.
+                    "text": self._shell_jobs.read(
+                        job,
+                        max(0, job.info.output_bytes - COMPLETED_TAIL_BYTES),
+                        COMPLETED_TAIL_BYTES,
+                    )["text"],
                 },
                 job.source_request_id,
             ),
         )
 
+    @staticmethod
+    def _collect_expr(job: JobRecord) -> str:
+        """The exact expression that collects a job by id; markers and hints quote it
+        verbatim rather than naming a variable the caller may not have."""
+        return f'await (await rlm.shell.get("{job.info.id}")).result()'
+
+    @staticmethod
+    def _raise_unless_finished(job: JobRecord) -> None:
+        """A metadata/publication failure after the process itself finished must not
+        turn a captured result into a broker error (cancel() has the same guard)."""
+        if job.info.status not in ("completed", "failed", "timed_out", "cancelled"):
+            raise
+
+    def _finished_payload(self, job: JobRecord) -> dict:
+        output = self._shell_jobs.run_text(job)
+        return {
+            "id": job.info.id,
+            "text": output["text"],
+            "exit_code": job.info.exit_code,
+            "truncated": output["truncated"],
+            "error": job.info.error,
+            "timed_out": job.info.status == "timed_out",
+            "running": False,
+        }
+
+    def _running_payload(
+        self, job: JobRecord, marker: str, *, partial: bool = True
+    ) -> dict:
+        output = (
+            self._shell_jobs.read(job, 0, RUN_TEXT_BYTES)
+            if marker and partial
+            else {"text": "", "truncated": False}
+        )
+        return {
+            "id": job.info.id,
+            "text": marker + output["text"],
+            "exit_code": None,
+            "truncated": bool(marker and partial),
+            "error": None,
+            "timed_out": False,
+            "running": True,
+        }
+
     async def _shell_operation(self, parent: _Invocation, request: dict) -> Any:
         op = request["op"]
+        if op == "shell.setenv":
+            variables = request.get("variables") or {}
+            if any(
+                not k or "=" in k or "\0" in k or "\0" in v
+                for k, v in variables.items()
+            ):
+                raise ValueError(
+                    "environment variable names must be non-empty without '='"
+                )
+            parent.shell_env.update(variables)
+            return dict(parent.shell_env)
+        if op == "shell.getenv":
+            return dict(parent.shell_env)
         if op == "shell.run":
             command = request["command"]
             if not command.strip():
@@ -662,15 +880,101 @@ class SessionTreeSupervisor:
             )
             if blocked:
                 raise PermissionError(refusal(blocked))
+            self._note_env_prefixes(parent, command)
             cwd = Path(parent.cwd) / (request["cwd"] or ".")
-            return self._shell_jobs.start(
+            yield_after = request.get("yield_after")
+            block = (
+                RUN_DETACH_SECONDS
+                if yield_after is None
+                else min(float(yield_after), RUN_BLOCK_MAX_SECONDS)
+            )
+            info = self._shell_jobs.start(
                 owner_id=parent.id,
                 command=command,
                 cwd=str(cwd.resolve()),
                 directory=parent.session.dir,
-                env=build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                env={
+                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                    **parent.shell_env,
+                    **(request.get("env") or {}),
+                },
                 source_request_id=self._scopes[request["scope_id"]].request_id,
+                # yield_after= bounds how long run() blocks; timeout= is the kill deadline.
+                timeout=request.get("timeout"),
+                # A result handed back synchronously needs no inbox event on top; a job
+                # handed back while still running posts shell.completed when it ends.
+                notify=block == 0,
             )
+            job = self._shell_jobs.get(parent.id, info["id"])
+            if block == 0:
+                return self._running_payload(
+                    job,
+                    f"[started: job {job.info.id}; `res = {self._collect_expr(job)}` "
+                    "(or .result() on this object) returns the output when it finishes]\n",
+                    partial=False,
+                )
+            # Wait the caller's bound, then hand the job back running rather than
+            # blocking further or killing it.
+            try:
+                await asyncio.wait_for(asyncio.shield(job.task), block)
+            except asyncio.TimeoutError:
+                job.notify = True
+                if (
+                    yield_after is None
+                    and parent.long_run_notes < MAX_LONG_RUN_NOTES
+                    and "run-detach" not in parent.muted_hints
+                ):
+                    parent.long_run_notes += 1  # muted detaches do not spend the budget
+                    self._hint(
+                        parent,
+                        "run-detach",
+                        f"rlm.shell.run() returned after the default {RUN_DETACH_SECONDS:g} s "
+                        "wait with the command still running (.running is True on the "
+                        f"object it returned). Collect it with `res = {self._collect_expr(job)}` "
+                        "(or .result() on that object; it waits up to 300 s per call, so no "
+                        "native wait is needed). Pass yield_after=300 to wait longer up front, "
+                        "or yield_after=0 to return at once for commands you expect to take long.",
+                    )
+                return self._running_payload(
+                    job,
+                    f"[yielded after {block:g} s: job {job.info.id} is still running; "
+                    f"`res = {self._collect_expr(job)}` waits for it (up to 300 s per call; "
+                    ".result() on this object does the same); .cancel() on it stops it]\n",
+                )
+            except Exception:
+                self._raise_unless_finished(job)
+            return self._finished_payload(job)
+        if op == "shell.result":
+            job = self._shell_jobs.get(parent.id, request["job_id"])
+            yield_after = request.get("yield_after")
+            block = (
+                RUN_BLOCK_MAX_SECONDS
+                if yield_after is None
+                else min(float(yield_after), RUN_BLOCK_MAX_SECONDS)
+            )
+            if not job.task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(job.task), block)
+                except asyncio.TimeoutError:
+                    job.notify = True
+                    marker = (
+                        f"[yielded after {block:g} s: job {job.info.id} is still running; "
+                        f"`{self._collect_expr(job)}` waits again; .cancel() on it stops it]\n"
+                        if block
+                        else ""
+                    )
+                    return self._running_payload(job, marker)
+                except Exception:
+                    self._raise_unless_finished(job)
+            # Collected through the handle: its completion event needs no separate read.
+            for event in parent.inbox:
+                if (
+                    event["type"] == "shell.completed"
+                    and not event["read"]
+                    and event["content"].get("job_id") == job.info.id
+                ):
+                    event["read"] = True
+            return self._finished_payload(job)
         if op == "shell.list":
             return [
                 job.snapshot()
@@ -691,6 +995,13 @@ class SessionTreeSupervisor:
             return await self._watch_operation(parent, request)
         if op.startswith("shell."):
             return await self._shell_operation(parent, request)
+        if op.startswith("hints."):
+            tags = set(request.get("tags") or [])
+            if op == "hints.mute":
+                parent.muted_hints |= tags
+            elif op == "hints.unmute":
+                parent.muted_hints -= tags
+            return {"muted": sorted(parent.muted_hints)}
         if op == "inbox.list":
             return [
                 {

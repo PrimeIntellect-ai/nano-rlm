@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import re
 import logging
 import os
 import time
@@ -21,6 +22,7 @@ from rlm.client import (
     make_client,
     model_call_headers,
 )
+from rlm.provenance import agent_input, runtime_event
 from rlm.compaction import (
     CHECKPOINT_PROMPT,
     TOOL_OUTPUT_MAX_BYTES,
@@ -131,6 +133,56 @@ WAIT_SCHEMA = {
 }
 
 
+MAX_EMPTY_REPLY_NUDGES = 2
+EMPTY_REPLY_NUDGE = (
+    "Your last reply was empty (no text and no tool call). Continue the task: call a "
+    "tool, or state your final answer in plain text."
+)
+
+# A tool-less reply that announces the next step ("Let me look at the tests:") is a plan
+# whose tool call went missing, not a final answer; one nudge lets the model resume.
+MAX_PLAN_REPLY_NUDGES = 1
+
+# A SyntaxError from program text nested inside a Python string literal (the cell's own
+# code, not the program it wrote) earns a one-line hint on the delimiter fix, up to this
+# many times per prompt; muted with rlm.hints.mute("quote-nesting").
+MAX_QUOTE_NESTING_HINTS = 2
+_QUOTE_NESTING_RE = re.compile(r"Cell In\[\d+\][\s\S]{0,400}?SyntaxError: ")
+_TRIPLE_QUOTE_RE = re.compile(r"\"\"\"|'''")
+# A plain-quoted string that runs past its line: a heredoc or multi-line command pasted into
+# `run("...")`.
+_PLAIN_MULTILINE_RE = re.compile(r"[\"'][^\"'\n]*\n")
+QUOTE_NESTING_HINT = (
+    "That SyntaxError comes from program text nested inside a Python string literal. Pick a "
+    'delimiter the text does not contain: r"""...""" for source with \'\'\' or backslashes, '
+    "r'''...''' for source with \"\"\", or \"\\n\".join([...]) for both; for existing files use "
+    "the edit skill with short old_str/new_str hunks."
+)
+MULTILINE_COMMAND_HINT = (
+    "That SyntaxError comes from a multi-line command inside a plain-quoted Python string. "
+    "Write multi-line commands (heredocs, python -c, scripts) as a triple-quoted raw string: "
+    "r'''...''' (or r\"\"\"...\"\"\" when the text contains '''), so quotes, backslashes and "
+    "newlines inside need no escaping."
+)
+PLAN_REPLY_NUDGE = (
+    "Your last reply reads as a plan, not a final answer, and made no tool call. If the "
+    "task is complete, state what you changed; otherwise continue with the next action."
+)
+_PLAN_OPENER_RE = re.compile(
+    r"^(Let me|Let's|I'll|I will|Now let me|Now I|Next,? I|First,? I|I need to|I should)\b"
+)
+
+
+def _looks_like_plan(text: str) -> bool:
+    """A short reply that opens like a next step, or any reply that ends in a colon."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return stripped.endswith(":") or (
+        len(stripped) < 300 and bool(_PLAN_OPENER_RE.match(stripped))
+    )
+
+
 class RLMEngine:
     def __init__(
         self,
@@ -228,6 +280,9 @@ class RLMEngine:
         self._active_tools: list[BuiltinTool] = []
         self._active_tool_schemas: list[dict] = []
         self._turn = 0
+        self._empty_reply_nudges = 0
+        self._plan_reply_nudges = 0
+        self._quote_nesting_hints = 0
         self._last_answer = ""
         self._has_result = False
         self._started = False
@@ -263,6 +318,8 @@ class RLMEngine:
         """Run one user turn while preserving conversation and kernel state."""
         if self._closed or self._close_task is not None:
             raise RuntimeError("RLM engine is closed")
+        self._empty_reply_nudges = 0  # the nudge budget is per user turn
+        self._plan_reply_nudges = 0
 
         if self.session is not None:
             self.session.check_writable()
@@ -403,7 +460,8 @@ class RLMEngine:
             try:
                 await self._supervisor.start()
                 broker_endpoint = self._supervisor.endpoint_for(self._invocation_id)
-                self._active_tool_schemas.append(WAIT_SCHEMA)
+                if any(tool.name == "ipython" for tool in self._active_tools):
+                    self._active_tool_schemas.append(WAIT_SCHEMA)
                 if self.mcp_servers or "search" in self.skills:
                     reserved_names = {"rlm", *local_skills, *discover_skills()}
                     brokered_skills = self._supervisor.write_brokered_skill_modules(
@@ -469,16 +527,39 @@ class RLMEngine:
         if self._supervisor is not None:
             self._supervisor.agent_step(self._invocation_id, start)
 
+    def _note_quote_nesting(self, tool_output: str, code: str) -> None:
+        """Hint (at most MAX_QUOTE_NESTING_HINTS times) when the cell's own code fails to parse
+        while it is building program text in a string literal: the kernel reports the cell
+        (`Cell In[n]`), not a file, so the failure is the literal nesting, not the program.
+        Two shapes: a collision inside a triple-quoted literal, and a multi-line command
+        pasted into a plain-quoted one."""
+        if (
+            self._supervisor is None
+            or self._quote_nesting_hints >= MAX_QUOTE_NESTING_HINTS
+            or not _QUOTE_NESTING_RE.search(tool_output or "")
+        ):
+            return
+        if _TRIPLE_QUOTE_RE.search(code or ""):
+            text = QUOTE_NESTING_HINT
+        elif "\n" in (code or "") and _PLAIN_MULTILINE_RE.search(code or ""):
+            text = MULTILINE_COMMAND_HINT
+        else:
+            return  # an ordinary Python mistake, not literal nesting
+        self._quote_nesting_hints += 1
+        self._supervisor.hint(self._invocation_id, "quote-nesting", text)
+
     def _deliver_kernel_notices(self) -> None:
         if self._repl is None:
             return
         notices = self._pending_kernel_notices + self._repl.take_recovery_notices()
         self._pending_kernel_notices = []
         for notice in notices:
+            message, provenance = runtime_event("recovery", notice)
             self.session.log(
                 {
                     "type": "kernel_recovery",
-                    "message": {"role": "user", "content": notice},
+                    "message": message,
+                    "provenance": provenance,
                 },
                 in_context=True,
             )
@@ -493,20 +574,36 @@ class RLMEngine:
             self._invocation_id, include_queue=include_queue
         )
         for event in instructions:
-            message = {
-                "role": "user",
-                "content": f"Parent instruction:\n{event['content']}",
-            }
+            message, provenance = agent_input(
+                event["content"],
+                agent=event.get("sender_id"),
+                kind="steer" if event.get("type") == "steer" else "instruction",
+            )
             self.session.log(
-                {"type": "parent_message", "event_id": event["id"], "message": message},
+                {
+                    "type": "parent_message",
+                    "event_id": event["id"],
+                    "message": message,
+                    "provenance": provenance,
+                },
                 in_context=True,
             )
         if notify:
-            notification = self._supervisor.inbox_notification(self._invocation_id)
-            if notification:
-                message = {"role": "user", "content": notification}
+            notice = self._supervisor.inbox_notice(self._invocation_id)
+            if notice:
+                message, provenance = runtime_event(
+                    "notice",
+                    notice["text"],
+                    unread=notice["unread"],
+                    hints=notice["hints"],
+                    error="true" if notice["error"] else None,
+                )
                 self.session.log(
-                    {"type": "supervisor_notification", "message": message},
+                    {
+                        "type": "supervisor_notification",
+                        "message": message,
+                        "provenance": provenance,
+                    },
                     in_context=True,
                 )
         if instructions:
@@ -620,9 +717,56 @@ class RLMEngine:
             if not msg.tool_calls:
                 if self._deliver_supervisor_input(include_queue=True, notify=False):
                     continue
+                # An empty, tool-less reply that stopped normally is almost always a
+                # glitch (the model meant to call a tool and the call was lost), not a
+                # deliberate final answer: nudge it to continue, a bounded number of
+                # times, before accepting the empty answer.
+                if (
+                    not (msg.content or "").strip()
+                    # a lost tool call surfaces as "stop", as "tool_calls" with an
+                    # empty list, or with no finish reason at all; "length" is a
+                    # different failure handled by compaction
+                    and response.choices[0].finish_reason
+                    in (None, "stop", "tool_calls")
+                    and self._empty_reply_nudges < MAX_EMPTY_REPLY_NUDGES
+                ):
+                    self._empty_reply_nudges += 1
+                    message, provenance = runtime_event(
+                        "nudge", EMPTY_REPLY_NUDGE, reason="empty_reply"
+                    )
+                    self.session.log(
+                        {
+                            "type": "empty_reply_nudge",
+                            "message": message,
+                            "provenance": provenance,
+                        },
+                        in_context=True,
+                    )
+                    continue
+                if (
+                    _looks_like_plan(msg.content or "")
+                    and response.choices[0].finish_reason
+                    in (None, "stop", "tool_calls")
+                    and self._plan_reply_nudges < MAX_PLAN_REPLY_NUDGES
+                ):
+                    self._plan_reply_nudges += 1
+                    message, provenance = runtime_event(
+                        "nudge", PLAN_REPLY_NUDGE, reason="plan_reply"
+                    )
+                    self.session.log(
+                        {
+                            "type": "plan_reply_nudge",
+                            "message": message,
+                            "provenance": provenance,
+                        },
+                        in_context=True,
+                    )
+                    continue
                 self._metrics.stop_reason = "done"
                 final_text = msg.content or ""
                 break
+            self._empty_reply_nudges = 0
+            self._plan_reply_nudges = 0
 
             tc = msg.tool_calls[0]
             tool_name = tc.function.name
@@ -635,14 +779,21 @@ class RLMEngine:
                     set(tool_args) - {"timeout"}
                     or isinstance(timeout, bool)
                     or not isinstance(timeout, (int, float))
-                    or not 0 <= timeout <= 300
+                    or timeout < 0
                 ):
                     tool_result = ToolOutcome(
                         content="Error: wait accepts timeout between 0 and 300 seconds."
                     )
                 else:
+                    # A longer wait is not an error: clamp to the 300 s ceiling and say
+                    # so, instead of costing the model a turn to learn the limit.
+                    note = ""
+                    if timeout > 300:
+                        note = f"Note: wait timeout clamped from {timeout:g} to 300 seconds.\n"
+                        timeout = 300
                     tool_result = ToolOutcome(
-                        content=await self._supervisor.wait_for_events(
+                        content=note
+                        + await self._supervisor.wait_for_events(
                             self._invocation_id, timeout
                         )
                     )
@@ -725,6 +876,8 @@ class RLMEngine:
                 call_id=tc.id,
                 context_content=content,
             )
+            if tool_name == "ipython":
+                self._note_quote_nesting(result, str(tool_args.get("code") or ""))
             self._publish_agent_step(step_start)
             self._deliver_kernel_notices()
             messages = self.session.messages
@@ -1070,13 +1223,16 @@ class RLMEngine:
             + summary_text
             + "\n\nFull conversation history is available in "
             + str(self.session.dir / "messages.jsonl")
-            + ". Use `from rlm import history; h = history()` to inspect "
+            + ". Use `from rlm import history; h = await history()` to inspect "
             "`h.windows[w].messages[i]`, `h.messages[i]`, or `h.user_messages()`. "
             "Search or read relevant records with Python when the summary lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
             "identifies the user record whose attempt was rolled back."
         )
+        compaction_message, _provenance = runtime_event(
+            "compaction", compacted_user_content
+        )
         window = self.session.replace_context(
-            [system_msg, {"role": "user", "content": compacted_user_content}],
+            [system_msg, compaction_message],
             reason="compaction",
         )
         self._last_good = len(self.session.messages)
@@ -1164,9 +1320,7 @@ class RLMEngine:
         return snapshot
 
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
-        if self.system_prompt_path:
-            return Path(self.system_prompt_path).read_text()
-        system_prompt = build_system_prompt(
+        return build_system_prompt(
             self.cwd,
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
@@ -1176,10 +1330,14 @@ class RLMEngine:
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
+            task_instructions=Path(self.system_prompt_path).read_text()
+            if self.system_prompt_path
+            else None,
+            extra_instructions=self.append_to_system_prompt,
+            agent_info=self._supervisor.agent_context(self._invocation_id)
+            if self._supervisor
+            else None,
         )
-        if self.append_to_system_prompt:
-            system_prompt += "\n\n" + self.append_to_system_prompt
-        return system_prompt
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:
         return ToolContext(

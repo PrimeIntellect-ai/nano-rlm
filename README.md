@@ -2,7 +2,7 @@
 
 A minimal CLI coding agent with a persistent IPython execution environment and optional recursive sub-agents. For a full-fledged coding agent built on the same RLM principles, see [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, shell commands via `!command`, and multi-line shell scripts via `%%bash`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
+By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, and Bash commands and background jobs via `rlm.shell.run`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
 
 For convenience, rlm ships built-in *skills* that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via the contract's `builtin_tools`).
 
@@ -87,6 +87,24 @@ environment, search credential). Prompt configuration is role-aware: optional
 for sub-agents, each falling back to the next-more-general tier. Recursive children inherit the parent's configuration
 in-memory (`model_copy`); nothing is re-read from the process environment.
 
+`system_prompt_path` supplies task instructions in place of the default task role.
+The runtime guide is always appended, including when a custom prompt file is used.
+The role-appropriate append instructions are included between the task instructions
+and runtime guide. This keeps tool/API documentation and lifecycle rules available
+to root agents, persistent children, and leaves. Credentials are not included in
+agent identity metadata.
+
+The generated guide distinguishes Python state from supervisor-owned resources,
+shows inbox dictionaries versus handle/metadata objects, and explains waiting,
+completion, history recovery, jobs, and subscriptions. Delegation instructions are
+shown only when IPython and recursion are available. Tool descriptions follow the
+same shell execution guidance.
+
+Checkpoint prompts preserve task requirements, evidence, outstanding assignments,
+jobs, subscriptions, event actions, output cursors, and history references. Commands
+and edits are included only when relevant. Compaction thresholds, summary validation,
+and context retention policy are unchanged.
+
 The process environment configures only process infrastructure:
 
 | Variable | Default | Description |
@@ -105,7 +123,7 @@ other = await rlm.agent.spawn(task="Check login behavior", name="login")
 
 agents = await rlm.agent.list()          # Direct children, including completed agents
 info = await researcher.info()          # Fresh metadata snapshot
-h = researcher.history()                # Fresh conversation snapshot
+h = await researcher.history()          # Fresh conversation snapshot
 researcher = await rlm.agent.get("researcher")  # Recover by sibling name or ID
 ```
 
@@ -143,7 +161,7 @@ for event in await rlm.inbox.list():
 
 Parent instructions are pushed into the child's conversation. Steering does not interrupt a running model request or tool. Queued messages wait until the child answers or calls the native `wait` tool. Both operations wake an idle persistent child; sending to a terminated child raises.
 
-Reports and `agent.completed` events enter the parent's inbox at every depth. The model sees an unread count before each inference step and chooses when to retrieve payloads. `list()` returns metadata without marking events read; `read(id)` returns the payload and marks it read. `list(unread_only=False)` includes previously read events. Completion payloads identify the agent and status; retrieve the answer with its handle's `result()`.
+Reports and `agent.completed` events enter the parent's inbox at every depth. The model sees the unread count whenever it changes or new events arrive, and chooses when to retrieve payloads. `list()` returns metadata without marking events read; `read(id)` returns the payload and marks it read. `list(unread_only=False)` includes previously read events. Completion payloads identify the agent and status; retrieve the answer with its handle's `result()`.
 
 ACP dependency edges use `agent_message` for delivered instructions and explicitly read inbox events. Spawning uses `subagent_call`; retrieving an answer uses `subagent_return`. Delivery policy and event type remain in the event records. An unread-count notification alone creates no `agent_message` edge.
 
@@ -172,7 +190,7 @@ The kernel can inspect its own history or a child's, including while the child i
 ```python
 from rlm import history
 
-h = history()                        # Defaults to $RLM_SESSION_DIR
+h = await history()                  # Defaults to $RLM_SESSION_DIR
 requests = h.user_messages()          # Original inputs, including rolled-back attempts
 message = h.messages[3]               # Session-wide message index
 earlier = h.windows[0].messages       # Initial working context
@@ -324,27 +342,56 @@ Agent execution status and cleanup are separate: `info.cleanup_error` reports fa
 
 `send()` and `steer()` return acceptance IDs, not processing acknowledgements. They reject instructions when the tree budget is already exhausted. If an accepted instruction cannot be delivered because the budget runs out or the child terminates, the supervisor records `instruction_failed` in the child's inbox journal and sends the parent an `agent.delivery_failed` event containing `agent_id`, `message_id`, and `reason`. Failed instructions are removed from the pending queue.
 
-### Background Bash jobs
+### Bash commands and background jobs
 
-Inside IPython, register a supervisor-owned Bash job and keep working:
+For quick commands, wait for the result in the current cell:
 
 ```python
-job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project")
-job_id = job.id
-await job.info()
-
-# In a later cell, recover the same job and inspect its output.
-job = await rlm.shell.get(job_id)
-chunk = await job.read(cursor=0, max_bytes=16384)
-print(chunk.text)
-# Continue from chunk.next_cursor; reading is repeatable.
-await rlm.shell.list()
+result = await rlm.shell.run("git status --short")
+print(result.text, result.exit_code)
 ```
 
-Use the native `wait` tool when there is no other work. Termination produces a
-`shell.completed` inbox event with the job ID, status, exit code, and output
-completeness flags. Read it with `rlm.inbox.read(event_id)`. A nonzero Bash exit
-code is a completed process; startup/capture errors have status `failed`.
+`run(command, cwd=..., env=..., yield_after=10, timeout=None)` returns a `ShellJob`: a snapshot with `running`,
+`ok`, combined stdout/stderr `text` (up to 16 KiB: the first and last 8 KiB around an
+omitted-range marker when longer), `exit_code`, `id`, `truncated`, `error` and `timed_out`, plus the
+methods `result()`, `read()`, `info()` and `cancel()`. `yield_after` is how long `run()`
+waits before yielding a handle instead of a result: 10 s by default, 0 returns at once, capped
+at 300. A command still going then comes back with `running=True` and the output so far while
+the job continues; nothing is killed by yielding. `timeout`, if given, kills the process group after that many seconds and
+sets `timed_out`. `await job.result(yield_after=...)` waits (up to 300 s per call) and returns
+the finished snapshot, again with `running=True` if the job is still not done; it is
+repeatable and never consumes output. The command is a Bash string or an argv list. Nonzero
+exit codes are returned; startup/capture errors populate `error`. If output is truncated,
+`await job.read(cursor=..., max_bytes=...)` reads the retained output (16 MiB per job).
+Cancelling the waiting cell leaves the job running and discoverable with `shell.list()`;
+`shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a quiet
+`shell.completed` inbox event (job ID, status, exit code, completeness flags and the last
+4 KiB of output); quiet means it wakes the native `wait` tool but is not counted in the unread
+notice, and `result()` marks it read. `await rlm.shell.setenv(NAME='value')` sets variables
+for every later `run()` of the agent (`getenv()` reads the overlay; per-call `env=` wins).
+The kernel and Bash jobs inherit the launching process's environment (in a sandbox, the
+image's ENV) minus a blocklist: credential-looking names, values with URL-embedded
+credentials, variables that would redirect the kernel's own interpreter or venv (PYTHONHOME,
+UV_PYTHON, ...), and agent/daemon sockets.
+
+For long commands or work that should run alongside other tasks, pass `yield_after=0` and
+collect with `result()`:
+
+```python
+job = await rlm.shell.run("uv run pytest tests/", cwd="/workspace/project", yield_after=0)
+# ... other work ...
+res = await job.result()
+print(res.exit_code, res.text)
+
+# Several jobs at once, and recovery of a job in a later cell:
+a, b = await asyncio.gather(job_a.result(), job_b.result())
+job = await rlm.shell.get(job_id)
+chunk = await job.read(cursor=0, max_bytes=16384)   # continue from chunk.next_cursor
+```
+
+Use the native `wait` tool when there is no other work and you hold no running job; a held
+job is collected with `result()`. A nonzero Bash exit code is a completed process;
+startup/capture errors have status `failed`.
 
 `await job.cancel()` terminates its process group. Jobs survive cell completion
 and lost handle variables; owner termination cancels them. Commands run in
@@ -418,7 +465,7 @@ Events enter the same pull-based inbox and carry `subscription_id`. Their
 
 | Event | References |
 | --- | --- |
-| `watch.agent` | `start` and exclusive `end` message indices: `researcher.history().messages[start:end]` |
+| `watch.agent` | `start` and exclusive `end` message indices: `(await researcher.history()).messages[start:end]` |
 | `watch.job` | `start` and exclusive `end` byte cursors for `job.read(cursor=start)` |
 | `watch.path` | Changed `paths` and a `truncated` flag |
 | `watch.failed` | An `error` explaining why the subscription stopped |

@@ -9,7 +9,7 @@ from rlm.history import history
 from rlm.session import Session
 
 
-def test_window_addresses_survive_compaction_and_rollback(tmp_path):
+async def test_window_addresses_survive_compaction_and_rollback(tmp_path):
     session = Session(tmp_path)
     system = {"role": "system", "content": "system"}
     user = {"role": "user", "content": "original task"}
@@ -20,14 +20,14 @@ def test_window_addresses_survive_compaction_and_rollback(tmp_path):
         session.log({"type": "system", "message": system}, in_context=True)
         session.log({"type": "user", "message": user}, in_context=True)
         session.log_assistant(0, None, answer)
-        first = history(tmp_path)
+        first = await history(tmp_path)
         session.replace_context([system, user, summary], reason="compaction")
         checkpoint = list(session.context_indices)
         session.log({"type": "user", "message": followup}, in_context=True)
         session.replace_context(
             [system, user, summary], reason="rollback", indices=checkpoint
         )
-        current = history(tmp_path)
+        current = await history(tmp_path)
         assert first.windows[0].messages == [system, user, answer]
         assert current.windows[0].messages == first.windows[0].messages
         assert current.windows[1].messages == [system, user, summary, followup]
@@ -41,13 +41,13 @@ def test_window_addresses_survive_compaction_and_rollback(tmp_path):
         session.close()
 
 
-def test_full_tool_output_has_a_separate_index_from_context_text(tmp_path):
+async def test_full_tool_output_has_a_separate_index_from_context_text(tmp_path):
     session = Session(tmp_path)
     try:
         context_message = session.log_tool_result(
             0, "ipython", "full result", 0, call_id="tool-1", context_content="short"
         )
-        snapshot = history(tmp_path)
+        snapshot = await history(tmp_path)
         assert snapshot.messages == [
             {"role": "tool", "tool_call_id": "tool-1", "content": "full result"},
             context_message,
@@ -60,7 +60,7 @@ def test_full_tool_output_has_a_separate_index_from_context_text(tmp_path):
         session.close()
 
 
-def test_live_reader_ignores_unfinished_record_and_sees_it_on_next_read(tmp_path):
+async def test_live_reader_ignores_unfinished_record_and_sees_it_on_next_read(tmp_path):
     path = tmp_path / "messages.jsonl"
     data = json.dumps(
         {
@@ -72,17 +72,19 @@ def test_live_reader_ignores_unfinished_record_and_sees_it_on_next_read(tmp_path
     ).encode()
     boundary = data.index("新".encode()) + 1
     path.write_bytes(data[:boundary])
-    assert history(tmp_path).messages == []
+    assert (await history(tmp_path)).messages == []
     with pytest.raises(FileExistsError):
         Session(tmp_path)
     assert path.read_bytes() == data[:boundary]
     with path.open("ab") as stream:
         stream.write(data[boundary:] + b"\n")
-    assert history(tmp_path).user_messages() == [{"role": "user", "content": "新"}]
+    assert (await history(tmp_path)).user_messages() == [
+        {"role": "user", "content": "新"}
+    ]
 
 
 @pytest.mark.parametrize("failure", ["write", "flush"])
-def test_failed_writer_rejects_further_appends(tmp_path, failure):
+async def test_failed_writer_rejects_further_appends(tmp_path, failure):
     session = Session(tmp_path)
     stream = session._msg_file
     session._msg_file = Mock(wraps=stream)
@@ -111,7 +113,7 @@ def test_failed_writer_rejects_further_appends(tmp_path, failure):
         stream.close()
 
 
-def test_read_live_session_history_from_explicit_directory(tmp_path):
+async def test_read_live_session_history_from_explicit_directory(tmp_path):
     parent = Session(tmp_path / "parent")
     child = Session(Session.child_dir(parent.dir))
     try:
@@ -120,12 +122,12 @@ def test_read_live_session_history_from_explicit_directory(tmp_path):
             {"type": "user", "message": {"role": "user", "content": "research"}},
             in_context=True,
         )
-        root = history(parent.dir)
+        root = await history(parent.dir)
         assert root.events[0]["child_dir"] == child.dir.name
         assert root.events[0]["prompt"] == "research"
-        earlier = history(session_dir=child.dir)
+        earlier = await history(session_dir=child.dir)
         child.log_assistant(0, None, {"role": "assistant", "content": "working"})
-        current = history(session_dir=child.dir)
+        current = await history(session_dir=child.dir)
         assert len(earlier.windows[0].messages) == 1
         assert current.windows[0].messages[-1] == {
             "role": "assistant",

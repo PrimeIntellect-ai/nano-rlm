@@ -92,7 +92,7 @@ print('MESSAGING_OK')
     try:
         result = await engine.run("coordinate")
         assert result.answer == "done"
-        logs = history(session.dir)
+        logs = await history(session.dir)
         tool_text = "\n".join(
             e["content"] for e in logs.events if e["type"] == "tool_result"
         )
@@ -105,7 +105,7 @@ print('MESSAGING_OK')
             for agent in supervisor._invocations.values()
             if agent.parent_id == supervisor.root_id
         )
-        child_history = history(child.session.dir)
+        child_history = await history(child.session.dir)
         instructions = [
             e["message"]["content"]
             for e in child_history.events
@@ -121,12 +121,14 @@ print('MESSAGING_OK')
         queued_instruction = next(
             i
             for i, m in enumerate(messages)
-            if m.get("content") == "Parent instruction:\nqueued task"
+            if "queued task" in str(m.get("content"))
+            and str(m.get("content")).startswith('<agent_input from="parent"')
         )
         steering_instruction = next(
             i
             for i, m in enumerate(messages)
-            if m.get("content") == "Parent instruction:\nsteering task"
+            if "steering task" in str(m.get("content"))
+            and 'kind="steer"' in str(m.get("content"))
         )
         assert steering_instruction < initial_answer < queued_instruction
         assert any(
@@ -388,8 +390,106 @@ async def test_running_instruction_failure_at_tree_budget(
         assert not any(e["type"] == "instructions_delivered" for e in records)
         assert not any(
             "must not be marked delivered" in str(m.get("content", ""))
-            for m in history(child.session.dir).messages
+            for m in (await history(child.session.dir)).messages
         )
     finally:
         release.set()
         await supervisor.aclose()
+
+
+async def test_inbox_notice_repeats_only_when_the_count_changes(session):
+    supervisor = SessionTreeSupervisor(
+        root_session=session, runtime_config=_config(), cwd=str(session.dir)
+    )
+    await supervisor.start()
+    scope = await supervisor.open_scope(supervisor.root_id)
+    endpoint = supervisor.endpoint_for(supervisor.root_id)
+    owner = supervisor._invocations[supervisor.root_id]
+    try:
+        assert supervisor.inbox_notification(owner.id) is None
+        first = supervisor._event(owner, "agent.completed", {"agent_id": "a"}, None)
+        supervisor._publish(owner, first)
+        assert "Inbox: 1 unread" in supervisor.inbox_notification(owner.id)
+        # nothing changed: the same line is not repeated on the next turns
+        assert supervisor.inbox_notification(owner.id) is None
+        assert supervisor.inbox_notification(owner.id) is None
+        second = supervisor._event(owner, "agent.completed", {"agent_id": "b"}, None)
+        supervisor._publish(owner, second)
+        assert "Inbox: 2 unread" in supervisor.inbox_notification(owner.id)
+        await supervisor._agent_operation(
+            dict(
+                op="inbox.read",
+                capability=endpoint.capability,
+                scope_id=scope,
+                event_id=first["id"],
+            )
+        )
+        assert "Inbox: 1 unread" in supervisor.inbox_notification(owner.id)
+        assert supervisor.inbox_notification(owner.id) is None
+        # shell.completed is quiet: it is listable and wakes wait, but not announced.
+        quiet = supervisor._event(owner, "shell.completed", {"job_id": "j"}, None)
+        supervisor._publish(owner, quiet)
+        assert supervisor.inbox_notification(owner.id) is None
+        assert sum(not e["read"] for e in owner.inbox) == 2
+    finally:
+        await supervisor.aclose()
+
+
+async def test_muted_hint_is_not_queued(session):
+    supervisor = SessionTreeSupervisor(
+        root_session=session, runtime_config=_config(), cwd=str(session.dir)
+    )
+    await supervisor.start()
+    owner = supervisor._invocations[supervisor.root_id]
+    try:
+        supervisor.hint(owner.id, "run-detach", "first")
+        assert [tag for tag, _ in owner.notes] == ["run-detach"]
+        owner.notes.clear()
+        owner.muted_hints.add("run-detach")
+        supervisor.hint(owner.id, "run-detach", "second")
+        assert owner.notes == []
+        owner.muted_hints.discard("run-detach")
+        supervisor.hint(owner.id, "run-detach", "third")
+        assert [tag for tag, _ in owner.notes] == ["run-detach"]
+    finally:
+        await supervisor.aclose()
+
+
+def test_runtime_event_and_agent_input_delimiters():
+    from rlm.provenance import agent_input, runtime_event
+
+    message, provenance = runtime_event(
+        "notice",
+        "Inbox: 2 unread events.",
+        unread=2,
+        hints=["env-prefix", "quote-nesting"],
+    )
+    assert message["role"] == "user"
+    assert message["content"] == (
+        '<runtime_event kind="notice" unread="2" hints="env-prefix,quote-nesting">\n'
+        "Inbox: 2 unread events.\n</runtime_event>"
+    )
+    assert provenance == {
+        "source": "runtime",
+        "kind": "notice",
+        "unread": 2,
+        "hints": ["env-prefix", "quote-nesting"],
+    }
+    # empty attributes are dropped, quotes are escaped
+    message, provenance = runtime_event("recovery", 'said "hi"', hints=[], unread=None)
+    assert (
+        message["content"]
+        == '<runtime_event kind="recovery">\nsaid "hi"\n</runtime_event>'
+    )
+    assert provenance == {"source": "runtime", "kind": "recovery"}
+    message, provenance = agent_input("do x", agent="abc", kind="steer")
+    assert (
+        message["content"]
+        == '<agent_input from="parent" agent="abc" kind="steer">\ndo x\n</agent_input>'
+    )
+    assert provenance == {
+        "source": "agent",
+        "from": "parent",
+        "kind": "steer",
+        "agent": "abc",
+    }
