@@ -399,7 +399,7 @@ def build_system_prompt(
             )
         if depth > 0:
             parts.append(
-                "Use `await rlm.agent.send_to_parent(message)` to put a report in your immediate parent's inbox; it returns an event ID. Your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
+                "Your final answer is your deliverable: it reaches your parent as an `agent.completed` event and through `result()`. Use `await rlm.agent.send_to_parent(message)` for interim findings, blockers or questions, not to repeat the final report; it returns an event ID and your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
             )
         else:
             parts.append(
