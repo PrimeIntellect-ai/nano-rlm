@@ -28,8 +28,6 @@ class Subscription:
     timer: asyncio.TimerHandle | None = None
     task: asyncio.Task | None = None
     ready: asyncio.Event = field(default_factory=asyncio.Event)
-    # progress subscriptions: {"every_turns": n, "every_tokens": m} plus the next
-    # multiples to fire at ("next_turns"/"next_tokens"), kept here, not in info
     thresholds: dict = field(default_factory=dict)
 
 
