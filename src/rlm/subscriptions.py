@@ -28,6 +28,7 @@ class Subscription:
     timer: asyncio.TimerHandle | None = None
     task: asyncio.Task | None = None
     ready: asyncio.Event = field(default_factory=asyncio.Event)
+    thresholds: dict = field(default_factory=dict)
 
 
 class Subscriptions:
@@ -49,6 +50,7 @@ class Subscriptions:
         cursor: int = 0,
         recursive: bool = False,
         completed: bool = False,
+        thresholds: dict | None = None,
     ) -> Subscription:
         if len(self.items) >= MAX_SUBSCRIPTIONS:
             raise RuntimeError("subscription limit reached")
@@ -70,9 +72,47 @@ class Subscriptions:
             ),
             cursor,
         )
+        if thresholds:
+            sub.thresholds = dict(thresholds)
         self.record(sub)
         self.items[sub.info.id] = sub
         return sub
+
+    def progress(
+        self, target: str, turns: int, tokens: int, end: int, extra: dict
+    ) -> None:
+        """Fire `watch.progress` for every active progress subscription on `target` whose
+        turn or token threshold was crossed since it last fired; the content carries the
+        child's counters and the history slice start:end since the previous event."""
+        for sub in self.items.values():
+            if sub.info.status != "active" or sub.info.kind != "progress":
+                continue
+            if sub.info.target != target:
+                continue
+            th = sub.thresholds
+            fire = False
+            every = th.get("every_turns")
+            if every and turns >= th.get("next_turns", every):
+                th["next_turns"] = (turns // every + 1) * every
+                fire = True
+            every = th.get("every_tokens")
+            if every and tokens >= th.get("next_tokens", every):
+                th["next_tokens"] = (tokens // every + 1) * every
+                fire = True
+            if not fire:
+                continue
+            payload = {
+                "turns": turns,
+                "tokens": tokens,
+                "start": sub.cursor,
+                "end": end,
+                **extra,
+            }
+            sub.cursor = end
+            try:
+                self.publish(sub, "watch.progress", payload)
+            except Exception as exc:
+                self._fail(sub, str(exc))
 
     async def path(self, owner_id: str, target: Path, recursive: bool) -> Subscription:
         if not target.exists():

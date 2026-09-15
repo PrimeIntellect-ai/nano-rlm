@@ -251,9 +251,10 @@ async def test_auto_wake_preserves_completed_result_for_waiter(
             "scope_id": scope,
             "agent_id": child.id,
         }
-        assert (
-            await supervisor._agent_operation({**request, "op": "agent.result"}) is None
+        pending = await supervisor._agent_operation(
+            {**request, "op": "agent.result", "yield_after": 0}
         )
+        assert pending["answer"] is None and pending["status"] == "running"
         waiter = asyncio.create_task(
             supervisor._agent_operation({**request, "op": "agent.wait", "timeout": 5})
         )
@@ -266,13 +267,20 @@ async def test_auto_wake_preserves_completed_result_for_waiter(
         await asyncio.wait_for(resumed.wait(), 5)
         assert not child.done.is_set()
         assert parent.inbox[-1]["type"] == "agent.completed"
-        result = await supervisor._agent_operation({**request, "op": "agent.result"})
-        assert result["answer"] == "first answer"
+        completed = parent.inbox[-1]["content"]
+        assert completed["name"] == "worker" and completed["status"] == "idle"
+        assert completed["answer"] == "first answer" and completed["error"] is None
+        result = await supervisor._agent_operation(
+            {**request, "op": "agent.result", "yield_after": 0}
+        )
+        assert result["answer"] == "first answer" and result["status"] == "running"
         child.status = terminal_status
         child.error = "follow-up stopped"
         assert not child.done.is_set()
         with pytest.raises(RuntimeError, match="follow-up stopped"):
-            await supervisor._agent_operation({**request, "op": "agent.result"})
+            await supervisor._agent_operation(
+                {**request, "op": "agent.result", "yield_after": 0}
+            )
         child.status = "running"
     finally:
         await supervisor.aclose()
@@ -493,3 +501,71 @@ def test_runtime_event_and_agent_input_delimiters():
         "kind": "steer",
         "agent": "abc",
     }
+
+
+async def test_progress_thresholds_fire_on_turn_and_token_multiples():
+    from rlm.subscriptions import Subscriptions
+
+    events = []
+    subs = Subscriptions(
+        lambda sub, kind, content: events.append((kind, content)), lambda sub: None
+    )
+    sub = subs.register(
+        "parent",
+        "progress",
+        "child",
+        cursor=3,
+        thresholds={"every_turns": 2, "every_tokens": 1000},
+    )
+    assert sub.info.kind == "progress" and sub.thresholds == {
+        "every_turns": 2,
+        "every_tokens": 1000,
+    }
+    subs.progress(
+        "child", 1, 300, 5, {"name": "w", "status": "running"}
+    )  # below both thresholds
+    assert events == []
+    subs.progress("child", 2, 600, 8, {"name": "w", "status": "running"})  # 2nd turn
+    assert events == [
+        (
+            "watch.progress",
+            {
+                "turns": 2,
+                "tokens": 600,
+                "start": 3,
+                "end": 8,
+                "name": "w",
+                "status": "running",
+            },
+        )
+    ]
+    subs.progress(
+        "child", 3, 1200, 11, {"name": "w", "status": "running"}
+    )  # tokens crossed 1000
+    assert (
+        events[-1][1]["tokens"] == 1200
+        and events[-1][1]["start"] == 8
+        and events[-1][1]["end"] == 11
+    )
+    subs.progress(
+        "child", 4, 1300, 12, {"name": "w", "status": "running"}
+    )  # 4th turn (next multiple)
+    assert len(events) == 3 and events[-1][1]["turns"] == 4
+    subs.progress(
+        "other", 10, 10**6, 1, {"name": "x", "status": "running"}
+    )  # different target: nothing
+    assert len(events) == 3
+    subs.finish("progress", "child")
+    assert sub.info.status == "completed"
+    subs.progress(
+        "child", 6, 5000, 20, {"name": "w", "status": "completed"}
+    )  # finished: nothing
+    assert len(events) == 3
+
+
+async def test_agent_handle_carries_the_sibling_name(session):
+    from rlm.agent import AgentHandle
+
+    h = AgentHandle("abc", session.dir, "worker")
+    assert (h.id, h.name) == ("abc", "worker")
+    assert AgentHandle("abc", session.dir).name is None

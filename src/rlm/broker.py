@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
-from rlm.types import RLMResult
+from rlm.types import AgentResult, RLMResult
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -67,10 +67,19 @@ class BrokerAgentListRequest(TypedDict):
 
 class BrokerAgentHandleRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
-    op: Literal["agent.info", "agent.result", "agent.cancel"]
+    op: Literal["agent.info", "agent.cancel"]
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
     agent_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerAgentResultRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.result"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+    yield_after: Annotated[float, Field(ge=0)]
 
 
 class BrokerAgentWaitRequest(TypedDict):
@@ -183,6 +192,8 @@ class BrokerWatchAgentRequest(TypedDict):
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
     agent_id: Annotated[str, Field(min_length=1)]
+    every_turns: NotRequired[Annotated[int, Field(gt=0)] | None]
+    every_tokens: NotRequired[Annotated[int, Field(gt=0)] | None]
 
 
 class BrokerWatchJobRequest(TypedDict):
@@ -231,6 +242,7 @@ BrokerRequest = Annotated[
     | BrokerAgentGetRequest
     | BrokerAgentListRequest
     | BrokerAgentHandleRequest
+    | BrokerAgentResultRequest
     | BrokerAgentWaitRequest
     | BrokerSkillRequest
     | BrokerAgentMessageRequest
@@ -269,7 +281,8 @@ _RESPONSE_ADAPTER = TypeAdapter(BrokerResponse)
 
 
 _RESULT_ADAPTER = TypeAdapter(RLMResult)
-_RESULT_FIELDS = {"answer", "session_dir", "usage", "turns"}
+_AGENT_RESULT_ADAPTER = TypeAdapter(AgentResult)
+_RESULT_FIELDS = {"status", "answer", "session_dir", "usage", "turns"}
 _USAGE_FIELDS = {"prompt_tokens", "completion_tokens"}
 
 
@@ -284,14 +297,18 @@ def result_to_payload(result: RLMResult) -> dict[str, Any]:
     return _RESULT_ADAPTER.dump_python(result, mode="json")
 
 
-def result_from_payload(value: dict[str, Any]) -> RLMResult:
+def agent_result_to_payload(result: AgentResult) -> dict[str, Any]:
+    return _AGENT_RESULT_ADAPTER.dump_python(result, mode="json")
+
+
+def result_from_payload(value: dict[str, Any]) -> AgentResult:
     usage = value.get("usage")
     if set(value) != _RESULT_FIELDS or not isinstance(usage, dict):
         raise RuntimeError("invalid response from RLM supervisor")
     if set(usage) != _USAGE_FIELDS:
         raise RuntimeError("invalid response from RLM supervisor")
     try:
-        return _RESULT_ADAPTER.validate_python(value)
+        return _AGENT_RESULT_ADAPTER.validate_python(value)
     except ValidationError:
         raise RuntimeError("invalid response from RLM supervisor") from None
 
