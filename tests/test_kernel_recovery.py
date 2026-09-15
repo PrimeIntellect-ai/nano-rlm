@@ -48,7 +48,7 @@ child = await rlm.agent.spawn('keep state', name='worker', persistent=True)
 await child.wait(timeout=10)
 events = await rlm.inbox.list()
 await rlm.inbox.read(events[0]['id'])
-job = await rlm.shell.run('sleep 0.2; printf SURVIVED')
+job = await rlm.shell.run('sleep 0.2; printf SURVIVED', yield_after=0)
 with Path('side-effect').open('a') as stream:
     stream.write('once')
 import os
@@ -61,7 +61,7 @@ assert Path('side-effect').read_text() == 'once'
 assert len(await rlm.agent.list()) == 1
 child = await rlm.agent.get('worker')
 assert (await child.result()).answer == 'ready'
-assert child.history().user_messages()
+assert (await child.history()).user_messages()
 await child.send('verify your Python state')
 await child.wait(timeout=10)
 assert (await child.result()).answer == 'resumed'
@@ -70,8 +70,10 @@ assert len(jobs) == 1
 job = await rlm.shell.get(jobs[0].id)
 assert (await job.read()).text == 'SURVIVED'
 events = await rlm.inbox.list(unread_only=False)
-assert sum(event['read'] for event in events) == 1
-assert any(not event['read'] for event in events)
+# the agent event was read in the first cell; recovering the finished job through
+# shell.get() collected it, which marks its quiet shell.completed event read too
+assert sum(event['read'] for event in events) == 2
+assert {e['type'] for e in events if e['read']} >= {'shell.completed'}
 for event in await rlm.inbox.list():
     await rlm.inbox.read(event['id'])
 print('RECOVERY_OK')

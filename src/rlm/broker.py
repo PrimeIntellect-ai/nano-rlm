@@ -7,6 +7,7 @@ import inspect
 import json
 import keyword
 import struct
+import time
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -28,6 +29,7 @@ class BrokerEndpoint:
 
 _endpoint: BrokerEndpoint | None = None
 _scope_id: str | None = None
+_cell_deadline: float | None = None
 
 _JSON_TO_PY = {
     "string": str,
@@ -122,6 +124,34 @@ class BrokerShellRunRequest(TypedDict):
     scope_id: Annotated[str, Field(min_length=1)]
     command: Annotated[str, Field(min_length=1, max_length=65_536)]
     cwd: str | None
+    yield_after: Annotated[float, Field(ge=0)] | None
+    timeout: Annotated[float, Field(gt=0)] | None
+    env: dict[str, str] | None
+
+
+class BrokerShellResultRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["shell.result"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    job_id: Annotated[str, Field(min_length=1)]
+    yield_after: Annotated[float, Field(ge=0)] | None
+
+
+class BrokerShellEnvRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["shell.setenv", "shell.getenv"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    variables: dict[str, str] | None
+
+
+class BrokerHintsRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["hints.mute", "hints.unmute", "hints.muted"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    tags: list[Annotated[str, Field(min_length=1, max_length=64)]]
 
 
 class BrokerShellListRequest(TypedDict):
@@ -210,8 +240,11 @@ BrokerRequest = Annotated[
     | BrokerInboxListRequest
     | BrokerInboxReadRequest
     | BrokerShellRunRequest
+    | BrokerShellResultRequest
     | BrokerShellListRequest
     | BrokerShellHandleRequest
+    | BrokerShellEnvRequest
+    | BrokerHintsRequest
     | BrokerShellReadRequest
     | BrokerWatchAgentRequest
     | BrokerWatchJobRequest
@@ -270,9 +303,18 @@ def configure(endpoint: BrokerEndpoint | None) -> None:
     _endpoint = endpoint
 
 
-def set_scope(scope_id: str | None) -> None:
+def set_scope(scope_id: str | None, timeout: float | None = None) -> None:
     global _scope_id
     _scope_id = scope_id
+    global _cell_deadline
+    _cell_deadline = None if timeout is None else time.monotonic() + timeout
+
+
+def shell_wait(seconds: float) -> float:
+    """Leave time for the broker response before the execution kernel interrupts."""
+    if _cell_deadline is None:
+        return seconds
+    return min(seconds, max(0.0, _cell_deadline - time.monotonic() - 1.0))
 
 
 async def read_frame(
@@ -339,28 +381,39 @@ async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
 def make_skill(descriptor: dict[str, Any]):
     """Build a callable coroutine from a public brokered-skill descriptor."""
     capability = descriptor["capability"]
+    name = descriptor.get("name") or "skill"
     description = descriptor["description"]
     schema = descriptor["input_schema"]
-
-    async def run(**kwargs: Any) -> str:
-        return await call_skill(capability, kwargs)
 
     properties = schema.get("properties", {})
     required = set(schema.get("required", []))
     parameters = [
         inspect.Parameter(
-            name,
-            inspect.Parameter.KEYWORD_ONLY,
-            default=inspect.Parameter.empty if name in required else None,
+            field,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            default=inspect.Parameter.empty if field in required else None,
             annotation=_JSON_TO_PY.get(value.get("type"), inspect.Parameter.empty),
         )
-        for name, value in properties.items()
-        if name.isidentifier() and not keyword.iskeyword(name)
+        for field, value in properties.items()
+        if field.isidentifier() and not keyword.iskeyword(field)
     ]
     parameters.sort(
         key=lambda parameter: parameter.default is not inspect.Parameter.empty
     )
-    run.__signature__ = inspect.Signature(parameters)
+    signature = inspect.Signature(parameters)
+    names = [parameter.name for parameter in parameters]
+
+    async def run(*args: Any, **kwargs: Any) -> str:
+        if len(args) > len(names):
+            raise TypeError(f"{name}{signature} takes {len(names)} arguments")
+        for field, value in zip(names, args):
+            if field in kwargs:
+                raise TypeError(f"{name}{signature} got '{field}' twice")
+            kwargs[field] = value
+        return await call_skill(capability, kwargs)
+
+    run.__name__ = run.__qualname__ = name
+    run.__signature__ = signature
     run.__doc__ = description
     return run
 

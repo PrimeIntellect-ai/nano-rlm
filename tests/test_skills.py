@@ -302,3 +302,50 @@ async def test_skill_introspection(session):
     assert "sig: ['s']" in output
     assert "sig.run: ['s']" in output
     assert "doc match: True" in output
+
+
+async def test_brokered_skill_accepts_positional_arguments(monkeypatch):
+    from rlm import broker
+
+    seen = []
+
+    async def fake_call(capability, arguments):
+        seen.append((capability, arguments))
+        return "ok"
+
+    monkeypatch.setattr(broker, "call_skill", fake_call)
+    search = broker.make_skill(
+        {
+            "capability": "cap-1",
+            "name": "search",
+            "description": "web search",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "num_results": {"type": "integer"},
+                    "query": {"type": "string"},
+                },
+                "required": ["query"],
+            },
+        }
+    )
+    assert (
+        search.__name__ == "search"
+        and str(search.__signature__) == "(query: str, num_results: int = None)"
+    )
+    assert await search("fjords") == "ok" and seen[-1] == ("cap-1", {"query": "fjords"})
+    assert await search(query="a", num_results=3) == "ok" and seen[-1][1] == {
+        "query": "a",
+        "num_results": 3,
+    }
+    assert await search("a", 2) == "ok" and seen[-1][1] == {
+        "query": "a",
+        "num_results": 2,
+    }
+    with pytest.raises(
+        TypeError,
+        match=r"search\(query: str, num_results: int = None\) takes 2 arguments",
+    ):
+        await search("a", 2, 3)
+    with pytest.raises(TypeError, match="got 'query' twice"):
+        await search("a", query="b")

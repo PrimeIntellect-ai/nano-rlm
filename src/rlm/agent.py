@@ -44,9 +44,9 @@ class AgentHandle:
             await broker.agent_request("agent.info", agent_id=self.id)
         )
 
-    def history(self) -> History:
+    async def history(self) -> History:
         """Read a fresh snapshot of this agent's local conversation history."""
-        return history(session_dir=self.session_dir)
+        return await history(session_dir=self.session_dir)
 
     async def result(self) -> RLMResult | None:
         """Return the latest answer, even while running again; None before the first answer.

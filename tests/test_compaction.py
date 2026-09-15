@@ -259,7 +259,7 @@ async def test_tool_result_overflow_compacts_and_retries(session):
                             {
                                 "code": (
                                     "from rlm import history\n"
-                                    "h = history()\n"
+                                    "h = await history()\n"
                                     "print(h.user_messages()[0]['content'])\n"
                                     "print(len(next(r['message']['content'] for r in h.events if r['type'] == 'tool_result')))\n"
                                     "print(h.windows[0].messages[1]['content'])"
@@ -289,7 +289,9 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert client.calls[3]["tool_choice"] == "none"
     retry_messages = client.calls[4]["messages"]
     assert len(retry_messages) == 2
-    assert retry_messages[1]["content"].startswith(SUMMARY_FRAMING)
+    assert retry_messages[1]["content"].startswith(
+        '<runtime_event kind="compaction">\n' + SUMMARY_FRAMING
+    )
     assert str(session.dir / "messages.jsonl") in retry_messages[1]["content"]
     records = [
         json.loads(line)
@@ -313,7 +315,7 @@ async def test_tool_result_overflow_compacts_and_retries(session):
         == "system"
     )
     assert not any(entry["type"].startswith("checkpoint_") for entry in records)
-    ledger = history(session.dir)
+    ledger = await history(session.dir)
     assert ledger.windows[0].messages == client.calls[1]["messages"]
     assert ledger.windows[1].messages[:2] == retry_messages
     assert ledger.windows[1].messages == session.messages

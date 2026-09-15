@@ -556,12 +556,12 @@ async def test_persistent_handles_history_permissions_and_subtree_lifetime(
             return
         assert child.status == "idle"
         assert child.engine is not None and not child.engine._closed
+        child_history = await AgentHandle(child.id, child.session.dir).history()
         assert (
-            AgentHandle(child.id, child.session.dir)
-            .history()
-            .user_messages()[0]["content"]
-            == "research"
+            "\nresearch\n</agent_input>" in child_history.user_messages()[0]["content"]
         )
+        task_record = next(e for e in child_history.events if e["type"] == "user")
+        assert task_record["provenance"]["agent"] == parent.id
         with pytest.raises(ValueError, match="reserved"):
             supervisor._spawn(parent, scope, "duplicate", "researcher", False)
         await supervisor.close_scope(scope)
@@ -687,3 +687,28 @@ async def test_kernel_shutdown_failure_still_finalizes_session(tmp_path, monkeyp
     finally:
         shutdown()
         session.close()
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("PYTHONPATH=/app/lib python -m pytest x", [("PYTHONPATH", "/app/lib")]),
+        (
+            "cd /app && PYTHONPATH=/app/test:/app/lib pytest -q | tail -5",
+            [("PYTHONPATH", "/app/test:/app/lib")],
+        ),
+        (
+            "env GOFLAGS=-mod=mod CGO_ENABLED=0 go test ./...",
+            [("GOFLAGS", "-mod=mod"), ("CGO_ENABLED", "0")],
+        ),
+        ("A='x y' B=2 cmd", [("A", "x y"), ("B", "2")]),
+        ("python -c 'X=1'", []),
+        ("echo FOO=bar", []),
+        ("cd /app", []),
+        ("export PYTHONPATH=/app/lib; pytest", []),
+    ],
+)
+def test_leading_env_assignments(command, expected):
+    from rlm.supervisor import _leading_env_assignments
+
+    assert _leading_env_assignments(command) == expected
