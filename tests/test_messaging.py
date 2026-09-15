@@ -114,6 +114,14 @@ print('MESSAGING_OK')
         assert any("steering task" in text for text in instructions)
         assert any("queued task" in text for text in instructions)
         assert any("followup task" in text for text in instructions)
+        assert all(
+            text.startswith('<agent_input from="parent"') for text in instructions
+        )
+        assert all(
+            e["provenance"]["source"] == "agent"
+            for e in child_history.events
+            if e["type"] == "parent_message"
+        )
         messages = child_history.messages
         initial_answer = next(
             i for i, m in enumerate(messages) if m.get("content") == "initial answer"
@@ -431,6 +439,8 @@ async def test_inbox_notice_repeats_only_when_the_count_changes(session):
         supervisor._publish(owner, quiet)
         assert supervisor.inbox_notification(owner.id) is None
         assert sum(not e["read"] for e in owner.inbox) == 2
+        assert "available" in await supervisor.wait_for_events(owner.id, 0)
+        assert "timed out" in await supervisor.wait_for_events(owner.id, 0)
     finally:
         await supervisor.aclose()
 

@@ -12,6 +12,46 @@ from rlm.shell_jobs import ShellJobs
 from test_supervisor import _config
 
 
+async def test_result_yields_before_cell_deadline(session):
+    config = _config()
+    config = config.model_copy(
+        update={"policy": config.policy.model_copy(update={"exec_timeout": 2})}
+    )
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": "job = await rlm.shell.run('printf small; sleep 30', yield_after=0)"
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": "result = await job.result(); assert result.running; assert not result.truncated; print('YIELDED')"
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(client=client, session=session, runtime_config=config)
+    try:
+        await engine.prompt("Run a job")
+        outputs = [m["content"] for m in session.messages if m["role"] == "tool"]
+        assert any("YIELDED" in text for text in outputs), outputs
+        assert not any("execution timed out" in text for text in outputs)
+    finally:
+        await engine.aclose()
+
+
 async def test_bash_capture_limits_failure_and_cleanup(tmp_path, monkeypatch):
     monkeypatch.setattr("rlm.shell_jobs.MAX_OUTPUT_BYTES", 8)
     monkeypatch.setattr("rlm.shell_jobs.DRAIN_SECONDS", 0.05)
@@ -293,6 +333,16 @@ print('SHELL_OK')
     jobs = list(supervisor._shell_jobs.jobs.values())
     assert jobs[-1].info.status == "cancelled"
     assert all(job.task.done() for job in jobs)
+    records = [
+        json.loads(line)
+        for line in (session.dir / "inbox.jsonl").read_text().splitlines()
+    ]
+    recorded_reads = {e["event_id"] for e in records if e["type"] == "read"}
+    assert all(
+        event["id"] in recorded_reads
+        for event in supervisor._invocations[supervisor.root_id].inbox
+        if event["read"] and event["type"] == "shell.completed"
+    )
 
 
 @pytest.mark.parametrize("failure", ["metadata", "publication"])

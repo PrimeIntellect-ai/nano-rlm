@@ -368,7 +368,9 @@ class RLMEngine:
             message, provenance = runtime_event("notice", prompt)
         elif message_type == "parent_message" or self.depth > 0:
             parent_id = self._supervisor.agent_context(self._invocation_id)["parent_id"]
-            message, provenance = agent_input(prompt, agent=parent_id, kind="instruction")
+            message, provenance = agent_input(
+                prompt, agent=parent_id, kind="instruction"
+            )
         try:
             self.session.log(
                 {
@@ -539,11 +541,7 @@ class RLMEngine:
             self._supervisor.agent_step(self._invocation_id, start)
 
     def _note_quote_nesting(self, tool_output: str, code: str) -> None:
-        """Hint (at most MAX_QUOTE_NESTING_HINTS times) when the cell's own code fails to parse
-        while it is building program text in a string literal: the kernel reports the cell
-        (`Cell In[n]`), not a file, so the failure is the literal nesting, not the program.
-        Two shapes: a collision inside a triple-quoted literal, and a multi-line command
-        pasted into a plain-quoted one."""
+        """Hint on malformed string literals in the cell, within a per-prompt budget."""
         if (
             self._supervisor is None
             or self._quote_nesting_hints >= MAX_QUOTE_NESTING_HINTS
@@ -551,12 +549,21 @@ class RLMEngine:
         ):
             return
         broken_string = False
+        previous = None
         try:
             for token in tokenize.generate_tokens(io.StringIO(code).readline):
                 if token.type == tokenize.ERRORTOKEN and token.string in {"'", '"'}:
                     broken_string = True
+                if (
+                    previous is not None
+                    and previous.type == tokenize.STRING
+                    and token.type == tokenize.NAME
+                    and previous.end == token.start
+                ):
+                    broken_string = True
+                previous = token
         except tokenize.TokenError as exc:
-            broken_string |= "multi-line string" in str(exc)
+            broken_string |= "string" in str(exc)
         except (IndentationError, SyntaxError):
             return
         if not broken_string:

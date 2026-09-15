@@ -25,6 +25,9 @@ async def test_nested_quote_syntax_error_is_hinted_then_muted(session):
                 ]
             ),
             DummyMessage(content="done"),
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "await rlm.hints.unmute('quote-nesting')"})]),
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": bad})]),
+            DummyMessage(content="done again"),
         ]
     )
     engine = RLMEngine(
@@ -32,6 +35,9 @@ async def test_nested_quote_syntax_error_is_hinted_then_muted(session):
     )  # type: ignore
     try:
         result = await engine.prompt("write a module")
+        assert engine._quote_nesting_hints == MAX_QUOTE_NESTING_HINTS
+        await engine.prompt("write another module")
+        assert engine._quote_nesting_hints == 1
     finally:
         await engine.aclose()
     assert result.answer == "done"
@@ -42,22 +48,20 @@ async def test_nested_quote_syntax_error_is_hinted_then_muted(session):
         if m.get("role") == "user"
         and "nested inside a Python string literal" in str(m.get("content", ""))
     ]
-    # the hint text is delivered on the turn after each of the first MAX_QUOTE_NESTING_HINTS failures and
-    # then stays in the conversation, so count distinct positions by checking the last call saw exactly that many
     last_call_hints = [
         m
         for m in client.calls[-1]["messages"]
         if m.get("role") == "user"
         and "nested inside a Python string literal" in str(m.get("content", ""))
     ]
-    assert len(last_call_hints) == MAX_QUOTE_NESTING_HINTS, [
+    assert len(last_call_hints) == MAX_QUOTE_NESTING_HINTS + 1, [
         str(m.get("content"))[:80] for m in last_call_hints
     ]
     assert 'rlm.hints.mute("quote-nesting")' in hints[0]
 
 
 async def test_multiline_command_in_plain_quotes_gets_the_command_hint(session):
-    # the dominant collision on the 500-task runs: a heredoc pasted into run("...")
+    # A heredoc requires a multiline Python string.
     bad = "r = await rlm.shell.run(\"python3 - <<'EOF'\nprint(1)\nEOF\")"
     plain_mistake = 'name = "ok"\nif True print(name)'
     client = DummyClient(
