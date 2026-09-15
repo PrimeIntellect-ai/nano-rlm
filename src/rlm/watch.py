@@ -44,7 +44,7 @@ async def agent(
     step (conversation activity). With every_turns= and/or every_tokens=: a `watch.progress`
     event each time the child's own model calls or new tokens cross the next multiple, with
     content turns, tokens, name, status and the history slice start:end since the previous
-    event — read `child.history().messages[start:end]`, then `child.steer(...)` if needed."""
+    event — read `(await child.history()).messages[start:end]`, then `await child.steer(...)` if needed."""
     for key, value in (("every_turns", every_turns), ("every_tokens", every_tokens)):
         if value is not None and (
             isinstance(value, bool) or not isinstance(value, int) or value <= 0

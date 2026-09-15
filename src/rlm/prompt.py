@@ -260,7 +260,7 @@ Objects use attributes; inbox events and history messages are dictionaries.
 
 AGENT_PROMPT = """## Delegation
 `child = await rlm.agent.spawn(task, name="researcher", persistent=False)` returns
-an AgentHandle immediately. Give the child a self-contained task, relevant constraints,
+an AgentHandle (.id, .name, .session_dir) immediately. Give the child a self-contained task, relevant constraints,
 and an expected result. Names are unique among siblings and reserved for the session.
 `await rlm.agent.list()` returns AgentInfo objects with .id, .parent_id, .name, .task,
 .status, .persistent, .session_dir, and timing. `recursive=True` also lists descendants;
