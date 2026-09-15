@@ -207,9 +207,9 @@ Agent cleanup errors are reported separately in AgentInfo.cleanup_error; complet
 `await rlm.inbox.list()` returns unread event dictionaries: ["id"], ["type"],
 ["sender_id"], ["created_at"], ["read"]; listed items carry no ["content"] and listing
 does not mark events read. `event = await rlm.inbox.read(event_id)` returns a dictionary
-with ["content"] and marks it read. For supervisor events (shell.completed, agent.completed,
-watch.*) content is a dictionary: index its keys, do not slice it; for agent.message it is
-the string a child sent. `list(unread_only=False)` includes read events; reads are repeatable.
+with ["content"] and marks it read. Content is always a dictionary: index its keys, do not
+slice it. An `agent.message` a child sent has ["agent_id"], ["name"] and ["text"].
+`list(unread_only=False)` includes read events; reads are repeatable.
 A read flag means retrieved, not completed or acted upon.
 
 Supervisor notifications show the unread count when it changes, plus occasional one-line hints about
