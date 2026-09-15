@@ -115,7 +115,7 @@ print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
     assert result.answer == "done"
     assert tool_result(client).strip().splitlines() == [
         f"stdio-secret:True:{server_cwd}:hello",
-        "(*, text: str)",
+        "(text: str)",
         "True",
         "True",
     ]

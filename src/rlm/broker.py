@@ -370,28 +370,39 @@ async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
 def make_skill(descriptor: dict[str, Any]):
     """Build a callable coroutine from a public brokered-skill descriptor."""
     capability = descriptor["capability"]
+    name = descriptor.get("name") or "skill"
     description = descriptor["description"]
     schema = descriptor["input_schema"]
-
-    async def run(**kwargs: Any) -> str:
-        return await call_skill(capability, kwargs)
 
     properties = schema.get("properties", {})
     required = set(schema.get("required", []))
     parameters = [
         inspect.Parameter(
-            name,
-            inspect.Parameter.KEYWORD_ONLY,
-            default=inspect.Parameter.empty if name in required else None,
+            field,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            default=inspect.Parameter.empty if field in required else None,
             annotation=_JSON_TO_PY.get(value.get("type"), inspect.Parameter.empty),
         )
-        for name, value in properties.items()
-        if name.isidentifier() and not keyword.iskeyword(name)
+        for field, value in properties.items()
+        if field.isidentifier() and not keyword.iskeyword(field)
     ]
     parameters.sort(
         key=lambda parameter: parameter.default is not inspect.Parameter.empty
     )
-    run.__signature__ = inspect.Signature(parameters)
+    signature = inspect.Signature(parameters)
+    names = [parameter.name for parameter in parameters]
+
+    async def run(*args: Any, **kwargs: Any) -> str:
+        if len(args) > len(names):
+            raise TypeError(f"{name}{signature} takes {len(names)} arguments")
+        for field, value in zip(names, args):
+            if field in kwargs:
+                raise TypeError(f"{name}{signature} got '{field}' twice")
+            kwargs[field] = value
+        return await call_skill(capability, kwargs)
+
+    run.__name__ = run.__qualname__ = name
+    run.__signature__ = signature
     run.__doc__ = description
     return run
 
