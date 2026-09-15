@@ -131,6 +131,7 @@ class _Invocation:
     inbox_error: str | None = None
     announced: int = 0  # events seen by the last notice/wait (all types; wakes wait)
     announced_loud: int = 0  # events that count toward the unread notice
+    announced_quiet: int = 0
     wait_hints: int = 0  # wait-held-job hints spent
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -704,16 +705,25 @@ class SessionTreeSupervisor:
         self._note_wait_with_held_jobs(agent)
 
         def ready():
-            return len(agent.inbox) > agent.announced or bool(agent.instructions)
+            return (
+                len(agent.inbox) > agent.announced
+                or any(
+                    not event["read"] and event["type"] == "shell.completed"
+                    for event in agent.inbox[agent.announced_quiet:]
+                )
+                or bool(agent.instructions)
+            )
 
         agent.changed.clear()
         agent.status = "waiting"
         try:
             if not ready() and timeout > 0:
                 await asyncio.wait_for(agent.changed.wait(), timeout=timeout)
+            available = ready()
+            agent.announced_quiet = len(agent.inbox)
             return (
                 "New supervisor events or instructions are available."
-                if ready()
+                if available
                 else "Wait timed out."
             )
         except asyncio.TimeoutError:
@@ -850,7 +860,9 @@ class SessionTreeSupervisor:
             "id": job.info.id,
             "text": marker + output["text"],
             "exit_code": None,
-            "truncated": bool(marker and partial),
+            "truncated": output["truncated"] or (
+                bool(marker and partial) and job.info.output_bytes > RUN_TEXT_BYTES
+            ),
             "error": None,
             "timed_out": False,
             "running": True,
@@ -973,6 +985,7 @@ class SessionTreeSupervisor:
                     and not event["read"]
                     and event["content"].get("job_id") == job.info.id
                 ):
+                    self._record_event(parent, {"type": "read", "event_id": event["id"]})
                     event["read"] = True
             return self._finished_payload(job)
         if op == "shell.list":
