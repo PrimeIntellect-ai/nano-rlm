@@ -329,6 +329,7 @@ print('SHELL_OK')
         )  # hinted once per variable, not on the fourth use
     finally:
         supervisor = engine._supervisor
+        owner = supervisor._invocations[supervisor.root_id]
         await engine.aclose()
     jobs = list(supervisor._shell_jobs.jobs.values())
     assert jobs[-1].info.status == "cancelled"
@@ -340,7 +341,7 @@ print('SHELL_OK')
     recorded_reads = {e["event_id"] for e in records if e["type"] == "read"}
     assert all(
         event["id"] in recorded_reads
-        for event in supervisor._invocations[supervisor.root_id].inbox
+        for event in owner.inbox
         if event["read"] and event["type"] == "shell.completed"
     )
 
