@@ -61,7 +61,7 @@ assert Path('side-effect').read_text() == 'once'
 assert len(await rlm.agent.list()) == 1
 child = await rlm.agent.get('worker')
 assert (await child.result()).answer == 'ready'
-assert child.history().user_messages()
+assert (await child.history()).user_messages()
 await child.send('verify your Python state')
 await child.wait(timeout=10)
 assert (await child.result()).answer == 'resumed'

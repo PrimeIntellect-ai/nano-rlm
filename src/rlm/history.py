@@ -67,8 +67,9 @@ class History:
         ]
 
 
-def history(session_dir: str | Path | None = None) -> History:
-    """Read a session's ledger; defaults to this kernel's RLM session directory."""
+async def history(session_dir: str | Path | None = None) -> History:
+    """Read a session's ledger; defaults to this kernel's RLM session directory.
+    Async like every other rlm call, though it reads the local ledger without the broker."""
     if session_dir is None:
         session_dir = os.environ.get("RLM_SESSION_DIR")
         if not session_dir:

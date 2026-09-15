@@ -1223,7 +1223,7 @@ class RLMEngine:
             + summary_text
             + "\n\nFull conversation history is available in "
             + str(self.session.dir / "messages.jsonl")
-            + ". Use `from rlm import history; h = history()` to inspect "
+            + ". Use `from rlm import history; h = await history()` to inspect "
             "`h.windows[w].messages[i]`, `h.messages[i]`, or `h.user_messages()`. "
             "Search or read relevant records with Python when the summary lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
             "identifies the user record whose attempt was rolled back."

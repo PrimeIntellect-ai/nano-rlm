@@ -557,11 +557,8 @@ async def test_persistent_handles_history_permissions_and_subtree_lifetime(
         assert child.status == "idle"
         assert child.engine is not None and not child.engine._closed
         assert (
-            AgentHandle(child.id, child.session.dir)
-            .history()
-            .user_messages()[0]["content"]
-            == "research"
-        )
+            await AgentHandle(child.id, child.session.dir).history()
+        ).user_messages()[0]["content"] == "research"
         with pytest.raises(ValueError, match="reserved"):
             supervisor._spawn(parent, scope, "duplicate", "researcher", False)
         await supervisor.close_scope(scope)

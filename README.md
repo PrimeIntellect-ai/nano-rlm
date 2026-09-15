@@ -123,7 +123,7 @@ other = await rlm.agent.spawn(task="Check login behavior", name="login")
 
 agents = await rlm.agent.list()          # Direct children, including completed agents
 info = await researcher.info()          # Fresh metadata snapshot
-h = researcher.history()                # Fresh conversation snapshot
+h = await researcher.history()          # Fresh conversation snapshot
 researcher = await rlm.agent.get("researcher")  # Recover by sibling name or ID
 ```
 
@@ -190,7 +190,7 @@ The kernel can inspect its own history or a child's, including while the child i
 ```python
 from rlm import history
 
-h = history()                        # Defaults to $RLM_SESSION_DIR
+h = await history()                  # Defaults to $RLM_SESSION_DIR
 requests = h.user_messages()          # Original inputs, including rolled-back attempts
 message = h.messages[3]               # Session-wide message index
 earlier = h.windows[0].messages       # Initial working context
@@ -465,7 +465,7 @@ Events enter the same pull-based inbox and carry `subscription_id`. Their
 
 | Event | References |
 | --- | --- |
-| `watch.agent` | `start` and exclusive `end` message indices: `researcher.history().messages[start:end]` |
+| `watch.agent` | `start` and exclusive `end` message indices: `(await researcher.history()).messages[start:end]` |
 | `watch.job` | `start` and exclusive `end` byte cursors for `job.read(cursor=start)` |
 | `watch.path` | Changed `paths` and a `truncated` flag |
 | `watch.failed` | An `error` explaining why the subscription stopped |

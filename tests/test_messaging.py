@@ -92,7 +92,7 @@ print('MESSAGING_OK')
     try:
         result = await engine.run("coordinate")
         assert result.answer == "done"
-        logs = history(session.dir)
+        logs = await history(session.dir)
         tool_text = "\n".join(
             e["content"] for e in logs.events if e["type"] == "tool_result"
         )
@@ -105,7 +105,7 @@ print('MESSAGING_OK')
             for agent in supervisor._invocations.values()
             if agent.parent_id == supervisor.root_id
         )
-        child_history = history(child.session.dir)
+        child_history = await history(child.session.dir)
         instructions = [
             e["message"]["content"]
             for e in child_history.events
@@ -390,7 +390,7 @@ async def test_running_instruction_failure_at_tree_budget(
         assert not any(e["type"] == "instructions_delivered" for e in records)
         assert not any(
             "must not be marked delivered" in str(m.get("content", ""))
-            for m in history(child.session.dir).messages
+            for m in (await history(child.session.dir)).messages
         )
     finally:
         release.set()

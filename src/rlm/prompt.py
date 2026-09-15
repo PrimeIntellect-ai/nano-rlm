@@ -273,7 +273,7 @@ remains available while a persistent child runs again; use info/wait for current
 Terminal failure/cancellation raises.
 Child completion/failure posts `agent.completed` automatically;
 `event["content"]["agent_id"]` identifies the child and ["status"] gives its state. Inspect the event and recover the handle rather than assuming success.
-`child.history()` returns a fresh history snapshot. `await child.cancel()` terminates
+`await child.history()` returns a fresh history snapshot. `await child.cancel()` terminates
 that child and its descendants. Terminating a parent ends its whole subtree.
 
 Use persistent=True for follow-up work: the child becomes idle after answering and retains
@@ -289,17 +289,17 @@ result; prefer native wait when you have no other work. Cell timeouts still appl
 `await rlm.watch.agent(child)` watches a direct child's conversation after complete
 assistant/tool steps, including final answers. Its `watch.agent` event content identifies
 the child via target and gives start:end indices for
-`child.history().messages[start:end]`. It observes progress without waiting for an explicit
+`(await child.history()).messages[start:end]`. It observes progress without waiting for an explicit
 report. Read history, then steer if needed; the subscription itself does not direct the child.
 """
 
 HISTORY_PROMPT = """## Conversation history
-`from rlm import history; h = history()` reads a snapshot of your ledger.
+`from rlm import history; h = await history()` reads a snapshot of your ledger.
 `h.messages[i]` addresses a session-wide message; `h.windows[w].messages[i]` addresses
 one within a context window. Indices are zero-based. Messages are dictionaries with
 role/content/tool fields. `h.user_messages()` returns original user inputs, distinct
 from generated summaries and supervisor notices. `history(session_dir=path)` reads an
-explicit session; use a child handle's .history() when available. Reload for fresh state.
+explicit session; use `await child.history()` when available. Reload for fresh state.
 
 Compaction and rollback start new windows; earlier records remain addressable. Full tool
 outputs and shortened context versions have separate indices. `h.events` contains spawn

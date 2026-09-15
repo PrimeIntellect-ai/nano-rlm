@@ -136,7 +136,7 @@ for item in events:
     assert event['subscription_id'] in {s.id for s in subscriptions}
     content = event['content']
     if item['type'] == 'watch.agent':
-        assert child.history().messages[content['start']:content['end']]
+        assert (await child.history()).messages[content['start']:content['end']]
     elif item['type'] == 'watch.job':
         job = await rlm.shell.get(content['target'])
         chunk = await job.read(cursor=content['start'])
