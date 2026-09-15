@@ -210,6 +210,7 @@ class RLMEngine:
         self.cwd = cwd or os.getcwd()
         self.exec_timeout = config.policy.exec_timeout
         self.max_total_turns = config.policy.max_total_turns
+        self.max_turns = config.policy.max_turns
         self.max_tool_output_bytes = config.policy.max_tool_output_bytes
         self.compaction = config.policy.compaction
         self.summarize_at_tokens = config.policy.summarize_at_tokens
@@ -633,7 +634,7 @@ class RLMEngine:
                     or self._last_handoff_summary
                     or (
                         "[turn budget reached]"
-                        if capped == "max_total_turns"
+                        if capped in ("max_total_turns", "max_turns")
                         else "[token budget reached]"
                     )
                 )
@@ -1018,6 +1019,8 @@ class RLMEngine:
             tokens = self._own_new_tokens
         if self.max_total_turns is not None and turns >= self.max_total_turns:
             return "max_total_turns"
+        if self.max_turns is not None and self._own_turns >= self.max_turns:
+            return "max_turns"
         budget = self.runtime_config.policy.max_total_tokens
         if budget is not None and tokens >= budget:
             return "max_total_tokens"

@@ -52,7 +52,8 @@ from rlm.types import ProgrammaticToolCallStats, RLMResult
 MAX_LONG_RUN_NOTES = 3
 # A native wait while holding a running job earns a pointer at result(), at most this often.
 MAX_WAIT_HELD_JOB_HINTS = 2
-# shell.completed events carry this much of the end of the output.
+# shell.completed events carry this much of the end of the output; agent.completed
+# events carry this much of the end of the child's answer.
 COMPLETED_TAIL_BYTES = 4 * 1024
 # A `VAR=value cmd` prefix repeated this many times on one variable earns a hint that
 # rlm.shell.setenv() applies it to every later command (once per variable, tag env-prefix).
@@ -421,6 +422,8 @@ class SessionTreeSupervisor:
         task: str,
         name: str | None,
         persistent: bool,
+        max_turns: int | None = None,
+        max_tokens: int | None = None,
     ) -> _Invocation:
         policy = parent.runtime_config.policy
         context = parent.runtime_config.invocation.child()
@@ -449,7 +452,20 @@ class SessionTreeSupervisor:
             capability=secrets.token_urlsafe(32),
             session=Session(Session.child_dir(parent.session.dir)),
             runtime_config=parent.runtime_config.model_copy(
-                update={"invocation": context}
+                update={
+                    "invocation": context,
+                    # Per-child budgets from spawn(); the tree caps in the policy stay.
+                    "policy": policy.model_copy(
+                        update={
+                            key: value
+                            for key, value in (
+                                ("max_turns", max_turns),
+                                ("max_tokens", max_tokens),
+                            )
+                            if value is not None
+                        }
+                    ),
+                }
             ),
             cwd=parent.cwd,
             mcp_servers=parent.mcp_servers,
@@ -1054,6 +1070,8 @@ class SessionTreeSupervisor:
                     request["task"],
                     request["name"],
                     request["persistent"],
+                    max_turns=request.get("max_turns"),
+                    max_tokens=request.get("max_tokens"),
                 )
             )
         if op == "agent.list":
@@ -1203,7 +1221,24 @@ class SessionTreeSupervisor:
                         self._event(
                             child,
                             "agent.completed",
-                            {"agent_id": child.id, "status": child.status},
+                            {
+                                "agent_id": child.id,
+                                "name": child.name,
+                                "status": child.status,
+                                # The answer (tail) and error ride along so the parent can
+                                # act on the event alone; result() has the full answer.
+                                "answer": (
+                                    child.result.answer[-COMPLETED_TAIL_BYTES:]
+                                    if child.result is not None and child.result.answer
+                                    else None
+                                ),
+                                "turns": (
+                                    child.result.turns
+                                    if child.result is not None
+                                    else None
+                                ),
+                                "error": child.error,
+                            },
                             self.semantic_edges.last_request_id(child.id),
                         ),
                     )

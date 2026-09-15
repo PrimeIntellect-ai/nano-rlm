@@ -91,16 +91,34 @@ class AgentHandle:
 
 
 async def spawn(
-    task: str, *, name: str | None = None, persistent: bool = False
+    task: str,
+    *,
+    name: str | None = None,
+    persistent: bool = False,
+    max_turns: int | None = None,
+    max_tokens: int | None = None,
 ) -> AgentHandle:
     """Register a child and return its handle before the child finishes.
 
     Sibling names remain reserved for the session. Persistent children keep their
     kernel after answering; all children terminate when their parent terminates.
+    max_turns / max_tokens cap this child's own model calls / completion tokens: when
+    reached it stops and hands back its last text (or a "[turn budget reached]" /
+    "[token budget exhausted]" marker) as its answer. The tree-wide budgets still apply.
     """
+    for key, value in (("max_turns", max_turns), ("max_tokens", max_tokens)):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int)
+        ):
+            raise TypeError(f"{key} must be a positive int or None")
     info = AgentInfo.from_payload(
         await broker.agent_request(
-            "agent.spawn", task=task, name=name, persistent=persistent
+            "agent.spawn",
+            task=task,
+            name=name,
+            persistent=persistent,
+            max_turns=max_turns,
+            max_tokens=max_tokens,
         )
     )
     return AgentHandle(info.id, info.session_dir)

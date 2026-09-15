@@ -259,9 +259,11 @@ Objects use attributes; inbox events and history messages are dictionaries.
 """
 
 AGENT_PROMPT = """## Delegation
-`child = await rlm.agent.spawn(task, name="researcher", persistent=False)` returns
-an AgentHandle immediately. Give the child a self-contained task, relevant constraints,
-and an expected result. Names are unique among siblings and reserved for the session.
+`child = await rlm.agent.spawn(task, name="researcher", persistent=False, max_turns=None,
+max_tokens=None)` returns an AgentHandle immediately. Give the child a self-contained task,
+relevant constraints, and an expected result; max_turns/max_tokens cap that child's own model
+calls/completion tokens (it then answers with what it has). Names are unique among siblings
+and reserved for the session.
 `await rlm.agent.list()` returns AgentInfo objects with .id, .parent_id, .name, .task,
 .status, .persistent, .session_dir, and timing. `recursive=True` also lists descendants;
 only direct children can be controlled. Finished children remain discoverable. Recover a direct child with
@@ -271,8 +273,10 @@ only direct children can be controlled. Finished children remain discoverable. R
 (.answer, .usage, .turns, .session_dir), or None before its first answer. The latest answer
 remains available while a persistent child runs again; use info/wait for current activity.
 Terminal failure/cancellation raises.
-Child completion/failure posts `agent.completed` automatically;
-`event["content"]["agent_id"]` identifies the child and ["status"] gives its state. Inspect the event and recover the handle rather than assuming success.
+Child completion/failure posts `agent.completed` automatically; its content has
+["agent_id"], ["name"], ["status"], ["turns"], ["error"] and ["answer"] (the last 4 KiB of
+the child's answer), so the event alone tells you what came back; `await child.result()`
+has the full answer. Inspect the event rather than assuming success.
 `child.history()` returns a fresh history snapshot. `await child.cancel()` terminates
 that child and its descendants. Terminating a parent ends its whole subtree.
 

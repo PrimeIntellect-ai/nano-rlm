@@ -123,3 +123,25 @@ async def test_plan_like_reply_budget_is_one_per_stretch(session):
     result = await engine.run("add")
     assert result.answer == "Let me look at the tests:"
     assert len(client.calls) == 2
+
+
+async def test_per_agent_turn_cap_stops_with_last_text(session):
+    from rlm.config import ExecutionPolicy
+
+    client = DummyClient(
+        [
+            DummyMessage(
+                content="step one", tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]
+            ),
+            DummyMessage(tool_calls=[DummyToolCall("add", {"a": 3, "b": 4})]),
+            DummyMessage(content="never reached"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=make_runtime_config(policy=ExecutionPolicy(max_turns=2)),
+    )  # type: ignore
+    result = await engine.run("add twice")
+    assert result.turns == 2 and result.answer == "step one"
+    assert engine._metrics.stop_reason == "max_turns"

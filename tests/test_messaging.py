@@ -266,6 +266,9 @@ async def test_auto_wake_preserves_completed_result_for_waiter(
         await asyncio.wait_for(resumed.wait(), 5)
         assert not child.done.is_set()
         assert parent.inbox[-1]["type"] == "agent.completed"
+        completed = parent.inbox[-1]["content"]
+        assert completed["name"] == "worker" and completed["status"] == "idle"
+        assert completed["answer"] == "first answer" and completed["error"] is None
         result = await supervisor._agent_operation({**request, "op": "agent.result"})
         assert result["answer"] == "first answer"
         child.status = terminal_status
@@ -493,3 +496,48 @@ def test_runtime_event_and_agent_input_delimiters():
         "kind": "steer",
         "agent": "abc",
     }
+
+
+async def test_spawn_budgets_land_in_the_child_policy(session):
+    from types import SimpleNamespace
+
+    from rlm.supervisor import SessionTreeSupervisor
+
+    captured = {}
+
+    def factory(**kwargs):
+        captured["policy"] = kwargs["runtime_config"].policy
+
+        async def prompt(*a, **k):
+            return SimpleNamespace(answer="done", turns=1, usage=None, session_dir=None)
+
+        async def close():
+            return None
+
+        return SimpleNamespace(prompt=prompt, aclose=close)
+
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=_config(max_depth=1),
+        cwd=str(session.dir),
+        engine_factory=factory,
+    )
+    await supervisor.start()
+    try:
+        scope = await supervisor.open_scope(supervisor.root_id)
+        parent = supervisor._invocations[supervisor.root_id]
+        child = supervisor._spawn(
+            parent, scope, "task", "bounded", False, max_turns=3, max_tokens=5000
+        )
+        await asyncio.wait_for(child.done.wait(), 5)
+        assert (
+            captured["policy"].max_turns == 3 and captured["policy"].max_tokens == 5000
+        )
+        # the parent's own policy is untouched, and the tree caps are inherited
+        assert parent.runtime_config.policy.max_turns is None
+        assert captured["policy"].max_depth == parent.runtime_config.policy.max_depth
+        unbounded = supervisor._spawn(parent, scope, "task", "free", False)
+        await asyncio.wait_for(unbounded.done.wait(), 5)
+        assert captured["policy"].max_turns is None
+    finally:
+        await supervisor.aclose()

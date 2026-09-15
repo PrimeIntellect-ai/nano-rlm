@@ -69,6 +69,13 @@ class ExecutionPolicy(_ConfigModel):
     default; an explicit value overrides it in either direction."""
     exec_timeout: int = Field(default=300, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
+    """Per-agent completion-token budget: this engine stops once its own completion tokens
+    reach it (stop_reason=token_budget). None = uncapped. A parent sets it per child with
+    `rlm.agent.spawn(..., max_tokens=N)`."""
+    max_turns: int | None = Field(default=None, gt=0)
+    """Per-agent turn budget: this engine stops before the model call that would exceed it
+    (stop_reason=max_turns), handing back its last text or a marker. None = uncapped. A parent
+    sets it per child with `rlm.agent.spawn(..., max_turns=N)`; the tree-total caps still apply."""
     compaction: bool = True
     """Compact the context once it outgrows ``summarize_at_tokens`` (and recover from
     provider context-overflow errors by checkpointing). On by default; set False to
