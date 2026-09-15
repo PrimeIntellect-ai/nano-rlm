@@ -37,6 +37,7 @@ class AgentInfo:
 class AgentHandle:
     id: str
     session_dir: Path
+    name: str | None = None
 
     async def info(self) -> AgentInfo:
         """Read current metadata from the supervisor."""
@@ -103,7 +104,7 @@ async def spawn(
             "agent.spawn", task=task, name=name, persistent=persistent
         )
     )
-    return AgentHandle(info.id, info.session_dir)
+    return AgentHandle(info.id, info.session_dir, info.name)
 
 
 async def get(name_or_id: str) -> AgentHandle:
@@ -111,7 +112,7 @@ async def get(name_or_id: str) -> AgentHandle:
     info = AgentInfo.from_payload(
         await broker.agent_request("agent.get", name_or_id=name_or_id)
     )
-    return AgentHandle(info.id, info.session_dir)
+    return AgentHandle(info.id, info.session_dir, info.name)
 
 
 async def send_to_parent(message: str) -> str:
