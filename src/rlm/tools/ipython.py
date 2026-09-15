@@ -340,6 +340,7 @@ class IPythonREPL:
 
         setup_code = f"""\
 import os, sys, asyncio, types, json, time, functools, inspect
+from pathlib import Path
 os.chdir({self.cwd!r})
 if {bool(session_dir)!r}:
     sys.path.append({session_dir!r})
