@@ -271,9 +271,8 @@ class SessionTreeSupervisor:
         return self._total_tokens
 
     def record_call(self, tokens: int, agent_id: str | None = None) -> None:
-        """Count one work-loop model call: a tree turn plus its new tokens. With the
-        calling agent's id, also advance its own counters and fire any progress
-        thresholds a parent subscribed to (watch.agent(every_turns=/every_tokens=))."""
+        """Count one work-loop model call: a tree turn plus its new tokens, and with the
+        calling agent's id its own counters as well."""
         self._total_turns += 1
         self._total_tokens += tokens
         agent = self._invocations.get(agent_id) if agent_id else None
@@ -281,13 +280,6 @@ class SessionTreeSupervisor:
             return
         agent.turns += 1
         agent.new_tokens += tokens
-        self._subscriptions.progress(
-            agent.id,
-            agent.turns,
-            agent.new_tokens,
-            agent.session.message_count,
-            {"name": agent.name, "status": agent.status},
-        )
 
     def record_usage(self, tokens: int) -> None:
         """Add new tokens without a turn (compaction/checkpoint calls)."""
@@ -429,6 +421,7 @@ class SessionTreeSupervisor:
             - agent.started_at,
             "session_dir": str(agent.session.dir),
             "error": agent.error,
+            "turns": agent.turns,
             "cleanup_error": agent.cleanup_error,
         }
 
@@ -767,8 +760,18 @@ class SessionTreeSupervisor:
         self._publish(owner, event)
 
     def agent_step(self, agent_id: str, start: int) -> None:
-        self._subscriptions.activity(
-            "agent", agent_id, start, self._invocations[agent_id].session.message_count
+        """A child's assistant/tool step is fully logged: publish watch.agent activity and
+        check the progress thresholds a parent subscribed to
+        (watch.agent(every_turns=/every_tokens=)), so the event's slice includes the step."""
+        agent = self._invocations[agent_id]
+        end = agent.session.message_count
+        self._subscriptions.activity("agent", agent_id, start, end)
+        self._subscriptions.progress(
+            agent.id,
+            agent.turns,
+            agent.new_tokens,
+            end,
+            {"name": agent.name, "status": agent.status},
         )
 
     def _publish_job_output(self, job: JobRecord, start: int) -> None:

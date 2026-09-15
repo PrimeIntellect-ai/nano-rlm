@@ -264,7 +264,7 @@ AGENT_PROMPT = """## Delegation
 an AgentHandle (.id, .name, .session_dir) immediately. Give the child a self-contained task, relevant constraints,
 and an expected result. Names are unique among siblings and reserved for the session.
 `await rlm.agent.list()` returns AgentInfo objects with .id, .parent_id, .name, .task,
-.status, .persistent, .session_dir, and timing. `recursive=True` also lists descendants;
+.status, .persistent, .turns, .session_dir, and timing. `recursive=True` also lists descendants;
 only direct children can be controlled. Finished children remain discoverable. Recover a direct child with
 `await rlm.agent.get(name_or_id)`. Reassigning/deleting a Python handle does not stop it.
 
