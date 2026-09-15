@@ -59,7 +59,7 @@ async def test_nested_quote_syntax_error_is_hinted_then_muted(session):
 async def test_multiline_command_in_plain_quotes_gets_the_command_hint(session):
     # the dominant collision on the 500-task runs: a heredoc pasted into run("...")
     bad = "r = await rlm.shell.run(\"python3 - <<'EOF'\nprint(1)\nEOF\")"
-    plain_mistake = "print(1"  # an ordinary SyntaxError: no hint
+    plain_mistake = 'name = "ok"\nif True print(name)'
     client = DummyClient(
         [
             DummyMessage(

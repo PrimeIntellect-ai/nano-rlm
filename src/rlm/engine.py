@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import io
+import tokenize
 import json
 import re
 import logging
@@ -320,6 +322,7 @@ class RLMEngine:
             raise RuntimeError("RLM engine is closed")
         self._empty_reply_nudges = 0  # the nudge budget is per user turn
         self._plan_reply_nudges = 0
+        self._quote_nesting_hints = 0
 
         if self.session is not None:
             self.session.check_writable()
@@ -359,6 +362,13 @@ class RLMEngine:
         self._metrics.stop_reason = ""
         prompt_id = uuid.uuid4().hex
         context_before = list(self.session.context_indices)
+        message = {"role": "user", "content": prompt}
+        provenance = None
+        if message_type == "supervisor_notification":
+            message, provenance = runtime_event("notice", prompt)
+        elif message_type == "parent_message" or self.depth > 0:
+            parent_id = self._supervisor.agent_context(self._invocation_id)["parent_id"]
+            message, provenance = agent_input(prompt, agent=parent_id, kind="instruction")
         try:
             self.session.log(
                 {
@@ -367,7 +377,8 @@ class RLMEngine:
                     **({"event_ids": event_ids} if event_ids else {}),
                     "turn": self._turn,
                     "content": prompt,
-                    "message": {"role": "user", "content": prompt},
+                    "message": message,
+                    **({"provenance": provenance} if provenance else {}),
                 },
                 in_context=True,
             )
@@ -538,6 +549,17 @@ class RLMEngine:
             or self._quote_nesting_hints >= MAX_QUOTE_NESTING_HINTS
             or not _QUOTE_NESTING_RE.search(tool_output or "")
         ):
+            return
+        broken_string = False
+        try:
+            for token in tokenize.generate_tokens(io.StringIO(code).readline):
+                if token.type == tokenize.ERRORTOKEN and token.string in {"'", '"'}:
+                    broken_string = True
+        except tokenize.TokenError as exc:
+            broken_string |= "multi-line string" in str(exc)
+        except (IndentationError, SyntaxError):
+            return
+        if not broken_string:
             return
         if _TRIPLE_QUOTE_RE.search(code or ""):
             text = QUOTE_NESTING_HINT
@@ -1228,7 +1250,7 @@ class RLMEngine:
             "Search or read relevant records with Python when the summary lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
             "identifies the user record whose attempt was rolled back."
         )
-        compaction_message, _provenance = runtime_event(
+        compaction_message, provenance = runtime_event(
             "compaction", compacted_user_content
         )
         window = self.session.replace_context(
@@ -1245,6 +1267,7 @@ class RLMEngine:
                 "type": "compaction",
                 "turn": turn,
                 "summary": summary_text,
+                "provenance": provenance,
                 "window": window,
                 "summary_message_index": self.session.context_indices[-1],
                 "summary_chars": len(summary_text),
