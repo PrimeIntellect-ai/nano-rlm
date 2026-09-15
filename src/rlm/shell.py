@@ -49,7 +49,7 @@ class ShellJob:
         _reject_kwargs("result", rejected)
         return ShellJob(
             **await broker.agent_request(
-                "shell.result", job_id=self.id, yield_after=_yield_after(yield_after)
+                "shell.result", job_id=self.id, yield_after=_yield_after(yield_after, default=300)
             )
         )
 
@@ -167,14 +167,15 @@ async def getenv() -> dict[str, str]:
     return await broker.agent_request("shell.getenv", variables=None)
 
 
-def _yield_after(seconds: float | None) -> float | None:
+def _yield_after(seconds: float | None, *, default: float = 10) -> float | None:
     if seconds is None:
-        return None
+        bounded = broker.shell_wait(default)
+        return None if bounded == default else bounded
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
         raise TypeError("yield_after must be a number of seconds or None")
     if seconds < 0:
         raise ValueError("yield_after must be a non-negative number of seconds")
-    return float(seconds)
+    return broker.shell_wait(min(float(seconds), 300))
 
 
 def _timeout(timeout: float | None) -> float | None:

@@ -7,6 +7,7 @@ import inspect
 import json
 import keyword
 import struct
+import time
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -28,6 +29,7 @@ class BrokerEndpoint:
 
 _endpoint: BrokerEndpoint | None = None
 _scope_id: str | None = None
+_cell_deadline: float | None = None
 
 _JSON_TO_PY = {
     "string": str,
@@ -301,9 +303,18 @@ def configure(endpoint: BrokerEndpoint | None) -> None:
     _endpoint = endpoint
 
 
-def set_scope(scope_id: str | None) -> None:
+def set_scope(scope_id: str | None, timeout: float | None = None) -> None:
     global _scope_id
     _scope_id = scope_id
+    global _cell_deadline
+    _cell_deadline = None if timeout is None else time.monotonic() + timeout
+
+
+def shell_wait(seconds: float) -> float:
+    """Leave time for the broker response before the execution kernel interrupts."""
+    if _cell_deadline is None:
+        return seconds
+    return min(seconds, max(0.0, _cell_deadline - time.monotonic() - 1.0))
 
 
 async def read_frame(

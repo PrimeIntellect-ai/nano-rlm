@@ -546,7 +546,7 @@ import rlm
                 if self.broker_endpoint is not None:
                     try:
                         self._execute_silent(
-                            f"_rlm_broker.set_scope({self._scope_id!r})",
+                            f"_rlm_broker.set_scope({self._scope_id!r}, timeout={timeout!r})",
                             interruptible=True,
                         )
                     except _KernelDied:
