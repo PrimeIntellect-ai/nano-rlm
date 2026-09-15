@@ -52,8 +52,7 @@ from rlm.types import ProgrammaticToolCallStats, RLMResult
 MAX_LONG_RUN_NOTES = 3
 # A native wait while holding a running job earns a pointer at result(), at most this often.
 MAX_WAIT_HELD_JOB_HINTS = 2
-# shell.completed events carry this much of the end of the output; agent.completed
-# events carry this much of the end of the child's answer.
+# shell.completed events carry this much of the end of the output.
 COMPLETED_TAIL_BYTES = 4 * 1024
 # A `VAR=value cmd` prefix repeated this many times on one variable earns a hint that
 # rlm.shell.setenv() applies it to every later command (once per variable, tag env-prefix).
@@ -134,8 +133,8 @@ class _Invocation:
     announced_loud: int = 0  # events that count toward the unread notice
     announced_quiet: int = 0
     wait_hints: int = 0  # wait-held-job hints spent
-    turns: int = 0  # this agent's own work-loop model calls (progress thresholds)
-    new_tokens: int = 0  # this agent's own new tokens (completion + uncached prompt)
+    turns: int = 0
+    new_tokens: int = 0
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -1236,8 +1235,6 @@ class SessionTreeSupervisor:
                                 "agent_id": child.id,
                                 "name": child.name,
                                 "status": child.status,
-                                # The answer (tail) and error ride along so the parent can
-                                # act on the event alone; result() has the full answer.
                                 "answer": (
                                     child.result.answer[-COMPLETED_TAIL_BYTES:]
                                     if child.result is not None and child.result.answer

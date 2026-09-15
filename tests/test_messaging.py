@@ -566,3 +566,11 @@ async def test_progress_thresholds_fire_on_turn_and_token_multiples():
         "child", 6, 5000, 20, {"name": "w", "status": "completed"}
     )  # finished: nothing
     assert len(events) == 3
+
+
+async def test_agent_handle_carries_the_sibling_name(session):
+    from rlm.agent import AgentHandle
+
+    h = AgentHandle("abc", session.dir, "worker")
+    assert (h.id, h.name) == ("abc", "worker")
+    assert AgentHandle("abc", session.dir).name is None
