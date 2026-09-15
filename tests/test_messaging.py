@@ -251,9 +251,10 @@ async def test_auto_wake_preserves_completed_result_for_waiter(
             "scope_id": scope,
             "agent_id": child.id,
         }
-        assert (
-            await supervisor._agent_operation({**request, "op": "agent.result"}) is None
+        pending = await supervisor._agent_operation(
+            {**request, "op": "agent.result", "yield_after": 0}
         )
+        assert pending["answer"] is None and pending["status"] == "running"
         waiter = asyncio.create_task(
             supervisor._agent_operation({**request, "op": "agent.wait", "timeout": 5})
         )
@@ -269,13 +270,17 @@ async def test_auto_wake_preserves_completed_result_for_waiter(
         completed = parent.inbox[-1]["content"]
         assert completed["name"] == "worker" and completed["status"] == "idle"
         assert completed["answer"] == "first answer" and completed["error"] is None
-        result = await supervisor._agent_operation({**request, "op": "agent.result"})
-        assert result["answer"] == "first answer"
+        result = await supervisor._agent_operation(
+            {**request, "op": "agent.result", "yield_after": 0}
+        )
+        assert result["answer"] == "first answer" and result["status"] == "running"
         child.status = terminal_status
         child.error = "follow-up stopped"
         assert not child.done.is_set()
         with pytest.raises(RuntimeError, match="follow-up stopped"):
-            await supervisor._agent_operation({**request, "op": "agent.result"})
+            await supervisor._agent_operation(
+                {**request, "op": "agent.result", "yield_after": 0}
+            )
         child.status = "running"
     finally:
         await supervisor.aclose()

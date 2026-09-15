@@ -267,10 +267,12 @@ and an expected result. Names are unique among siblings and reserved for the ses
 only direct children can be controlled. Finished children remain discoverable. Recover a direct child with
 `await rlm.agent.get(name_or_id)`. Reassigning/deleting a Python handle does not stop it.
 
-`await child.info()` reads metadata. `await child.result()` returns an RLMResult
-(.answer, .usage, .turns, .session_dir), or None before its first answer. The latest answer
-remains available while a persistent child runs again; use info/wait for current activity.
-Terminal failure/cancellation raises.
+`await child.info()` reads metadata. `await child.result()` waits up to 300 s (or its
+yield_after=) for the child to finish and returns an AgentResult (.status, .answer, .usage,
+.turns, .session_dir, .running). If the child is still working on its first answer, .answer is
+None and .running is True: keep going and collect later, or from the `agent.completed` event.
+A persistent child's latest answer stays available while it runs again. Terminal
+failure/cancellation raises.
 Child completion/failure posts `agent.completed` automatically; its content has
 ["agent_id"], ["name"], ["status"], ["turns"], ["error"] and ["answer"] (the last 4 KiB of
 the child's answer), so the event alone tells you what came back; `await child.result()`
