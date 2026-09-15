@@ -610,7 +610,7 @@ class SessionTreeSupervisor:
                     "env-prefix",
                     f"`{name}=...` has prefixed {count} commands so far; "
                     f"`await rlm.shell.setenv({name}={value!r})` applies it to every "
-                    "later run()/start(), and `env={...}` to one call.",
+                    "later run(), and `env={...}` to one call.",
                 )
 
     def _note_wait_with_held_jobs(self, agent: _Invocation) -> None:
@@ -709,7 +709,7 @@ class SessionTreeSupervisor:
                 len(agent.inbox) > agent.announced
                 or any(
                     not event["read"] and event["type"] == "shell.completed"
-                    for event in agent.inbox[agent.announced_quiet:]
+                    for event in agent.inbox[agent.announced_quiet :]
                 )
                 or bool(agent.instructions)
             )
@@ -829,13 +829,6 @@ class SessionTreeSupervisor:
         verbatim rather than naming a variable the caller may not have."""
         return f'await (await rlm.shell.get("{job.info.id}")).result()'
 
-    @staticmethod
-    def _raise_unless_finished(job: JobRecord) -> None:
-        """A metadata/publication failure after the process itself finished must not
-        turn a captured result into a broker error (cancel() has the same guard)."""
-        if job.info.status not in ("completed", "failed", "timed_out", "cancelled"):
-            raise
-
     def _finished_payload(self, job: JobRecord) -> dict:
         output = self._shell_jobs.run_text(job)
         return {
@@ -860,9 +853,8 @@ class SessionTreeSupervisor:
             "id": job.info.id,
             "text": marker + output["text"],
             "exit_code": None,
-            "truncated": output["truncated"] or (
-                bool(marker and partial) and job.info.output_bytes > RUN_TEXT_BYTES
-            ),
+            "truncated": output["truncated"]
+            or (bool(marker and partial) and job.info.output_bytes > RUN_TEXT_BYTES),
             "error": None,
             "timed_out": False,
             "running": True,
@@ -954,7 +946,8 @@ class SessionTreeSupervisor:
                     ".result() on this object does the same); .cancel() on it stops it]\n",
                 )
             except Exception:
-                self._raise_unless_finished(job)
+                if job.finished is None:
+                    raise
             return self._finished_payload(job)
         if op == "shell.result":
             job = self._shell_jobs.get(parent.id, request["job_id"])
@@ -977,7 +970,8 @@ class SessionTreeSupervisor:
                     )
                     return self._running_payload(job, marker)
                 except Exception:
-                    self._raise_unless_finished(job)
+                    if job.finished is None:
+                        raise
             # Collected through the handle: its completion event needs no separate read.
             for event in parent.inbox:
                 if (
@@ -985,7 +979,9 @@ class SessionTreeSupervisor:
                     and not event["read"]
                     and event["content"].get("job_id") == job.info.id
                 ):
-                    self._record_event(parent, {"type": "read", "event_id": event["id"]})
+                    self._record_event(
+                        parent, {"type": "read", "event_id": event["id"]}
+                    )
                     event["read"] = True
             return self._finished_payload(job)
         if op == "shell.list":

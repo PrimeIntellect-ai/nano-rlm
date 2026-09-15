@@ -128,8 +128,9 @@ call yields a handle instead of a result: 10 s by default, 0 returns at once, at
 .exit_code, .ok (True only for a clean exit 0), .text (combined stdout/stderr, up to 16 KiB),
 .truncated, .error (startup/capture failure) and .timed_out. A command still going when the wait ends
 comes back with .running True, .exit_code None and the output so far, and keeps running;
-`res = await job.result()` waits up to 300 s (or its yield_after=) and returns a finished
-ShellJob, again with .running True if it is still not done. result() is repeatable and never
+`res = await job.result()` waits up to 300 s (or its yield_after=) and returns a fresh
+ShellJob, with .running True if it is still not done. Shell waits also leave headroom within
+the current cell's remaining execution time. result() is repeatable and never
 consumes output. A ShellJob is a snapshot: its .running and .text do not change by
 themselves, result() returns a fresh one. result() already waits, so never call native
 `wait` for a job you hold. Nothing is killed by yielding; timeout=, if given, kills the process
@@ -150,7 +151,7 @@ even if .text looks plausible, so branch on it rather than only printing it. Pas
 instead of prefixing `cd dir &&`. Environment variables the project needs (PYTHONPATH,
 GOFLAGS, ...) are set once with `await rlm.shell.setenv(PYTHONPATH="/app/lib")` and apply
 to every later run(); `env={...}` applies to one call. Startup/capture failures populate
-.error. Bash runs with pipefail on: a pipeline's exit code is that of its first failing
+.error. Bash runs with pipefail on: a pipeline's exit code is that of its rightmost failing
 stage, so `pytest ... | tail -20` reports pytest's failure, and a `grep` with no match makes
 the pipeline exit 1.
 

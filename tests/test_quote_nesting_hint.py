@@ -25,7 +25,13 @@ async def test_nested_quote_syntax_error_is_hinted_then_muted(session):
                 ]
             ),
             DummyMessage(content="done"),
-            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "await rlm.hints.unmute('quote-nesting')"})]),
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython", {"code": "await rlm.hints.unmute('quote-nesting')"}
+                    )
+                ]
+            ),
             DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": bad})]),
             DummyMessage(content="done again"),
         ]

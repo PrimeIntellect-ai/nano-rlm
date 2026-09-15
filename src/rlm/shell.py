@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import shlex
-
 import builtins
+import shlex
 from dataclasses import dataclass
 from typing import Literal
 
@@ -18,7 +17,7 @@ MAX_READ_BYTES = 65_536
 class ShellJob:
     """A supervisor-owned Bash job: the snapshot run() or result() returned, plus the
     methods that wait for, read, or cancel the job. Fields describe the job at the moment
-    the object was returned; `await job.result()` returns a fresh, finished snapshot."""
+    the object was returned; `await job.result()` returns a fresh snapshot."""
 
     id: str
     text: str = ""
@@ -39,7 +38,7 @@ class ShellJob:
         )
 
     async def result(self, yield_after: float | None = None, **rejected) -> ShellJob:
-        """Wait for the job to finish and return its finished snapshot.
+        """Wait for completion or the wait deadline and return a fresh snapshot.
 
         Blocks inside the cell for up to `yield_after` seconds (default and cap: 300),
         then yields the handle again: a job still running comes back with running=True
@@ -49,7 +48,9 @@ class ShellJob:
         _reject_kwargs("result", rejected)
         return ShellJob(
             **await broker.agent_request(
-                "shell.result", job_id=self.id, yield_after=_yield_after(yield_after, default=300)
+                "shell.result",
+                job_id=self.id,
+                yield_after=_yield_after(yield_after, default=300),
             )
         )
 
@@ -77,8 +78,6 @@ class ShellJob:
         return JobInfo(**await broker.agent_request("shell.cancel", job_id=self.id))
 
     def __getattr__(self, name: str):
-        # Frozen dataclass: only unknown attributes reach here. Point common
-        # subprocess habits at the right place instead of a bare error.
         if name in ("stdout", "stderr", "output"):
             raise AttributeError(
                 f"ShellJob has no .{name}; stdout and stderr are combined in .text."
@@ -153,7 +152,7 @@ def _env(env: dict[str, str] | None) -> dict[str, str] | None:
 async def setenv(
     variables: dict[str, str] | None = None, /, **more: str
 ) -> dict[str, str]:
-    """Set environment variables for every later run()/start() of this agent.
+    """Set environment variables for every later run() of this agent.
 
     Returns the full persistent overlay. Per-call env= wins over it; the image's own
     environment sits underneath. Survives kernel restarts (supervisor-owned).
@@ -189,8 +188,7 @@ def _timeout(timeout: float | None) -> float | None:
 
 
 def _reject_kwargs(name: str, rejected: dict) -> None:
-    """Name the replacement for an argument this API used to have: an unknown kwarg
-    costs the agent a cell, a bare TypeError costs it another."""
+    """Reject unsupported keywords with guidance for common calling mistakes."""
     if not rejected:
         return
     hints = {
@@ -205,7 +203,7 @@ def _reject_kwargs(name: str, rejected: dict) -> None:
 
 
 async def run(
-    command: str | list[str],
+    command: str | builtins.list[str],
     *,
     cwd: str | None = None,
     env: dict[str, str] | None = None,

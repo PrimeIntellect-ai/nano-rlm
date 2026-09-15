@@ -3,8 +3,7 @@
 Ordinary git commands are allowed. The guard refuses invocations that reach beyond the
 current branch: history-wide ``git log`` options (``--all``, ``--remotes``, ...), history
 subcommands given another ref (``git show origin/main``), listing branches/tags/reflog/
-remotes, and ``clone``/``fetch``/``pull`` (an audit of 365 SWE-bench Pro rollouts found the
-only solution leakage came from cloning an upstream dependency and mining its history).
+remotes, and ``clone``/``fetch``/``pull``.
 ``git status``, ``git diff``, ``git log`` on the current branch and ``git stash`` stay usable.
 
 - split a bash command on ``&&``, ``||``, ``;`` and ``|``
