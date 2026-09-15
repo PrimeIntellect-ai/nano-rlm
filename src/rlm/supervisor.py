@@ -1074,7 +1074,11 @@ class SessionTreeSupervisor:
                 self._event(
                     parent,
                     "agent.message",
-                    request["message"],
+                    {
+                        "agent_id": parent.id,
+                        "name": parent.name,
+                        "text": request["message"],
+                    },
                     self._scopes[request["scope_id"]].request_id,
                 ),
             )
@@ -1132,11 +1136,12 @@ class SessionTreeSupervisor:
             yield_after = min(request["yield_after"], RUN_BLOCK_MAX_SECONDS)
             if not child.done.is_set() and yield_after > 0:
                 try:
-                    await asyncio.wait_for(
-                        child.done.wait(), timeout=request["yield_after"]
-                    )
+                    await asyncio.wait_for(child.done.wait(), timeout=yield_after)
                 except asyncio.TimeoutError:
                     pass
+            if child.status in {"failed", "cancelled"}:
+                self.semantic_edges.finish_subagent(child.id)
+                raise RuntimeError(child.error or "agent cancelled")
             if child.result is not None:
                 self.semantic_edges.finish_subagent(
                     child.id, request_id=child.result_request_id

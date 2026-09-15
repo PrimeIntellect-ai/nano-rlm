@@ -157,7 +157,8 @@ await rlm.agent.send_to_parent("Found a missing permission check")
 # Inside its parent:
 for event in await rlm.inbox.list():
     report = await rlm.inbox.read(event["id"])
-    print(report["type"], report["content"])
+    if report["type"] == "agent.message":
+        print(report["content"]["name"], report["content"]["text"])
 ```
 
 Parent instructions are pushed into the child's conversation. Steering does not interrupt a running model request or tool. Queued messages wait until the child answers or calls the native `wait` tool. Both operations wake an idle persistent child; sending to a terminated child raises.
