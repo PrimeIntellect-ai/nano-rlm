@@ -26,6 +26,7 @@ class AgentInfo:
     elapsed_seconds: float
     session_dir: Path
     error: str | None
+    turns: int = 0
     cleanup_error: str | None = None
 
     @classmethod
