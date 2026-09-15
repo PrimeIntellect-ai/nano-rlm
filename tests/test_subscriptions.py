@@ -109,6 +109,7 @@ Path('watched').mkdir()
 child = await rlm.agent.spawn('initial', name='worker', persistent=True)
 await child.wait(timeout=10)
 activity = await rlm.watch.agent(child)
+progress = await rlm.watch.agent(child, every_turns=1)
 files = await rlm.watch.path('watched')
 job = await rlm.shell.run('sleep 0.5; printf output; printf changed > watched/result', yield_after=0)
 output = await rlm.watch.job(job)
@@ -120,13 +121,13 @@ os._exit(7)
 import asyncio
 for _ in range(100):
     events = await rlm.inbox.list()
-    if {'watch.agent', 'watch.job', 'watch.path'} <= {e['type'] for e in events}:
+    if {'watch.agent', 'watch.progress', 'watch.job', 'watch.path'} <= {e['type'] for e in events}:
         break
     await asyncio.sleep(0.05)
 else:
     raise AssertionError('subscription events missing')
 subscriptions = await rlm.watch.list()
-assert len(subscriptions) == 3
+assert len(subscriptions) == 4
 assert all(s.status == ('completed' if s.kind == 'job' else 'active') for s in subscriptions)
 child = await rlm.agent.get('worker')
 for item in events:
@@ -136,6 +137,9 @@ for item in events:
     assert event['subscription_id'] in {s.id for s in subscriptions}
     content = event['content']
     if item['type'] == 'watch.agent':
+        assert child.history().messages[content['start']:content['end']]
+    elif item['type'] == 'watch.progress':
+        assert content['turns'] >= 1 and content['name'] == 'worker' and content['end'] > content['start']
         assert child.history().messages[content['start']:content['end']]
     elif item['type'] == 'watch.job':
         job = await rlm.shell.get(content['target'])
