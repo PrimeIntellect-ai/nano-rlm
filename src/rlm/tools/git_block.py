@@ -45,7 +45,7 @@ _BLOCKED_SUBCOMMANDS = {
     "bundle",
     "fsck",
     # object-store enumeration: with refs removed, dangling upstream commits are still
-    # discoverable this way (seen in the wild as `cat-file --batch-all-objects`)
+    # discoverable this way
     "count-objects",
     "verify-pack",
     "unpack-objects",

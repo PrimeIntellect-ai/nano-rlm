@@ -150,7 +150,7 @@ MAX_QUOTE_NESTING_HINTS = 2
 _QUOTE_NESTING_RE = re.compile(r"Cell In\[\d+\][\s\S]{0,400}?SyntaxError: ")
 _TRIPLE_QUOTE_RE = re.compile(r"\"\"\"|'''")
 # A plain-quoted string that runs past its line: a heredoc or multi-line command pasted into
-# `run("...")`. By far the commonest collision on the 500-task runs.
+# `run("...")`.
 _PLAIN_MULTILINE_RE = re.compile(r"[\"'][^\"'\n]*\n")
 QUOTE_NESTING_HINT = (
     "That SyntaxError comes from program text nested inside a Python string literal. Pick a "

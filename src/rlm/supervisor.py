@@ -614,7 +614,7 @@ class SessionTreeSupervisor:
 
     def _note_wait_with_held_jobs(self, agent: _Invocation) -> None:
         """A native wait while the agent holds a running job it was handed back is a
-        detour (wait -> inbox -> get -> result, 1.1 per episode): point at result()."""
+        detour (wait -> inbox -> get -> result): point at result()."""
         if (
             agent.wait_hints >= MAX_WAIT_HELD_JOB_HINTS
             or "wait-held-job" in agent.muted_hints
@@ -658,9 +658,7 @@ class SessionTreeSupervisor:
         {"text", "hints": [tags], "unread": int | None, "error": bool}. Clears them."""
         agent = self._invocations[invocation_id]
         # shell.completed is quiet: the agent holds the job and collects it with
-        # job.result(); announcing it only pulled agents into the inbox for nothing
-        # (142 of 149 inbox cells in the first release-gate episodes followed a notice).
-        # It still wakes a native wait through len(inbox) > announced.
+        # job.result(). It still wakes a native wait through len(inbox) > announced.
         loud = [event for event in agent.inbox if event["type"] != "shell.completed"]
         new_events = len(loud) > agent.announced_loud
         agent.announced_loud = len(loud)
@@ -679,7 +677,7 @@ class SessionTreeSupervisor:
             notices.append(agent.inbox_error)
         # The unread count is announced when it changes or new events arrive, not on every
         # turn: an event the agent has decided to leave unread would otherwise repeat the
-        # same line for the rest of the episode (streaks of 50 identical notices were seen).
+        # same line for the rest of the episode.
         unread = None
         if count and (new_events or count != agent.unread_announced):
             unread = count
@@ -817,9 +815,8 @@ class SessionTreeSupervisor:
 
     @staticmethod
     def _collect_expr(job: JobRecord) -> str:
-        """The exact expression that collects a job by id. Markers and hints quote it
-        verbatim: GLM copies the variable name it is shown, and `job` was wrong in 27 %
-        of episodes (NameError) when the caller had bound the snapshot to `r`."""
+        """The exact expression that collects a job by id; markers and hints quote it
+        verbatim rather than naming a variable the caller may not have."""
         return f'await (await rlm.shell.get("{job.info.id}")).result()'
 
     @staticmethod
