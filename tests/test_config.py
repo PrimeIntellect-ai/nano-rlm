@@ -41,7 +41,7 @@ def test_runtime_config_redacts_secrets():
         max_compactions=3,
         max_compaction_attempts=7,
         max_concurrent_subagents=4,
-        max_subagent_calls=64,
+        max_subagent_calls=None,
         allow_git=True,
     )
     assert config.skills == ("search", "edit")

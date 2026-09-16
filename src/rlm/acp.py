@@ -99,7 +99,7 @@ class _SupervisorSnapshot(_ContractModel):
 class _LimitsSnapshot(_ContractModel):
     max_depth: int = Field(ge=0)
     max_concurrent_subagents: int = Field(gt=0)
-    max_subagent_calls: int = Field(gt=0)
+    max_subagent_calls: int | None = Field(default=None, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
     compaction: bool
     summarize_at_tokens: int | None = Field(default=None, gt=0)

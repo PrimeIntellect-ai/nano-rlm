@@ -432,7 +432,10 @@ class SessionTreeSupervisor:
             raise ValueError("agent name is already reserved among these siblings")
         if context.depth > policy.max_depth:
             raise RuntimeError("depth limit reached")
-        if self._total_calls >= policy.max_subagent_calls:
+        if (
+            policy.max_subagent_calls is not None
+            and self._total_calls >= policy.max_subagent_calls
+        ):
             raise RuntimeError("subagent call limit reached")
         if (
             policy.max_total_turns is not None

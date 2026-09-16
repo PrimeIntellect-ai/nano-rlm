@@ -53,7 +53,7 @@ def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
             "max_compactions": None,
             "max_compaction_attempts": 5,
             "max_concurrent_subagents": 4,
-            "max_subagent_calls": 64,
+            "max_subagent_calls": None,
             "allow_git": False,
         },
         "system_prompt_path": None,
@@ -145,7 +145,7 @@ class _Engine:
             "limits": {
                 "max_depth": 0,
                 "max_concurrent_subagents": 4,
-                "max_subagent_calls": 64,
+                "max_subagent_calls": None,
                 "max_tokens": None,
                 "compaction": False,
                 "summarize_at_tokens": None,
