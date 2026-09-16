@@ -27,6 +27,8 @@ from rlm.client import (
 from rlm.provenance import agent_input, runtime_event
 from rlm.compaction import (
     CHECKPOINT_PROMPT,
+    RESERVE_TOKENS,
+    hollow_middle,
     TOOL_OUTPUT_MAX_BYTES,
     CompactionFailed,
     REPL_NOTE,
@@ -1179,9 +1181,8 @@ class RLMEngine:
             )
         compaction = self._semantic_edges.begin_compaction(self._invocation_id)
         try:
-            # A rejected checkpoint falls back to the last good snapshot (which has a
-            # full reserve of room, so it fits); an incomplete, empty, or
-            # tool-calling reply is resampled. Reasoning is never part of the summary.
+            # Only the summary request is shortened; the live context and ledger
+            # remain intact until a complete summary succeeds.
             base = messages
             summary_text = ""
             for _ in range(self.max_compaction_attempts):
@@ -1198,7 +1199,9 @@ class RLMEngine:
                 except APIStatusError as e:
                     if not is_context_overflow(e):
                         raise
-                    base = messages[: self._last_good]
+                    base = hollow_middle(
+                        base, prompt_tokens=None, remove_tokens=RESERVE_TOKENS
+                    )
                     continue
                 choice = response.choices[0]
                 message = choice.message
@@ -1210,6 +1213,20 @@ class RLMEngine:
                     summary_text = text
                     break
                 self._semantic_edges.release_summary_request(compaction.compaction_id)
+                if choice.finish_reason == "length" and (
+                    self.summarize_at_tokens is None
+                    or usage.prompt_tokens >= self.summarize_at_tokens
+                ):
+                    excess = (
+                        max(0, usage.prompt_tokens - self.summarize_at_tokens)
+                        if self.summarize_at_tokens is not None
+                        else RESERVE_TOKENS
+                    )
+                    base = hollow_middle(
+                        base,
+                        prompt_tokens=usage.prompt_tokens,
+                        remove_tokens=excess + 1024,
+                    )
             if not summary_text:
                 raise CompactionFailed(
                     f"no usable summary after {self.max_compaction_attempts} attempts"
