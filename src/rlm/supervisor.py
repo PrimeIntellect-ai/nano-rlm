@@ -26,6 +26,7 @@ from rlm.broker import (
     write_frame,
 )
 from rlm.config import RuntimeConfig
+from rlm.runtime_hints import RuntimeHints
 from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import (
     MCPRegistry,
@@ -110,13 +111,7 @@ class _Invocation:
     released: bool = False
     result: RLMResult | None = None
     shell_env: dict[str, str] = field(default_factory=dict)  # rlm.shell.setenv overlay
-    notes: list[tuple[str, str]] = field(
-        default_factory=list
-    )  # (tag, text) for next turn
-    muted_hints: set[str] = field(default_factory=set)  # rlm.hints.mute()
-    long_run_notes: int = 0
-    env_prefixes: dict[str, int] = field(default_factory=dict)  # VAR -> prefix count
-    env_prefix_hinted: set[str] = field(default_factory=set)
+    hints: RuntimeHints = field(default_factory=RuntimeHints)
     result_request_id: str | None = None
     engine: RLMEngine | None = None
     runner: asyncio.Task[None] | None = None
@@ -128,7 +123,6 @@ class _Invocation:
     announced: int = 0  # events seen by the last notice/wait (all types; wakes wait)
     announced_loud: int = 0  # events that count toward the unread notice
     announced_quiet: int = 0
-    wait_hints: int = 0  # wait-held-job hints spent
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -599,12 +593,9 @@ class SessionTreeSupervisor:
     def _note_env_prefixes(self, agent: _Invocation, command: str) -> None:
         """Suggest setenv() after repeated assignments to the same variable."""
         for name, value in _leading_env_assignments(command):
-            count = agent.env_prefixes.get(name, 0) + 1
-            agent.env_prefixes[name] = count
-            if count == ENV_PREFIX_HINT_AFTER and name not in agent.env_prefix_hinted:
-                agent.env_prefix_hinted.add(name)
-                self._hint(
-                    agent,
+            count = agent.hints.observe_env_prefix(name)
+            if count == ENV_PREFIX_HINT_AFTER:
+                agent.hints.add(
                     "env-prefix",
                     f"`{name}=...` has prefixed {count} commands so far; "
                     f"`await rlm.shell.setenv({name}={value!r})` applies it to every "
@@ -613,11 +604,6 @@ class SessionTreeSupervisor:
 
     def _note_wait_with_held_jobs(self, agent: _Invocation) -> None:
         """Suggest result() when native wait is called with outstanding jobs."""
-        if (
-            agent.wait_hints >= MAX_WAIT_HELD_JOB_HINTS
-            or "wait-held-job" in agent.muted_hints
-        ):
-            return
         held = [
             job
             for job in self._shell_jobs.jobs.values()
@@ -625,31 +611,21 @@ class SessionTreeSupervisor:
         ]
         if not held:
             return
-        agent.wait_hints += 1
         job = held[0]
-        self._hint(
-            agent,
+        agent.hints.add(
             "wait-held-job",
             f"You called wait while holding running job {job.info.id}: "
             f"`res = {self._collect_expr(job)}` waits for it directly (up to 300 s per "
             "call) and returns its output. Native wait is for events from agents or "
             "watches, not for jobs you hold.",
+            limit=MAX_WAIT_HELD_JOB_HINTS,
         )
 
     def hint(self, invocation_id: str, tag: str, text: str) -> None:
         """Queue a tagged hint for an agent from outside the supervisor (engine-side observations)."""
         agent = self._invocations.get(invocation_id)
         if agent is not None:
-            self._hint(agent, tag, text)
-
-    @staticmethod
-    def _hint(agent: _Invocation, tag: str, text: str) -> None:
-        """Queue a tagged one-line hint for the agent's next turn unless the tag is muted."""
-        if tag in agent.muted_hints:
-            return
-        agent.notes.append(
-            (tag, f'{text} (Mute this hint with await rlm.hints.mute("{tag}").)')
-        )
+            agent.hints.add(tag, text)
 
     def inbox_notice(self, invocation_id: str) -> dict | None:
         """Pending runtime notices for the agent's next turn as a structured record:
@@ -663,12 +639,9 @@ class SessionTreeSupervisor:
         count = sum(not event["read"] for event in loud)
         notices: list[str] = []
         hints: list[str] = []
-        if agent.notes:
-            for tag, text in agent.notes:
-                if tag not in agent.muted_hints:
-                    notices.append(text)
-                    hints.append(tag)
-            agent.notes.clear()
+        for tag, text in agent.hints.take():
+            notices.append(text)
+            hints.append(tag)
         error = bool(agent.inbox_error)
         if agent.inbox_error:
             notices.append(agent.inbox_error)
@@ -914,14 +887,8 @@ class SessionTreeSupervisor:
                 await asyncio.wait_for(asyncio.shield(job.task), block)
             except asyncio.TimeoutError:
                 job.notify = True
-                if (
-                    yield_after is None
-                    and parent.long_run_notes < MAX_LONG_RUN_NOTES
-                    and "run-detach" not in parent.muted_hints
-                ):
-                    parent.long_run_notes += 1  # muted detaches do not spend the budget
-                    self._hint(
-                        parent,
+                if yield_after is None:
+                    parent.hints.add(
                         "run-detach",
                         f"rlm.shell.run() returned after the default {RUN_DETACH_SECONDS:g} s "
                         "wait with the command still running (.running is True on the "
@@ -929,6 +896,7 @@ class SessionTreeSupervisor:
                         "(or .result() on that object; it waits up to 300 s per call, so no "
                         "native wait is needed). Pass yield_after=300 to wait longer up front, "
                         "or yield_after=0 to return at once for commands you expect to take long.",
+                        limit=MAX_LONG_RUN_NOTES,
                     )
                 return self._running_payload(
                     job,
@@ -998,10 +966,10 @@ class SessionTreeSupervisor:
         if op.startswith("hints."):
             tags = set(request.get("tags") or [])
             if op == "hints.mute":
-                parent.muted_hints |= tags
+                parent.hints.muted |= tags
             elif op == "hints.unmute":
-                parent.muted_hints -= tags
-            return {"muted": sorted(parent.muted_hints)}
+                parent.hints.muted -= tags
+            return {"muted": sorted(parent.hints.muted)}
         if op == "inbox.list":
             return [
                 {

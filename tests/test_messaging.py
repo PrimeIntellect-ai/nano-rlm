@@ -453,14 +453,21 @@ async def test_muted_hint_is_not_queued(session):
     owner = supervisor._invocations[supervisor.root_id]
     try:
         supervisor.hint(owner.id, "run-detach", "first")
-        assert [tag for tag, _ in owner.notes] == ["run-detach"]
-        owner.notes.clear()
-        owner.muted_hints.add("run-detach")
+        assert [tag for tag, _ in owner.hints.pending] == ["run-detach"]
+        owner.hints.pending.clear()
+        owner.hints.muted.add("run-detach")
         supervisor.hint(owner.id, "run-detach", "second")
-        assert owner.notes == []
-        owner.muted_hints.discard("run-detach")
+        assert owner.hints.pending == []
+        owner.hints.muted.discard("run-detach")
         supervisor.hint(owner.id, "run-detach", "third")
-        assert [tag for tag, _ in owner.notes] == ["run-detach"]
+        assert [tag for tag, _ in owner.hints.pending] == ["run-detach"]
+        owner.hints.take()
+        owner.hints.muted.add("env-prefix")
+        for _ in range(3):
+            supervisor._note_env_prefixes(owner, "EXAMPLE=1 true")
+        owner.hints.muted.clear()
+        supervisor._note_env_prefixes(owner, "EXAMPLE=1 true")
+        assert owner.hints.take() == []
     finally:
         await supervisor.aclose()
 
