@@ -24,11 +24,7 @@ _TOOLS_BY_NAME: dict[str, BuiltinTool] = {
     "fetch": FetchTool(),
     "ipython": IpythonTool(),
 }
-# NOT an activation list — activation comes from the contract's `builtin_tools`
-# (None = DEFAULT_TOOLS). _STOCK only marks the shipped tools so they are excluded
-# from the extras rule below, which auto-activates entries registered at runtime
-# (test fixtures/extensions). A stock tool outside the default set (`fetch` —
-# network-capable) therefore runs only when `builtin_tools` names it.
+# Stock tools are excluded from automatic extension activation.
 _STOCK = ("bash", "edit", "fetch", "ipython")
 DEFAULT_TOOLS = ("ipython",)
 

@@ -17,9 +17,7 @@ class Session:
             sid = uuid.uuid4().hex[:12]
             rlm_home = Path(os.environ.get("RLM_HOME") or Path.home() / ".rlm")
             session_dir = rlm_home / "sessions" / sid
-        # Absolute path so later writes (meta.json.tmp, messages.jsonl) keep
-        # working if something changes cwd mid-rollout (a tool's os.chdir,
-        # REPL kernel restart in a different cwd, sandbox teardown, etc.).
+        # Session writes must remain valid if the working directory changes.
         self.dir = Path(session_dir).resolve()
         self.dir.mkdir(parents=True, exist_ok=True)
         self._msg_file = open(self.dir / "messages.jsonl", "x", encoding="utf-8")

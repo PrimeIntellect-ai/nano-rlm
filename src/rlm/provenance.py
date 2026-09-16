@@ -1,11 +1,7 @@
 """Delimiters for harness-generated messages that travel in the user role.
 
-Everything the runtime says to the model (inbox notices, hints, nudges, kernel
-recovery notices, compaction summaries) and everything a parent agent sends arrives as
-a user-role message, the same transport a human request uses. These helpers wrap such
-messages in a tag that names their origin and attach the same facts as structured
-provenance on the ledger entry, so a recorded conversation can be converted to a chat
-template with distinct roles without guessing from the wording.
+Runtime notices and parent instructions carry origin tags and structured ledger
+provenance for conversion to chat templates with distinct roles.
 
     <runtime_event kind="notice" unread="2" hints="env-prefix">...</runtime_event>
     <agent_input from="parent" agent="a1b2c3" kind="instruction">...</agent_input>

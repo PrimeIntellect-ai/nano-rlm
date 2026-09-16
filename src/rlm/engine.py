@@ -69,16 +69,8 @@ logger = logging.getLogger(__name__)
 def _parse_tool_call_args(raw: str) -> tuple[dict | None, dict | None]:
     """Parse a tool-call arguments blob. Returns (args, error_info).
 
-    On success, args is the parsed dict and error_info is None.
-    On failure (invalid JSON, wrong type, or non-object JSON like ``null`` /
-    ``42`` / ``"foo"`` / ``[]``), args is None and error_info is a dict
-    suitable for logging (with ``_parse_error`` and ``_raw`` keys). Callers
-    that need a string error message should read ``error_info["_parse_error"]``.
-
-    Tool schemas require objects, so anything that parses to a non-dict is
-    treated as an error — otherwise ``args is None`` would be ambiguous
-    (parse failure vs. JSON ``null``) and non-dict values would silently
-    reach ``tool.execute`` and crash there with a less useful message.
+    Accepts JSON objects only. Errors return (None, error_info), where
+    error_info contains ``_parse_error`` and ``_raw`` for logging.
     """
     try:
         args = json.loads(raw)
@@ -141,13 +133,10 @@ EMPTY_REPLY_NUDGE = (
     "tool, or state your final answer in plain text."
 )
 
-# A tool-less reply that announces the next step ("Let me look at the tests:") is a plan
-# whose tool call went missing, not a final answer; one nudge lets the model resume.
+# Allow one continuation nudge for a plan-like reply without a tool call.
 MAX_PLAN_REPLY_NUDGES = 1
 
-# A SyntaxError from program text nested inside a Python string literal (the cell's own
-# code, not the program it wrote) earns a one-line hint on the delimiter fix, up to this
-# many times per prompt; muted with rlm.hints.mute("quote-nesting").
+# Per-prompt limit for string-delimiter hints.
 MAX_QUOTE_NESTING_HINTS = 2
 _QUOTE_NESTING_RE = re.compile(r"Cell In\[\d+\][\s\S]{0,400}?SyntaxError: ")
 _TRIPLE_QUOTE_RE = re.compile(r"\"\"\"|'''")
@@ -746,15 +735,10 @@ class RLMEngine:
             if not msg.tool_calls:
                 if self._deliver_supervisor_input(include_queue=True, notify=False):
                     continue
-                # An empty, tool-less reply that stopped normally is almost always a
-                # glitch (the model meant to call a tool and the call was lost), not a
-                # deliberate final answer: nudge it to continue, a bounded number of
-                # times, before accepting the empty answer.
+                # Give empty replies a bounded opportunity to continue.
                 if (
                     not (msg.content or "").strip()
-                    # a lost tool call surfaces as "stop", as "tool_calls" with an
-                    # empty list, or with no finish reason at all; "length" is a
-                    # different failure handled by compaction
+                    # Length-limited responses are handled by compaction.
                     and response.choices[0].finish_reason
                     in (None, "stop", "tool_calls")
                     and self._empty_reply_nudges < MAX_EMPTY_REPLY_NUDGES
@@ -814,8 +798,6 @@ class RLMEngine:
                         content="Error: wait accepts timeout between 0 and 300 seconds."
                     )
                 else:
-                    # A longer wait is not an error: clamp to the 300 s ceiling and say
-                    # so, instead of costing the model a turn to learn the limit.
                     note = ""
                     if timeout > 300:
                         note = f"Note: wait timeout clamped from {timeout:g} to 300 seconds.\n"
@@ -1180,14 +1162,9 @@ class RLMEngine:
         toward token budgets. Every committed attempt remains represented in the
         semantic graph.
 
-        Active tools are forwarded with ``tool_choice="none"`` so the system prompt matches
-        regular turns (vLLM's chat-completions layer injects the tools
-        block into the system message only when ``tools=`` is set). With
-        a matching system prompt, prime-rl's RL trajectory walker keeps
-        the extension property across the compaction boundary instead
-        of opening an extra training-sample split. ``tool_choice="none"``
-        keeps the original "text-only summary" behaviour by forbidding
-        tool calls on this turn.
+        Forwarding active tool schemas preserves vLLM's system-message tool block
+        and prime-rl's trajectory extension property across compaction.
+        ``tool_choice="none"`` forbids tool calls in the summary response.
         """
         dropped_chars = _count_messages_chars(messages[1:])
         turns_since_last = turn + 1 - self._branch_start_turn

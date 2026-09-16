@@ -6,8 +6,8 @@ subcommands given another ref (``git show origin/main``), listing branches/tags/
 remotes, and ``clone``/``fetch``/``pull``.
 ``git status``, ``git diff``, ``git log`` on the current branch and ``git stash`` stay usable.
 
-- split a bash command on ``&&``, ``||``, ``;`` and ``|``
-- if a segment invokes ``git log`` with a restricted history flag, refuse
+Checks shell command segments and statically recognizable Python invocations.
+This is a command guard, not an isolation boundary.
 
 Standalone execution can disable the guard with ``RLM_ALLOW_GIT=1``. Managed
 execution passes the resolved policy explicitly.
@@ -25,8 +25,7 @@ REFUSAL_TEMPLATE = (
     "branches, tags, remotes, reflog, clones or fetches."
 )
 
-# Reuse the mini_swe_agent_plus separators verbatim so behavior matches; command
-# substitutions and backticks are split as well so `echo $(git log --all)` is seen.
+# Split command separators and substitution delimiters.
 _SEPARATORS = re.compile(r"&&|\|\||;|\||\$\(|`|\)")
 
 # Subcommands that reach beyond the current branch's history by construction.
@@ -416,7 +415,7 @@ def _strip_ipython_only(code: str) -> str:
     """Drop ipython-only lines so the remainder is pure Python for ``ast.parse``.
 
     Removes ``!cmd`` / ``!!cmd`` shell escapes, line magics (``%foo``),
-    and any ``%%cellmagic`` header plus its body. Trailing ``?`` / ``??``
+    and ``%%cellmagic`` headers, preserving their bodies. Trailing ``?`` / ``??``
     object-inspection markers are stripped from the line tail rather
     than dropping the whole line, so ``subprocess.run?`` becomes
     ``subprocess.run`` and still parses. All other Python lines are
@@ -424,12 +423,7 @@ def _strip_ipython_only(code: str) -> str:
     """
     out: list[str] = []
     for line in code.splitlines():
-        # Drop only the cell-magic HEADER, not the body — magics like
-        # ``%%timeit`` / ``%%capture`` execute their body as Python and
-        # would otherwise hide ``subprocess.run([\"git\", ...])`` calls.
-        # Bash-bodied magics (``%%bash`` / ``%%sh``) are caught earlier
-        # by the shell-escape pre-pass, so dropping just the header here
-        # is safe.
+        # Python cell magics execute their bodies; keep those visible to the AST scan.
         if _ANY_CELL_MAGIC_RE.match(line):
             continue
         if _SHELL_ESCAPE_RE.match(line) or _ANY_LINE_MAGIC_RE.match(line):

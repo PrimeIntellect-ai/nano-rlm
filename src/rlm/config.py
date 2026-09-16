@@ -122,9 +122,7 @@ class RuntimeConfig(_ConfigModel):
         node (depth >= 1, can still recurse)      -> subagent_append_to_system_prompt
         leaf (depth == max_depth, cannot recurse) -> leaf_append_to_system_prompt
 
-        Each tier falls back to the next-more-general one (leaf -> subagent -> root),
-        so any unset append preserves the prior single-append behavior. Mirrors the
-        allow_recursion gating that build_system_prompt uses for the built-in rlm hint.
+        Unset tiers fall back in order: leaf -> subagent -> root.
         """
         if self.invocation.depth == 0:
             return self.append_to_system_prompt

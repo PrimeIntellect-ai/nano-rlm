@@ -35,7 +35,7 @@ def test_kernel_env_passes_everything_except_the_blocklist():
         "PRIME_TEAM_ID": "team",
         "RLM_BASE_URL": "http://broker",
         "AWS_REGION": "eu-west-1",
-        # cursor-bot review: official password variables and credential URLs without a user part
+        # Password variables and credential URLs without a username.
         "MYSQL_PWD": "x",
         "PGPASSFILE": "/root/.pgpass",
         "REDIS_PASS": "x",

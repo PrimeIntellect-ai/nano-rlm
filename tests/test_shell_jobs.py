@@ -183,7 +183,7 @@ import asyncio
 listed = await rlm.shell.list()
 assert not hasattr(listed[-1], 'read') and not hasattr(listed[-1], 'handle')
 assert (await (await rlm.shell.get(listed[-1].id)).info()).id == listed[-1].id
-snap = await rlm.shell.run('sleep 1; printf slow', yield_after=0.2)  # timeout= is the wait bound; the job keeps running
+snap = await rlm.shell.run('sleep 1; printf slow', yield_after=0.2)  # yielding leaves the job running
 assert snap.running and snap.exit_code is None and not snap.ok and snap.text.startswith('[yielded after')
 bounded = await snap.result()  # result() waits for it
 assert bounded.ok and bounded.text == 'slow' and not bounded.running and bounded.id == snap.id
