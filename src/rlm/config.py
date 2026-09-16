@@ -84,7 +84,9 @@ class ExecutionPolicy(_ConfigModel):
     max_compaction_attempts: int = Field(default=5, gt=0)
     """Summary-generation attempts within one compaction cycle."""
     max_concurrent_subagents: int = Field(default=4, gt=0)
-    max_subagent_calls: int = Field(default=64, gt=0)
+    max_subagent_calls: int | None = Field(default=None, gt=0)
+    """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
+    still bounds the tree."""
     allow_git: bool = False
 
     @model_validator(mode="after")
