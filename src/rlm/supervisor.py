@@ -47,22 +47,18 @@ from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
 from rlm.types import ProgrammaticToolCallStats, RLMResult
 
-# When a blocking run() detaches (see RUN_DETACH_SECONDS) the supervisor explains the
-# unusual result once per occurrence, at most MAX_LONG_RUN_NOTES times per agent.
+# Per-agent limits for runtime hints.
 MAX_LONG_RUN_NOTES = 3
-# A native wait while holding a running job earns a pointer at result(), at most this often.
 MAX_WAIT_HELD_JOB_HINTS = 2
 # shell.completed events carry this much of the end of the output.
 COMPLETED_TAIL_BYTES = 4 * 1024
-# A `VAR=value cmd` prefix repeated this many times on one variable earns a hint that
-# rlm.shell.setenv() applies it to every later command (once per variable, tag env-prefix).
+# Hint once per variable after this many command prefixes.
 ENV_PREFIX_HINT_AFTER = 3
 _ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 
 
 def _leading_env_assignments(command: str) -> list[tuple[str, str]]:
-    """`VAR=value` words that prefix the first simple command of a Bash string, after any
-    leading `cd dir &&` and an optional `env`; the model's way of setting PYTHONPATH per call."""
+    """Read leading assignments after an optional `cd dir &&` and `env`."""
     first = re.split(r"\s*(?:&&|\|\||;|\|)\s*", command.strip(), maxsplit=1)
     segment = first[0]
     if segment.startswith("cd ") and len(first) > 1:
@@ -601,8 +597,7 @@ class SessionTreeSupervisor:
         return selected
 
     def _note_env_prefixes(self, agent: _Invocation, command: str) -> None:
-        """Count `VAR=value` command prefixes; the ENV_PREFIX_HINT_AFTER-th use of one
-        variable earns a one-time hint pointing at rlm.shell.setenv()."""
+        """Suggest setenv() after repeated assignments to the same variable."""
         for name, value in _leading_env_assignments(command):
             count = agent.env_prefixes.get(name, 0) + 1
             agent.env_prefixes[name] = count
@@ -617,8 +612,7 @@ class SessionTreeSupervisor:
                 )
 
     def _note_wait_with_held_jobs(self, agent: _Invocation) -> None:
-        """A native wait while the agent holds a running job it was handed back is a
-        detour (wait -> inbox -> get -> result): point at result()."""
+        """Suggest result() when native wait is called with outstanding jobs."""
         if (
             agent.wait_hints >= MAX_WAIT_HELD_JOB_HINTS
             or "wait-held-job" in agent.muted_hints
@@ -661,8 +655,7 @@ class SessionTreeSupervisor:
         """Pending runtime notices for the agent's next turn as a structured record:
         {"text", "hints": [tags], "unread": int | None, "error": bool}. Clears them."""
         agent = self._invocations[invocation_id]
-        # shell.completed is quiet: the agent holds the job and collects it with
-        # job.result(). It still wakes a native wait through len(inbox) > announced.
+        # Quiet completions have a separate wait cursor and no unread-count notice.
         loud = [event for event in agent.inbox if event["type"] != "shell.completed"]
         new_events = len(loud) > agent.announced_loud
         agent.announced_loud = len(loud)
@@ -679,9 +672,7 @@ class SessionTreeSupervisor:
         error = bool(agent.inbox_error)
         if agent.inbox_error:
             notices.append(agent.inbox_error)
-        # The unread count is announced when it changes or new events arrive, not on every
-        # turn: an event the agent has decided to leave unread would otherwise repeat the
-        # same line for the rest of the episode.
+        # Announce unread counts only on changes or new arrivals.
         unread = None
         if count and (new_events or count != agent.unread_announced):
             unread = count
@@ -814,8 +805,7 @@ class SessionTreeSupervisor:
                     "output_complete": job.info.output_complete,
                     "output_truncated": job.info.output_truncated,
                     "error": job.info.error,
-                    # The last lines of output ride along so a completion can be judged
-                    # from the event alone; `await job.result()` gives the full text.
+                    # Include a bounded output tail for inspecting the completion.
                     "text": self._shell_jobs.read(
                         job,
                         max(0, job.info.output_bytes - COMPLETED_TAIL_BYTES),
@@ -920,8 +910,6 @@ class SessionTreeSupervisor:
                     "(or .result() on this object) returns the output when it finishes]\n",
                     partial=False,
                 )
-            # Wait the caller's bound, then hand the job back running rather than
-            # blocking further or killing it.
             try:
                 await asyncio.wait_for(asyncio.shield(job.task), block)
             except asyncio.TimeoutError:

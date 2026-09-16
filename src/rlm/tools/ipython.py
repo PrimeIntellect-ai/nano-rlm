@@ -59,13 +59,8 @@ IPYTHON_SCHEMA = {
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 IPYTHON_TIMEOUT_MAX_SECONDS = 600
-# The kernel and supervisor-owned Bash inherit this process's environment (in a
-# sandbox: the image's ENV plus whatever the launcher added; locally: the developer's
-# shell) minus a blocklist. Blocked: credential-looking names, values that embed URL
-# credentials, launcher provider/infra configuration (OPENAI_*, PRIME_*, RLM_*, AWS_*, ...),
-# variables that would break or redirect the kernel's own interpreter and venv, and
-# agent/daemon sockets. Everything else passes so that projects see the
-# toolchain the way their own tests do (PYTHONPATH, GOMODCACHE, NODE_OPTIONS, ...).
+# Kernel and Bash environments inherit project variables, filtering credentials,
+# launcher configuration, interpreter overrides, and host service sockets.
 _KERNEL_SECRET_ENV_RE = re.compile(
     r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|COOKIE|SESSION"
     r"|(?:^|_)PWD$|_PW$|PASS$|PASSFILE$",  # MYSQL_PWD, PGPASSFILE, *_PASS
