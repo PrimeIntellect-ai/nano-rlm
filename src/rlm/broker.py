@@ -41,87 +41,63 @@ _JSON_TO_PY = {
 }
 
 
-class BrokerAgentSpawnRequest(TypedDict):
+class _BrokerRequestBase(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
-    op: Literal["agent.spawn"]
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerAgentSpawnRequest(_BrokerRequestBase):
+    op: Literal["agent.spawn"]
     task: Annotated[str, Field(min_length=1)]
     name: Annotated[str, Field(min_length=1)] | None
     persistent: bool
 
 
-class BrokerAgentGetRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerAgentGetRequest(_BrokerRequestBase):
     op: Literal["agent.get"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     name_or_id: Annotated[str, Field(min_length=1)]
 
 
-class BrokerAgentListRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerAgentListRequest(_BrokerRequestBase):
     op: Literal["agent.list"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     recursive: bool
 
 
-class BrokerAgentHandleRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerAgentHandleRequest(_BrokerRequestBase):
     op: Literal["agent.info", "agent.result", "agent.cancel"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     agent_id: Annotated[str, Field(min_length=1)]
 
 
-class BrokerAgentWaitRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerAgentWaitRequest(_BrokerRequestBase):
     op: Literal["agent.wait"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     agent_id: Annotated[str, Field(min_length=1)]
     timeout: Annotated[float, Field(ge=0, le=300, allow_inf_nan=False)]
 
 
-class BrokerAgentMessageRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerAgentMessageRequest(_BrokerRequestBase):
     op: Literal["agent.send", "agent.steer"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     agent_id: Annotated[str, Field(min_length=1)]
     message: Annotated[str, Field(min_length=1)]
 
 
-class BrokerAgentReportRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerAgentReportRequest(_BrokerRequestBase):
     op: Literal["agent.report"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     message: Annotated[str, Field(min_length=1)]
 
 
-class BrokerInboxListRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerInboxListRequest(_BrokerRequestBase):
     op: Literal["inbox.list"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     unread_only: bool
 
 
-class BrokerInboxReadRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerInboxReadRequest(_BrokerRequestBase):
     op: Literal["inbox.read"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     event_id: Annotated[str, Field(min_length=1)]
 
 
-class BrokerShellRunRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerShellRunRequest(_BrokerRequestBase):
     op: Literal["shell.run"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     command: Annotated[str, Field(min_length=1, max_length=65_536)]
     cwd: str | None
     yield_after: Annotated[float, Field(ge=0)] | None
@@ -129,101 +105,66 @@ class BrokerShellRunRequest(TypedDict):
     env: dict[str, str] | None
 
 
-class BrokerShellResultRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerShellResultRequest(_BrokerRequestBase):
     op: Literal["shell.result"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     job_id: Annotated[str, Field(min_length=1)]
     yield_after: Annotated[float, Field(ge=0)] | None
 
 
-class BrokerShellEnvRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerShellEnvRequest(_BrokerRequestBase):
     op: Literal["shell.setenv", "shell.getenv"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     variables: dict[str, str] | None
 
 
-class BrokerHintsRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerHintsRequest(_BrokerRequestBase):
     op: Literal["hints.mute", "hints.unmute", "hints.muted"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     tags: list[Annotated[str, Field(min_length=1, max_length=64)]]
 
 
-class BrokerShellListRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerShellListRequest(_BrokerRequestBase):
     op: Literal["shell.list"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
 
 
-class BrokerShellHandleRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerShellHandleRequest(_BrokerRequestBase):
     op: Literal["shell.info", "shell.cancel"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     job_id: Annotated[str, Field(min_length=1)]
 
 
-class BrokerShellReadRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerShellReadRequest(_BrokerRequestBase):
     op: Literal["shell.read"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     job_id: Annotated[str, Field(min_length=1)]
     cursor: Annotated[int, Field(ge=0)]
     max_bytes: Annotated[int, Field(ge=1, le=65_536)]
 
 
-class BrokerWatchAgentRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerWatchAgentRequest(_BrokerRequestBase):
     op: Literal["watch.agent"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     agent_id: Annotated[str, Field(min_length=1)]
 
 
-class BrokerWatchJobRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerWatchJobRequest(_BrokerRequestBase):
     op: Literal["watch.job"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     job_id: Annotated[str, Field(min_length=1)]
 
 
-class BrokerWatchPathRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerWatchPathRequest(_BrokerRequestBase):
     op: Literal["watch.path"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     path: Annotated[str, Field(min_length=1, max_length=4096)]
     recursive: bool
 
 
-class BrokerWatchListRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerWatchListRequest(_BrokerRequestBase):
     op: Literal["watch.list"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
 
 
-class BrokerWatchHandleRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+class BrokerWatchHandleRequest(_BrokerRequestBase):
     op: Literal["watch.get", "watch.cancel"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     subscription_id: Annotated[str, Field(min_length=1)]
 
 
-class BrokerSkillRequest(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="forbid")
+class BrokerSkillRequest(_BrokerRequestBase):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=False)
     op: Literal["skill.call"]
-    capability: Annotated[str, Field(min_length=1)]
-    scope_id: Annotated[str, Field(min_length=1)]
     skill_capability: Annotated[str, Field(min_length=1)]
     arguments: dict[str, Any]
 
