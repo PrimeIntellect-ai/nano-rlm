@@ -261,3 +261,18 @@ class RLMResult:
     session_dir: Path | None = None
     usage: TokenUsage = field(default_factory=TokenUsage)
     turns: NonNegativeInt = 0
+
+
+@dataclass
+class AgentResult:
+    """A child's latest answer together with its current state."""
+
+    status: str
+    answer: str | None = None
+    session_dir: Path | None = None
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    turns: NonNegativeInt = 0
+
+    @property
+    def running(self) -> bool:
+        return self.status in {"starting", "running", "waiting"}

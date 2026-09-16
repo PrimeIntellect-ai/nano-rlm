@@ -208,9 +208,9 @@ Agent cleanup errors are reported separately in AgentInfo.cleanup_error; complet
 `await rlm.inbox.list()` returns unread event dictionaries: ["id"], ["type"],
 ["sender_id"], ["created_at"], ["read"]; listed items carry no ["content"] and listing
 does not mark events read. `event = await rlm.inbox.read(event_id)` returns a dictionary
-with ["content"] and marks it read. For supervisor events (shell.completed, agent.completed,
-watch.*) content is a dictionary: index its keys, do not slice it; for agent.message it is
-the string a child sent. `list(unread_only=False)` includes read events; reads are repeatable.
+with ["content"] and marks it read. Content is always a dictionary: index its keys, do not
+slice it. An `agent.message` a child sent has ["agent_id"], ["name"] and ["text"].
+`list(unread_only=False)` includes read events; reads are repeatable.
 A read flag means retrieved, not completed or acted upon.
 
 Supervisor notifications show the unread count when it changes, plus occasional one-line hints about
@@ -261,19 +261,23 @@ Objects use attributes; inbox events and history messages are dictionaries.
 
 AGENT_PROMPT = """## Delegation
 `child = await rlm.agent.spawn(task, name="researcher", persistent=False)` returns
-an AgentHandle immediately. Give the child a self-contained task, relevant constraints,
+an AgentHandle (.id, .name, .session_dir) immediately. Give the child a self-contained task, relevant constraints,
 and an expected result. Names are unique among siblings and reserved for the session.
 `await rlm.agent.list()` returns AgentInfo objects with .id, .parent_id, .name, .task,
-.status, .persistent, .session_dir, and timing. `recursive=True` also lists descendants;
+.status, .persistent, .turns, .session_dir, and timing. `recursive=True` also lists descendants;
 only direct children can be controlled. Finished children remain discoverable. Recover a direct child with
 `await rlm.agent.get(name_or_id)`. Reassigning/deleting a Python handle does not stop it.
 
-`await child.info()` reads metadata. `await child.result()` returns an RLMResult
-(.answer, .usage, .turns, .session_dir), or None before its first answer. The latest answer
-remains available while a persistent child runs again; use info/wait for current activity.
-Terminal failure/cancellation raises.
-Child completion/failure posts `agent.completed` automatically;
-`event["content"]["agent_id"]` identifies the child and ["status"] gives its state. Inspect the event and recover the handle rather than assuming success.
+`await child.info()` reads metadata. `await child.result()` waits up to 300 s (or its
+yield_after=) for the child to finish and returns an AgentResult (.status, .answer, .usage,
+.turns, .session_dir, .running). If the child is still working on its first answer, .answer is
+None and .running is True: keep going and collect later, or from the `agent.completed` event.
+A persistent child's latest answer stays available while it runs again. Terminal
+failure/cancellation raises.
+Child completion/failure posts `agent.completed` automatically; its content has
+["agent_id"], ["name"], ["status"], ["turns"], ["error"] and ["answer"] (the last 4 KiB of
+the child's answer), so the event alone tells you what came back; `await child.result()`
+has the full answer. Inspect the event rather than assuming success.
 `await child.history()` returns a fresh history snapshot. `await child.cancel()` terminates
 that child and its descendants. Terminating a parent ends its whole subtree.
 
@@ -290,8 +294,12 @@ result; prefer native wait when you have no other work. Cell timeouts still appl
 `await rlm.watch.agent(child)` watches a direct child's conversation after complete
 assistant/tool steps, including final answers. Its `watch.agent` event content identifies
 the child via target and gives start:end indices for
-`(await child.history()).messages[start:end]`. It observes progress without waiting for an explicit
-report. Read history, then steer if needed; the subscription itself does not direct the child.
+`(await child.history()).messages[start:end]`. `await rlm.watch.agent(child, every_turns=10)` (and/or
+`every_tokens=50000`) instead posts a `watch.progress` event each time the child's own model
+calls or new tokens cross the next multiple, with ["turns"], ["tokens"], ["name"], ["status"]
+and the same start:end slice — the way to keep a long-running child in view: read its recent
+history, then `await child.steer("report what you have and stop")` if it should wrap up. The
+subscription itself does not direct the child.
 """
 
 HISTORY_PROMPT = """## Conversation history
@@ -392,7 +400,7 @@ def build_system_prompt(
             )
         if depth > 0:
             parts.append(
-                "Use `await rlm.agent.send_to_parent(message)` to put a report in your immediate parent's inbox; it returns an event ID. Your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
+                "Your final answer is your deliverable: it reaches your parent as an `agent.completed` event and through `result()`. Use `await rlm.agent.send_to_parent(message)` for interim findings, blockers or questions, not to repeat the final report; it returns an event ID and your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
             )
         else:
             parts.append(

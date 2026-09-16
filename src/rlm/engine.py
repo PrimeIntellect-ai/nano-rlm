@@ -1108,7 +1108,7 @@ class RLMEngine:
             if checkpoint:
                 self._supervisor.record_usage(new_tokens)
             else:
-                self._supervisor.record_call(new_tokens)
+                self._supervisor.record_call(new_tokens, self._invocation_id)
         if not checkpoint:
             self._last_prompt_tokens = usage.prompt_tokens
             self._last_call_id = request_id
