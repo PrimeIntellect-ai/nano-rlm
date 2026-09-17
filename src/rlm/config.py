@@ -65,6 +65,15 @@ class HarnessConfig(_ConfigModel):
     max_prompt_entries_per_kind: int = Field(default=6, gt=0)
     max_prompt_content_chars: int = Field(default=180, gt=0)
     max_prompt_refinements: int = Field(default=5, ge=0)
+    auto_refine: bool = False
+    """Let the root engine review its own trajectory every ``refine_turn_interval``
+    work turns (and after each compaction) and refine when the review approves."""
+    refine_turn_interval: int = Field(default=12, gt=0)
+    refine_cooldown_seconds: int = Field(default=300, ge=0)
+    max_refinements: int | None = Field(default=None, gt=0)
+    """Refinement passes per engine before further requests are declined."""
+    max_refinement_attempts: int = Field(default=3, gt=0)
+    """Proposal attempts within one pass; an unusable reply is resampled."""
 
 
 class ExecutionPolicy(_ConfigModel):

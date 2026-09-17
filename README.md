@@ -68,7 +68,7 @@ configuration.
 Model calls also carry a private `X-ACP-Model-Request-ID` correlation header.
 RLM publishes sparse, labeled relationships between those request IDs under
 `ai.prime.acp/semantic-edges-v1`: `continuation`, `subagent_call`,
-`subagent_return`, and `compaction`. `continuation` preserves same-agent causal
+`subagent_return`, `compaction`, `refinement_attempt`, and `refinement`. `continuation` preserves same-agent causal
 order even when a consumer's physical token-prefix graph splits. ACP consumers
 can resolve the request IDs onto their own message nodes while harnesses that do
 not understand the extension ignore it.
@@ -234,7 +234,12 @@ stores read-only alongside its own. The contract's `harness` object controls the
   "global_dir": null,
   "max_prompt_entries_per_kind": 6,
   "max_prompt_content_chars": 180,
-  "max_prompt_refinements": 5
+  "max_prompt_refinements": 5,
+  "auto_refine": false,
+  "refine_turn_interval": 12,
+  "refine_cooldown_seconds": 300,
+  "max_refinements": null,
+  "max_refinement_attempts": 3
 }
 ```
 
@@ -265,6 +270,40 @@ package (see [Skills](#skills) for the on-disk skill contract). Stores are rewri
 atomically under a file lock and reloaded when another writer changed them, so the engine
 and the kernel share one file safely. `harness(session_dir=...)` loads a session's local
 store outside a running session.
+
+### Refinement
+
+Refinement is a side model call, like compaction: the live conversation is extended with
+one user message asking for a JSON proposal of create/update/delete edits, the proposal is
+validated and applied under the store's lock, the system prompt is rebuilt in place (a new
+`context_window` with `reason="harness"` that keeps every other message index), and a
+`<runtime_event kind="refinement">` notice tells the model what changed. Rejected edits
+(unknown module in a `skill` reference, edits to the base system prompt, entries that
+changed while planning, …) are recorded with an error and the rest still apply. Each
+store's `refinements.jsonl` holds one full result per pass with per-edit `before`/`after`
+snapshots; a rollback replays those snapshots in reverse and needs no model call.
+
+Three triggers, all of which run between model calls and never inside a cell:
+
+- **Kernel**: `await rlm.refine.run(instructions=None, global_=False, rollback_id=None)`
+  returns `{"scheduled": True}` (or a reason) and the pass runs at the next boundary;
+  `await rlm.refine.status()` reports `pending`/`in_flight`.
+- **Host**: `session/prompt` may carry `ai.prime.rlm/refine-v1` in `_meta`:
+  `{"instructions": "...", "global": false, "rollback_id": null}`. The pass runs before
+  the turn; with an empty prompt it is the whole turn and the notice is the answer
+  (`stop_reason` `refined`). The key is refused when the harness is disabled.
+- **Auto** (`auto_refine`, off by default, root agent only): every `refine_turn_interval`
+  work turns and after each compaction, subject to `refine_cooldown_seconds`, a cheap
+  review call decides whether the trajectory holds evidence worth persisting; only an
+  approving review triggers a plan.
+
+`max_refinements` caps passes per engine; `max_refinement_attempts` bounds how often an
+unusable reply (truncated JSON, prose, a tool call) is resampled before the pass is
+reported as failed in the conversation and the run continues. Plan and review calls carry
+`refinement_attempt` semantic edges from the last work request; the applied plan request
+becomes the source of a `refinement` edge into the next work request, which also keeps its
+ordinary `continuation` edge. Refinement counts and edit totals appear in the session
+metrics; the `session-v1` snapshot carries per-scope entry counts under `harness`.
 
 ## Skills
 

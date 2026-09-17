@@ -330,8 +330,14 @@ content, reference={"type": "python", "import": "<module>", "callable": "run",
 importable module; `h.create_subagent(title, content)` for a reusable delegation role.
 `update_*(id, title, content)` and `delete_*(id)` edit existing entries; pass `global_=True`
 to write the global store when one is configured. Ancestor entries cannot be edited.
-Refine after a repeated failure, a reusable tactic, a repeated delegation role, or a user
-correction that should persist. Keep entries small and evidence-backed."""
+`await rlm.refine.run(instructions=None, global_=False)` asks the runtime to review this
+conversation and apply small, evidence-backed harness edits itself; it returns at once and
+the pass runs at the next model-call boundary, after which a `<runtime_event
+kind="refinement">` notice lists the edits and the system prompt reflects them. Call it
+after a repeated failure, a reusable tactic, a repeated delegation role, or a user
+correction that should persist; use the direct `create_*` calls when you already know the
+exact entry to write. `await rlm.refine.run(rollback_id=...)` undoes a listed refinement.
+Keep entries small and evidence-backed."""
 
 HARNESS_SPAWN_HINT = (
     "(invoke a spec by turning it into a concise task prompt and spawning with "

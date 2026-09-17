@@ -8,6 +8,7 @@ from typing import Literal
 
 
 CompactionStatus = Literal["completed", "failed", "cancelled"]
+RefinementStatus = Literal["completed", "failed", "cancelled", "declined"]
 
 MODEL_REQUEST_ID_HEADER = "X-ACP-Model-Request-ID"
 ACP_EXTENSION_HEADER_NAMES = (MODEL_REQUEST_ID_HEADER,)
@@ -47,6 +48,7 @@ class _Request:
     session_id: str
     inbound_edges: list[_PendingEdge]
     compaction_id: str | None = None
+    refinement_id: str | None = None
 
 
 @dataclass
@@ -57,6 +59,22 @@ class _Compaction:
     summary_request_id: str | None = None
 
 
+@dataclass(frozen=True)
+class Refinement:
+    refinement_id: str
+    session_id: str
+
+
+@dataclass
+class _Refinement:
+    """A harness refinement: side requests that never consume the session's pending
+    edges, because the next work request still continues the same context."""
+
+    session_id: str
+    source_request_id: str | None
+    plan_request_id: str | None = None
+
+
 class SemanticEdgeTracker:
     """Semantic request edges shared by every engine in one recursive tree."""
 
@@ -64,6 +82,7 @@ class SemanticEdgeTracker:
         self._sessions: dict[str, _Session] = {}
         self._requests: dict[str, _Request] = {}
         self._compactions: dict[str, _Compaction] = {}
+        self._refinements: dict[str, _Refinement] = {}
         self._edges: list[dict[str, str]] = []
 
     def register_session(
@@ -103,9 +122,23 @@ class SemanticEdgeTracker:
         session_id: str,
         *,
         compaction_id: str | None = None,
+        refinement_id: str | None = None,
     ) -> str:
         session = self._sessions[session_id]
-        if compaction_id is not None:
+        if compaction_id is not None and refinement_id is not None:
+            raise ValueError("a request belongs to one side operation")
+        if refinement_id is not None:
+            refinement = self._refinements[refinement_id]
+            if refinement.session_id != session_id:
+                raise ValueError("refinement does not belong to session")
+            if refinement.plan_request_id is not None:
+                raise ValueError("refinement already has a plan request")
+            inbound = []
+            if refinement.source_request_id is not None:
+                inbound.append(
+                    _PendingEdge(refinement.source_request_id, "refinement_attempt")
+                )
+        elif compaction_id is not None:
             compaction = self._compactions[compaction_id]
             if compaction.session_id != session_id:
                 raise ValueError("compaction does not belong to session")
@@ -136,10 +169,12 @@ class SemanticEdgeTracker:
 
         request_id = uuid.uuid4().hex
         self._requests[request_id] = _Request(
-            session_id, list(dict.fromkeys(inbound)), compaction_id
+            session_id, list(dict.fromkeys(inbound)), compaction_id, refinement_id
         )
         if compaction_id is not None:
             compaction.summary_request_id = request_id
+        if refinement_id is not None:
+            refinement.plan_request_id = request_id
         return request_id
 
     def finish_request(self, request_id: str) -> None:
@@ -152,7 +187,7 @@ class SemanticEdgeTracker:
                     "type": inbound.type,
                 }
             )
-        if request.compaction_id is None:
+        if request.compaction_id is None and request.refinement_id is None:
             self._sessions[request.session_id].last_request_id = request_id
 
     def fail_request(self, request_id: str) -> None:
@@ -162,6 +197,11 @@ class SemanticEdgeTracker:
             compaction = self._compactions.get(request.compaction_id)
             if compaction is not None and compaction.summary_request_id == request_id:
                 compaction.summary_request_id = None
+            return
+        if request.refinement_id is not None:
+            refinement = self._refinements.get(request.refinement_id)
+            if refinement is not None and refinement.plan_request_id == request_id:
+                refinement.plan_request_id = None
             return
         session.pending_edges = request.inbound_edges + session.pending_edges
 
@@ -198,6 +238,34 @@ class SemanticEdgeTracker:
         del session.pending_edges[: len(captured_edges)]
         session.last_request_id = summary_request_id
         session.pending_edges.append(_PendingEdge(summary_request_id, "compaction"))
+
+    def begin_refinement(self, session_id: str) -> Refinement:
+        session = self._sessions[session_id]
+        refinement_id = uuid.uuid4().hex
+        self._refinements[refinement_id] = _Refinement(
+            session_id=session_id, source_request_id=session.last_request_id
+        )
+        return Refinement(refinement_id=refinement_id, session_id=session_id)
+
+    def release_refinement_request(self, refinement_id: str) -> None:
+        """Release a committed attempt whose reply was unusable so another can start."""
+        refinement = self._refinements[refinement_id]
+        if refinement.plan_request_id is None:
+            raise ValueError("refinement has no plan request to reject")
+        refinement.plan_request_id = None
+
+    def finish_refinement(self, refinement_id: str, status: RefinementStatus) -> None:
+        """A completed refinement makes the next work request depend on the plan
+        request that produced the applied edits; the request also keeps its ordinary
+        ``continuation`` edge, since the conversation itself was not replaced."""
+        refinement = self._refinements.pop(refinement_id)
+        if status != "completed":
+            return
+        if refinement.plan_request_id is None:
+            raise ValueError("completed refinement requires a successful plan request")
+        self.deliver_message(
+            refinement.session_id, refinement.plan_request_id, edge_type="refinement"
+        )
 
     def last_request_id(self, session_id: str) -> str | None:
         return self._sessions[session_id].last_request_id

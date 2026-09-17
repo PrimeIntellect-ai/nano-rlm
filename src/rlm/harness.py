@@ -35,6 +35,7 @@ EntryLayer = Literal["local", "ancestor", "global"]
 
 KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
 STATE_FILE_NAME = "harness_state.json"
+RESULTS_FILE_NAME = "refinements.jsonl"
 HARNESS_DIR_NAME = "harness"
 
 LOCAL_DIR_ENV = "RLM_HARNESS_LOCAL_DIR"
@@ -279,6 +280,31 @@ class HarnessStore:
                 yield
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
+
+    @contextmanager
+    def transaction(self) -> Iterator[HarnessStore]:
+        """Lock, reload, let the caller edit ``entries``/``refinements`` directly, then
+        save once. The lock is not re-entrant: use plain attribute edits inside."""
+        with self._locked():
+            yield self
+            self.save()
+
+    def append_result(self, record: dict[str, Any]) -> None:
+        """Append one full refinement result to this store's ``refinements.jsonl``."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        with open(self.dir / RESULTS_FILE_NAME, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def results(self) -> builtins.list[dict[str, Any]]:
+        """Every refinement result recorded for this store, oldest first."""
+        path = self.dir / RESULTS_FILE_NAME
+        if not path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
 
     # -- reads
 
