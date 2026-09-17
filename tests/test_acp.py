@@ -25,6 +25,7 @@ from rlm.acp import (
 from rlm.engine import RLMEngine
 from rlm.config import (
     ExecutionPolicy,
+    HarnessConfig,
     InvocationContext,
     ProviderConfig,
     RuntimeConfig,
@@ -152,6 +153,8 @@ class _Engine:
                 "max_compactions": None,
                 "max_compaction_attempts": 5,
                 "allow_git": False,
+                "harness_enabled": True,
+                "harness_global": False,
             },
             "semantic_edges": {"edges": []},
         }
@@ -829,6 +832,35 @@ async def test_acp_requires_runtime_metadata(tmp_path):
     with pytest.raises(RequestError):
         await agent.new_session(str(tmp_path))
 
+    assert agent._sessions == {}
+
+
+async def test_acp_runtime_contract_carries_harness_config(monkeypatch, tmp_path):
+    """The optional ``harness`` object reaches the engine; unknown keys are refused."""
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    await _initialize(agent)
+
+    created = await agent.new_session(
+        str(tmp_path),
+        **_runtime_metadata(
+            harness={"enabled": True, "global_dir": str(tmp_path / "global")}
+        ),
+    )
+    engine = _Engine.instances[0]
+    assert engine.runtime_config.harness == HarnessConfig(
+        global_dir=str(tmp_path / "global")
+    )
+    await agent.close_session(created.session_id)
+
+    with pytest.raises(RequestError) as rejected:
+        await agent.new_session(
+            str(tmp_path), **_runtime_metadata(harness={"skills": []})
+        )
+    assert "harness.skills" in str(rejected.value.data)
     assert agent._sessions == {}
 
 

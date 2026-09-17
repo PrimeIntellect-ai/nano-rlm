@@ -43,9 +43,28 @@ class InvocationContext(_ConfigModel):
     """Trusted identity of one engine within a recursive session tree."""
 
     depth: int = Field(default=0, ge=0)
+    ancestor_harness_dirs: tuple[str, ...] = ()
+    """Local harness directories of every ancestor, nearest first; children read
+    them but never write to them."""
 
-    def child(self) -> InvocationContext:
-        return InvocationContext(depth=self.depth + 1)
+    def child(self, harness_dir: str | None = None) -> InvocationContext:
+        ancestors = self.ancestor_harness_dirs
+        if harness_dir is not None:
+            ancestors = (harness_dir, *ancestors)
+        return InvocationContext(depth=self.depth + 1, ancestor_harness_dirs=ancestors)
+
+
+class HarnessConfig(_ConfigModel):
+    """Continual harness: durable prompt notes, memories, skill descriptions and
+    sub-agent specs rendered into the system prompt as a compact block."""
+
+    enabled: bool = True
+    global_dir: str | None = None
+    """Directory of a store shared across sessions. None (default) keeps every
+    session hermetic: only the session-local store and ancestors are visible."""
+    max_prompt_entries_per_kind: int = Field(default=6, gt=0)
+    max_prompt_content_chars: int = Field(default=180, gt=0)
+    max_prompt_refinements: int = Field(default=5, ge=0)
 
 
 class ExecutionPolicy(_ConfigModel):
@@ -113,6 +132,7 @@ class RuntimeConfig(_ConfigModel):
     (`ipython` alone). Validated against the registry when the engine starts."""
     kernel_env: tuple[tuple[str, str], ...] = Field(default=(), repr=False)
     search_api_key: str | None = Field(default=None, repr=False)
+    harness: HarnessConfig = HarnessConfig()
 
     @property
     def resolved_append_to_system_prompt(self) -> str | None:

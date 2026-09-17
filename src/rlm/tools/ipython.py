@@ -264,6 +264,7 @@ class IPythonREPL:
         broker_endpoint: BrokerEndpoint | None = None,
         exec_timeout: int | None = None,
         allow_git: bool | None = None,
+        harness_dirs: Mapping[str, str] | None = None,
     ):
         self.cwd = cwd
         self.session = session
@@ -273,6 +274,8 @@ class IPythonREPL:
         self.broker_endpoint = broker_endpoint
         self.exec_timeout = exec_timeout
         self.allow_git = allow_git
+        # RLM_HARNESS_* variables naming the stores this agent's rlm.harness view reads.
+        self.harness_dirs = dict(harness_dirs or {})
         self._km = None
         self._kc = None
         self._ipc_dir = None
@@ -346,6 +349,7 @@ if {self.exec_timeout!r} is not None:
     os.environ['RLM_EXEC_TIMEOUT'] = str({self.exec_timeout!r})
 if {self.allow_git!r} is not None:
     os.environ['RLM_ALLOW_GIT'] = '1' if {self.allow_git!r} else '0'
+os.environ.update({self.harness_dirs!r})
 
 import nest_asyncio
 nest_asyncio.apply()

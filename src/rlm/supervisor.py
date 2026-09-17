@@ -27,6 +27,7 @@ from rlm.broker import (
 )
 from rlm.config import RuntimeConfig
 from rlm.semantic import SemanticEdgeTracker
+from rlm.harness import local_dir
 from rlm.mcp import (
     MCPRegistry,
     MCPServer,
@@ -420,7 +421,11 @@ class SessionTreeSupervisor:
         persistent: bool,
     ) -> _Invocation:
         policy = parent.runtime_config.policy
-        context = parent.runtime_config.invocation.child()
+        context = parent.runtime_config.invocation.child(
+            str(local_dir(parent.session.dir))
+            if parent.runtime_config.harness.enabled
+            else None
+        )
         if name is not None and any(
             agent.parent_id == parent.id and (agent.name == name or agent.id == name)
             for agent in self._invocations.values()

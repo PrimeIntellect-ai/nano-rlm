@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from rlm.harness import KINDS, HarnessView, format_entry, query_terms, score_entry
+
 if TYPE_CHECKING:
     from rlm.tools.base import BuiltinTool
 
@@ -310,6 +312,84 @@ instructions and evidence by searching/selectively printing records, not the ent
 """
 
 
+HARNESS_INTRO = """## Continual harness
+Supplemental state that outlives single conversations: prompt notes, memories, skill
+descriptions and sub-agent specs. Local entries belong to this session; ancestor entries
+are your parents' local entries (read-only); global entries persist across sessions. The
+lines below are compact summaries used as routing hints, not full descriptions. The base
+system prompt is immutable; prompt entries are supplemental notes only."""
+
+HARNESS_API_PROMPT = """The pre-imported `rlm.harness` module is the Python API; calls are synchronous.
+`h = rlm.harness.harness()` returns the view. `h.overview()` prints everything visible;
+`h.search("query")` ranks entries by term overlap; `h.get(kind, id)` accepts ids exactly as
+shown here (`local:x`, `ancestor:x`, `global:x`). Record a lesson with the smallest fitting
+component: `h.create_memory(title, content)` for durable facts, decisions and failures;
+`h.create_prompt_note(title, content)` for a narrow behavioural policy; `h.create_skill(title,
+content, reference={"type": "python", "import": "<module>", "callable": "run",
+"call_pattern": "await <module>(...)"}, arguments={...})` to describe how to use an
+importable module; `h.create_subagent(title, content)` for a reusable delegation role.
+`update_*(id, title, content)` and `delete_*(id)` edit existing entries; pass `global_=True`
+to write the global store when one is configured. Ancestor entries cannot be edited.
+Refine after a repeated failure, a reusable tactic, a repeated delegation role, or a user
+correction that should persist. Keep entries small and evidence-backed."""
+
+HARNESS_SPAWN_HINT = (
+    "(invoke a spec by turning it into a concise task prompt and spawning with "
+    "`await rlm.agent.spawn(task, name=...)`; collect the answer with `await child.result()`)"
+)
+
+
+def render_harness(
+    view: HarnessView,
+    *,
+    max_entries_per_kind: int = 6,
+    max_content_chars: int = 180,
+    max_refinements: int = 5,
+    query: str | None = None,
+    has_ipython: bool = True,
+    can_delegate: bool = False,
+) -> str:
+    """The harness block for the system prompt: per-kind counts, the most relevant
+    entries within the caps, and recent refinement events."""
+    terms = query_terms(query) if query else []
+    lines = [HARNESS_INTRO, ""]
+    if has_ipython:
+        lines.extend([HARNESS_API_PROMPT, ""])
+    total = 0
+    for kind in KINDS:
+        records = view.entries(kind)
+        total += len(records)
+        if terms and len(records) > max_entries_per_kind:
+            records = sorted(
+                records, key=lambda item: score_entry(item[1], terms), reverse=True
+            )
+            ranked_note = " (ranked by relevance to the task; see h.search)"
+        else:
+            ranked_note = ""
+        header = f"{kind}: {len(records)}"
+        if kind == "subagent" and records and can_delegate:
+            header += " " + HARNESS_SPAWN_HINT
+        lines.append(header + ranked_note)
+        for layer, entry in records[:max_entries_per_kind]:
+            lines.append("- " + format_entry(layer, entry, max_content_chars))
+        if len(records) > max_entries_per_kind:
+            lines.append(
+                f"- +{len(records) - max_entries_per_kind} more {kind} entries"
+            )
+        lines.append("")
+    if total == 0:
+        lines.extend(["No saved harness entries yet.", ""])
+    events = view.refinements()
+    lines.append(f"recent refinements: {len(events)}")
+    for event in events[-max_refinements:] if max_refinements else []:
+        changes = ", ".join(event.changes) if event.changes else "no applied edits"
+        outcome = f"; outcome: {event.outcome}" if event.outcome else ""
+        lines.append(f"- [{event.id}] {event.trigger}: {changes}{outcome}")
+    if len(events) > max_refinements:
+        lines.append(f"- +{len(events) - max_refinements} older refinement events")
+    return "\n".join(lines).strip()
+
+
 def build_system_prompt(
     cwd: str,
     skills_dir: str | None,
@@ -324,6 +404,7 @@ def build_system_prompt(
     task_instructions: str | None = None,
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
+    harness_block: str | None = None,
 ) -> str:
     """Compose task instructions with the guide for this agent's actual runtime."""
     has_ipython = _has_tool(active_tools, "ipython")
@@ -375,6 +456,8 @@ def build_system_prompt(
         )
         + ". Call at most one native tool per model step."
     )
+    if harness_block:
+        parts.append(harness_block)
     if has_ipython:
         parts.extend(
             [

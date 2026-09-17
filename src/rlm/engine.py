@@ -38,9 +38,17 @@ from rlm.compaction import (
     truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
+from rlm.harness import (
+    ANCESTOR_DIRS_ENV,
+    GLOBAL_DIR_ENV,
+    LOCAL_DIR_ENV,
+    HarnessView,
+    build_view,
+    local_dir,
+)
 from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
-from rlm.prompt import build_system_prompt
+from rlm.prompt import build_system_prompt, render_harness
 from rlm.session import Session
 from rlm.skills import enable_builtin_skills
 from rlm.supervisor import SessionTreeSupervisor
@@ -211,6 +219,8 @@ class RLMEngine:
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
+        self.harness_config = config.harness
+        self._harness: HarnessView | None = None
 
         # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
@@ -481,6 +491,20 @@ class RLMEngine:
                     self._owns_supervisor = False
                 raise
 
+        harness_dirs: dict[str, str] = {}
+        if self.harness_config.enabled:
+            ancestors = list(self.runtime_config.invocation.ancestor_harness_dirs)
+            self._harness = build_view(
+                local_dir(self.session.dir),
+                global_dir=self.harness_config.global_dir,
+                ancestor_dirs=ancestors,
+            )
+            harness_dirs[LOCAL_DIR_ENV] = str(self._harness.local.dir)
+            harness_dirs[GLOBAL_DIR_ENV] = (
+                str(self._harness.global_.dir) if self._harness.global_ else ""
+            )
+            harness_dirs[ANCESTOR_DIRS_ENV] = os.pathsep.join(ancestors)
+
         self._repl = IPythonREPL(
             cwd=self.cwd,
             session=self.session,
@@ -490,6 +514,7 @@ class RLMEngine:
             broker_endpoint=broker_endpoint,
             exec_timeout=self.exec_timeout,
             allow_git=self.allow_git,
+            harness_dirs=harness_dirs,
         )
         try:
             startup = asyncio.create_task(asyncio.to_thread(self._repl.start))
@@ -505,15 +530,7 @@ class RLMEngine:
             if cancelled:
                 raise asyncio.CancelledError
 
-            system_prompt = self._load_system_prompt(self._active_tools)
-
-            self.session.log(
-                {
-                    "type": "system",
-                    "message": {"role": "system", "content": system_prompt},
-                },
-                in_context=True,
-            )
+            self._install_system_prompt(prompt)
             self._last_good = len(self.session.messages)
             self._started = True
         except BaseException:
@@ -1321,12 +1338,53 @@ class RLMEngine:
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "max_compaction_attempts": self.max_compaction_attempts,
                 "allow_git": self.runtime_config.policy.allow_git,
+                "harness_enabled": self.harness_config.enabled,
+                "harness_global": self.harness_config.global_dir is not None,
             },
             "semantic_edges": self._semantic_edges.snapshot(),
         }
         return snapshot
 
-    def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
+    def _install_system_prompt(self, task_text: str) -> None:
+        """Build the system prompt and make it the context's first message.
+
+        The first call seeds the context; later calls (the harness changed) replace the
+        system message in place, opening a new context window whose other messages keep
+        their indices.
+        """
+        system_message = {
+            "role": "system",
+            "content": self._load_system_prompt(self._active_tools, task_text),
+        }
+        messages = self.session.messages
+        if messages and messages[0].get("role") == "system":
+            index = self.session.log(
+                {"type": "system", "message": system_message},
+            )
+            indices = [index, *self.session.context_indices[1:]]
+            self.session.replace_context(
+                [system_message, *messages[1:]], reason="harness", indices=indices
+            )
+            return
+        self.session.log({"type": "system", "message": system_message}, in_context=True)
+
+    def _harness_block(self, task_text: str) -> str | None:
+        if self._harness is None:
+            return None
+        has_ipython = any(tool.name == "ipython" for tool in self._active_tools)
+        return render_harness(
+            self._harness,
+            max_entries_per_kind=self.harness_config.max_prompt_entries_per_kind,
+            max_content_chars=self.harness_config.max_prompt_content_chars,
+            max_refinements=self.harness_config.max_prompt_refinements,
+            query=task_text,
+            has_ipython=has_ipython,
+            can_delegate=has_ipython and self.depth < self.max_depth,
+        )
+
+    def _load_system_prompt(
+        self, active_tools: list[BuiltinTool], task_text: str = ""
+    ) -> str:
         return build_system_prompt(
             self.cwd,
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
@@ -1344,6 +1402,7 @@ class RLMEngine:
             agent_info=self._supervisor.agent_context(self._invocation_id)
             if self._supervisor
             else None,
+            harness_block=self._harness_block(task_text),
         )
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:

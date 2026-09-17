@@ -44,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from rlm.engine import RLMEngine
 from rlm.config import (
     ExecutionPolicy,
+    HarnessConfig,
     InvocationContext,
     ProviderConfig,
     RuntimeConfig,
@@ -76,6 +77,7 @@ class _RuntimeMetadata(_ContractModel):
     builtin_tools: list[Annotated[str, Field(min_length=1)]] | None = None
     kernel_env: dict[str, str]
     search_api_key: str | None
+    harness: HarnessConfig | None = None
 
 
 class _UsageSnapshot(_ContractModel):
@@ -106,6 +108,8 @@ class _LimitsSnapshot(_ContractModel):
     max_compactions: int | None = Field(default=None, gt=0)
     max_compaction_attempts: int = Field(gt=0)
     allow_git: bool
+    harness_enabled: bool
+    harness_global: bool
 
 
 class _SemanticEdge(_ContractModel):
@@ -215,6 +219,7 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
             ),
             kernel_env=tuple(payload.kernel_env.items()),
             search_api_key=payload.search_api_key,
+            harness=payload.harness or HarnessConfig(),
         ),
         payload.session_id,
     )
