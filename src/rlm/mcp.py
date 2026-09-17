@@ -238,6 +238,18 @@ async def call_tool(
     return text
 
 
+def _annotation(json_type: Any) -> Any:
+    """Map one JSON schema type to a Python annotation; unions and unknown types stay unannotated."""
+    if isinstance(json_type, list):
+        types = [t for t in json_type if t != "null"]
+        json_type = types[0] if len(types) == 1 else None
+    return (
+        _JSON_TO_PY.get(json_type, inspect.Parameter.empty)
+        if isinstance(json_type, str)
+        else inspect.Parameter.empty
+    )
+
+
 def build_signature(schema: dict[str, Any]) -> inspect.Signature:
     """Return a keyword-only Python signature for a JSON input schema."""
     properties, required = schema.get("properties", {}), set(schema.get("required", []))
@@ -246,7 +258,7 @@ def build_signature(schema: dict[str, Any]) -> inspect.Signature:
             name,
             inspect.Parameter.KEYWORD_ONLY,
             default=inspect.Parameter.empty if name in required else None,
-            annotation=_JSON_TO_PY.get(prop.get("type"), inspect.Parameter.empty),
+            annotation=_annotation(prop.get("type")),
         )
         for name, prop in properties.items()
         if name.isidentifier() and not keyword.iskeyword(name)

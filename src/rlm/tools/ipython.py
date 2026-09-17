@@ -442,9 +442,13 @@ import rlm
             if reply["parent_header"].get("msg_id") != msg_id:
                 continue
             if reply["content"].get("status") != "ok":
-                raise RuntimeError(
-                    f"IPython setup failed: {reply['content'].get('ename', 'unknown error')}"
+                content = reply["content"]
+                detail = ": ".join(
+                    part
+                    for part in (content.get("ename"), content.get("evalue"))
+                    if part
                 )
+                raise RuntimeError(f"IPython setup failed: {detail or 'unknown error'}")
             return
         raise TimeoutError("IPython setup did not respond within 30 seconds")
 
