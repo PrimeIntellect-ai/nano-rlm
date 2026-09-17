@@ -18,18 +18,11 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
+from rlm.broker import json_annotation
+
 MAX_MCP_TOOLS = 128
 MAX_MCP_SKILL_NAME_CHARS = 96
 MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
-
-_JSON_TO_PY = {
-    "string": str,
-    "integer": int,
-    "number": float,
-    "boolean": bool,
-    "array": list,
-    "object": dict,
-}
 
 
 class _MCPConfigModel(BaseModel):
@@ -238,18 +231,6 @@ async def call_tool(
     return text
 
 
-def _annotation(json_type: Any) -> Any:
-    """Map one JSON schema type to a Python annotation; unions and unknown types stay unannotated."""
-    if isinstance(json_type, list):
-        types = [t for t in json_type if t != "null"]
-        json_type = types[0] if len(types) == 1 else None
-    return (
-        _JSON_TO_PY.get(json_type, inspect.Parameter.empty)
-        if isinstance(json_type, str)
-        else inspect.Parameter.empty
-    )
-
-
 def build_signature(schema: dict[str, Any]) -> inspect.Signature:
     """Return a keyword-only Python signature for a JSON input schema."""
     properties, required = schema.get("properties", {}), set(schema.get("required", []))
@@ -258,7 +239,7 @@ def build_signature(schema: dict[str, Any]) -> inspect.Signature:
             name,
             inspect.Parameter.KEYWORD_ONLY,
             default=inspect.Parameter.empty if name in required else None,
-            annotation=_annotation(prop.get("type")),
+            annotation=json_annotation(prop.get("type")),
         )
         for name, prop in properties.items()
         if name.isidentifier() and not keyword.iskeyword(name)
