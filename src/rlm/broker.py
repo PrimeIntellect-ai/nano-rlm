@@ -41,6 +41,16 @@ _JSON_TO_PY = {
 }
 
 
+def json_annotation(json_type: Any) -> Any:
+    """Map one JSON schema type to a Python annotation; unions and unknown types stay unannotated."""
+    if isinstance(json_type, list):
+        types = [t for t in json_type if t != "null"]
+        json_type = types[0] if len(types) == 1 else None
+    if not isinstance(json_type, str):
+        return inspect.Parameter.empty
+    return _JSON_TO_PY.get(json_type, inspect.Parameter.empty)
+
+
 class BrokerAgentSpawnRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
     op: Literal["agent.spawn"]
@@ -392,7 +402,7 @@ def make_skill(descriptor: dict[str, Any]):
             field,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             default=inspect.Parameter.empty if field in required else None,
-            annotation=_JSON_TO_PY.get(value.get("type"), inspect.Parameter.empty),
+            annotation=json_annotation(value.get("type")),
         )
         for field, value in properties.items()
         if field.isidentifier() and not keyword.iskeyword(field)
