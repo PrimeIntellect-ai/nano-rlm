@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -55,7 +55,7 @@ class MCPStdioServer(_MCPConfigModel):
 
 
 MCPServer = MCPHTTPServer | MCPStdioServer
-_MCP_SERVERS_ADAPTER = TypeAdapter(dict[Annotated[str, Field(min_length=1)], MCPServer])
+_MCP_SERVERS_ADAPTER = TypeAdapter(dict[str, MCPServer])
 
 
 @dataclass(frozen=True)
@@ -182,8 +182,8 @@ class MCPRegistry:
 
 
 def _skill_name(server: str, tool: str) -> str:
-    """Return the normalized Python name for a server tool."""
-    ident = re.sub(r"\W", "_", f"{server}_{tool}")
+    """Return the normalized Python name for a server tool; an unnamed server keeps tool names bare."""
+    ident = re.sub(r"\W", "_", f"{server}_{tool}" if server else tool)
     return f"_{ident}" if ident[:1].isdigit() else ident
 
 

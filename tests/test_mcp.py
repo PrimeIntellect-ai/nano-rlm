@@ -76,6 +76,12 @@ def test_build_signature():
     assert params["count"].annotation is int
 
 
+def test_skill_name_keeps_unnamed_server_tools_bare():
+    assert mcp._skill_name("crm", "api.fetch") == "crm_api_fetch"
+    assert mcp._skill_name("", "api_fetch") == "api_fetch"
+    assert mcp.validate_mcp_servers({"": {"url": "http://127.0.0.1:1/mcp"}})
+
+
 async def test_real_kernel_uses_mcp_without_transport_secrets(tmp_path):
     server_cwd = tmp_path / "server"
     server_cwd.mkdir()
