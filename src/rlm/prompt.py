@@ -339,14 +339,16 @@ correction that should persist; use the direct `create_*` calls when you already
 exact entry to write. `await rlm.refine.run(rollback_id=...)` undoes a listed refinement.
 Keep entries small and evidence-backed."""
 
-HARNESS_SKILLS_DIR_PROMPT = """Authored skill packages persist across sessions under %(skills_dir)s and are imported by
-name at kernel start (a broken package binds a placeholder whose call explains the import
-error). To add one, write `%(skills_dir)s/<name>/src/<name>/__init__.py` defining
-`async def run(...)` with typed keyword arguments and a docstring, using only the packages
-pre-installed in the kernel (no pip), then import-test it in this kernel before recording
-`h.create_skill(...)` with `reference={"type": "python", "import": "<name>", "callable":
-"run", "call_pattern": "await <name>(...)"}`. The entry describes how to use the package;
-the package is the code. It becomes pre-imported in later sessions."""
+HARNESS_SKILLS_DIR_PROMPT = """Authored skill packages persist across sessions under %(skills_dir)s and are pre-imported
+by name at kernel start. They follow the installed-skill contract minus installation:
+`%(skills_dir)s/<name>/SKILL.md` (what it does and how to call it) and
+`%(skills_dir)s/<name>/src/<name>/__init__.py` defining `async def run(...)` with typed
+keyword arguments and a Google-style docstring; an optional `pyproject.toml` must name the
+distribution `rlm-skill-<name>`. Use only packages already in the kernel venv (no pip). A
+package that breaks the contract or fails to import binds a placeholder whose call explains
+the problem. Import-test in this kernel before recording `h.create_skill(...)` with
+`reference={"type": "python", "import": "<name>", "callable": "run", "call_pattern":
+"await <name>(...)"}`: the entry describes how to use the package; the package is the code."""
 
 HARNESS_SPAWN_HINT = (
     "(invoke a spec by turning it into a concise task prompt and spawning with "

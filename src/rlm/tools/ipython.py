@@ -342,8 +342,11 @@ class IPythonREPL:
             self.session.dir if self.session else None, self.skills_dir
         )
         authored = list_authored_skills(self.skills_dir)
-        authored_names = [name for name, _ in authored]
-        authored_paths = list(dict.fromkeys(path for _, path in authored))
+        # name -> (SKILL.md path, discovery-time contract error)
+        authored_info = {
+            skill.name: (skill.skill_md, skill.error) for skill in authored
+        }
+        authored_paths = list(dict.fromkeys(skill.path for skill in authored))
 
         setup_code = f"""\
 import os, sys, asyncio, types, json, time, functools, inspect
@@ -423,23 +426,35 @@ if {bool(self.broker_endpoint)!r}:
     ))
 
 class _BrokenSkill:
-    # An authored package that failed to import: calling it explains why, and the
-    # kernel itself keeps working so the agent can fix the package.
-    def __init__(self, name, error):
+    # An authored package that violates the skill contract or failed to import:
+    # calling it explains why, and the kernel keeps working so the agent can fix it.
+    def __init__(self, name, reason, cause=None):
         self.__name__ = name
-        self.__doc__ = f"import of authored skill {{name!r}} failed: {{error}}"
-        self._error = error
+        self.__doc__ = f"authored skill {{name!r}} is unusable: {{reason}}"
+        self._cause = cause
     async def __call__(self, *args, **kwargs):
-        raise RuntimeError(self.__doc__) from self._error
+        raise RuntimeError(self.__doc__) from self._cause
 
+_authored_info = {authored_info!r}
 for _name in {skill_names!r}:
-    try:
+    if _name in _authored_info:
+        _skill_md, _error = _authored_info[_name]
+        if _error is not None:
+            globals()[_name] = _BrokenSkill(_name, _error)
+            continue
+        try:
+            _module = __import__(_name)
+        except Exception as _e:
+            globals()[_name] = _BrokenSkill(_name, f"import failed: {{_e}}", _e)
+            continue
+        if not inspect.iscoroutinefunction(getattr(_module, 'run', None)):
+            globals()[_name] = _BrokenSkill(_name, "it must define `async def run(...)`")
+            continue
+        if not _module.run.__doc__:
+            # SKILL.md stands in for a missing docstring so help(<name>) stays useful.
+            _module.run.__doc__ = Path(_skill_md).read_text()
+    else:
         _module = __import__(_name)
-    except Exception as _error:
-        if _name not in {authored_names!r}:
-            raise
-        globals()[_name] = _BrokenSkill(_name, _error)
-        continue
     _source = None if getattr(_module, '__rlm_brokered__', False) else 'python'
     globals()[_name] = _wrap_callable(_module, _source)
 

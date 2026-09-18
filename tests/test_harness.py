@@ -334,35 +334,46 @@ async def test_spawned_child_inherits_parent_store_as_ancestor(tmp_path):
     assert child.runtime_config.harness.global_dir == str(tmp_path / "global")
 
 
-def _write_package(root, name: str, body: str, *, flat: bool = False) -> None:
-    package = root / name if flat else root / name / "src" / name
+def _write_package(root, name: str, body: str, *, skill_md: bool = True) -> None:
+    package = root / name / "src" / name
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(body)
+    if skill_md:
+        (root / name / "SKILL.md").write_text(
+            f"# {name}\n\nCall `await {name}(...)`.\n"
+        )
 
 
-def test_list_authored_skills_layouts_and_collisions(tmp_path):
+def test_list_authored_skills_checks_the_contract_without_importing(tmp_path):
     from rlm.tools.skills import discover_skills, list_authored_skills
 
     assert list_authored_skills(None) == []
     assert list_authored_skills(tmp_path / "missing") == []
     root = tmp_path / "skills"
-    _write_package(
-        root,
-        "word_count",
-        "async def run(text: str) -> int:\n    return len(text.split())\n",
-    )
-    _write_package(
-        root, "flat_tool", "async def run() -> str:\n    return 'flat'\n", flat=True
+    _write_package(root, "word_count", "async def run(text: str) -> int: ...\n")
+    _write_package(root, "no_md", "async def run(): ...\n", skill_md=False)
+    (root / "flat").mkdir()
+    (root / "flat" / "__init__.py").write_text("async def run(): ...\n")
+    _write_package(root, "bad_name", "async def run(): ...\n")
+    (root / "bad_name" / "pyproject.toml").write_text('[project]\nname = "bad-name"\n')
+    _write_package(root, "good_name", "async def run(): ...\n")
+    (root / "good_name" / "pyproject.toml").write_text(
+        '[project]\nname = "rlm-skill-good_name"\n'
     )
     (root / "not a package").mkdir()
-    (root / "no_init").mkdir()
-    assert list_authored_skills(root) == [
-        ("flat_tool", str(root)),
-        ("word_count", str(root / "word_count" / "src")),
-    ]
-    assert discover_skills(None, root)[-2:] == ["flat_tool", "word_count"]
 
-    _write_package(root, "say", "async def run(s: str) -> str:\n    return s\n")
+    skills = {s.name: s for s in list_authored_skills(root)}
+    assert set(skills) == {"word_count", "no_md", "flat", "bad_name", "good_name"}
+    assert skills["word_count"].error is None
+    assert skills["word_count"].path == str(root / "word_count" / "src")
+    assert skills["word_count"].skill_md == str(root / "word_count" / "SKILL.md")
+    assert skills["good_name"].error is None
+    assert skills["no_md"].error == "expected no_md/SKILL.md"
+    assert skills["flat"].error == "expected flat/src/flat/__init__.py"
+    assert "'rlm-skill-bad_name'" in skills["bad_name"].error
+    assert discover_skills(None, root)[-5:] == sorted(skills)
+
+    _write_package(root, "say", "async def run(s: str) -> str: ...\n")
     with pytest.raises(ValueError, match="installed and authored: say"):
         discover_skills(None, root)
 
@@ -374,14 +385,19 @@ async def test_authored_packages_are_importable_in_the_kernel(session, tmp_path)
         "word_count",
         'async def run(text: str, top: int = 5) -> str:\n    """Count words."""\n    return f"{len(text.split())} words"\n',
     )
+    _write_package(root, "undocumented", "async def run() -> str:\n    return 'ok'\n")
     _write_package(root, "broken", "import definitely_missing_module\n")
+    _write_package(root, "sync_run", "def run():\n    return 1\n")
+    _write_package(root, "no_md", "async def run(): ...\n", skill_md=False)
     code = (
         "print(await word_count('a b c'))\n"
         "print(inspect.signature(word_count))\n"
-        "try:\n"
-        "    await broken()\n"
-        "except RuntimeError as e:\n"
-        "    print('broken:', e)\n"
+        "print(undocumented.__doc__.strip())\n"
+        "for bad in (broken, sync_run, no_md):\n"
+        "    try:\n"
+        "        await bad()\n"
+        "    except RuntimeError as e:\n"
+        "        print(e)\n"
         "print(os.environ['RLM_HARNESS_SKILLS_DIR'] == " + repr(str(root)) + ")"
     )
     client = DummyClient(
@@ -398,8 +414,11 @@ async def test_authored_packages_are_importable_in_the_kernel(session, tmp_path)
     output = tool_result(client)
     assert "3 words" in output
     assert "(text: str, top: int = 5)" in output
-    assert "broken: import of authored skill 'broken' failed" in output
+    assert "Call `await undocumented(...)`." in output
+    assert "'broken' is unusable: import failed" in output
     assert "definitely_missing_module" in output
+    assert "'sync_run' is unusable: it must define `async def run(...)`" in output
+    assert "'no_md' is unusable: expected no_md/SKILL.md" in output
     assert output.strip().endswith("True")
     system_prompt = client.calls[0]["messages"][0]["content"]
     assert "`word_count`" in system_prompt and "`broken`" in system_prompt
@@ -414,4 +433,4 @@ def test_render_harness_mentions_skills_dir_only_when_set(tmp_path):
         view, skills_dir="/s", has_ipython=False
     )
     block = render_harness(view, skills_dir="/s")
-    assert "/s/<name>/src/<name>/__init__.py" in block
+    assert "/s/<name>/src/<name>/__init__.py" in block and "/s/<name>/SKILL.md" in block

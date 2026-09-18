@@ -276,16 +276,25 @@ store outside a running session.
 
 Refinement never writes code: a `skill` entry describes an importable module, and the
 agent can already write a package under its session directory and import it. `skills_dir`
-gives such packages a place that survives the session. At kernel start every
-`<skills_dir>/<name>/src/<name>/__init__.py` (or flat `<skills_dir>/<name>/__init__.py`)
-is put on `sys.path` and pre-imported by name like an installed skill, with the same
-`await <name>(...)` wrapper around its `run()`; a package that fails to import binds a
-placeholder whose call raises the import error, so a broken package never breaks the
-kernel. Names must not collide with installed or MCP-generated skills. Authored packages
-may only use what is already in the kernel venv (no `pip install`) and are IPython-only.
-The system prompt tells the agent the layout, to import-test before recording a `skill`
-entry, and that `RLM_HARNESS_SKILLS_DIR` names the directory. `null` (the default) keeps
-authored packages session-local.
+gives such packages a place that survives the session. An authored package is an
+installed skill minus installation — the [skill contract](#skill-contract) applies with
+these adjustments:
+
+- Required: `<skills_dir>/<name>/SKILL.md` and `<skills_dir>/<name>/src/<name>/__init__.py`
+  defining `async def run(...)`. The kernel checks both; `run`'s docstring falls back to
+  `SKILL.md` for `help(<name>)`.
+- Optional: `pyproject.toml`; when present its `[project] name` must be `rlm-skill-<name>`
+  so the package can be promoted to an installed skill unchanged. Nothing is installed, so
+  dependencies are limited to what is already in the kernel venv and there is no console
+  script: authored packages are IPython-only.
+
+At kernel start every authored package's `src/` goes on `sys.path` and the module is
+pre-imported by name with the same `await <name>(...)` wrapper as an installed skill. A
+package that breaks the contract or fails to import binds a placeholder whose call raises
+the reason, so a bad package never breaks the kernel. Names must not collide with installed
+or MCP-generated skills. The system prompt states the contract and tells the agent to
+import-test before recording a `skill` entry; `RLM_HARNESS_SKILLS_DIR` names the
+directory. `null` (the default) keeps authored packages session-local.
 
 ### Refinement
 
