@@ -91,7 +91,7 @@ install_uv
 export PATH="$UV_INSTALL_DIR:$PATH"
 
 # Clone the repo
-RLM_REPO_URL="${RLM_REPO_URL:-github.com/PrimeIntellect-ai/rlm.git}"
+RLM_REPO_URL="${RLM_REPO_URL:-github.com/mannuch/nano-rlm.git}"
 RLM_REPO_BRANCH="${RLM_REPO_BRANCH:-main}"
 RLM_CHECKOUT="${RLM_CHECKOUT_PATH:-/tmp/rlm-checkout}"
 if [ ! -f "$RLM_CHECKOUT/install.sh" ] || [ ! -f "$RLM_CHECKOUT/pyproject.toml" ]; then
