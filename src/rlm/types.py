@@ -38,7 +38,18 @@ class CompactionApplied:
     turns_since_last_compaction: int
 
 
-BuiltinMetricEvent = IpythonExecuted | CompactionApplied
+@dataclass(frozen=True)
+class RefinementApplied:
+    """Emitted when a continual-harness refinement pass finishes."""
+
+    trigger: str
+    edits_applied: int
+    edits_rejected: int
+    review_only: bool = False
+    """True for an auto-refine review that decided not to refine."""
+
+
+BuiltinMetricEvent = IpythonExecuted | CompactionApplied | RefinementApplied
 
 
 @dataclass
@@ -170,6 +181,13 @@ class RLMMetrics:
     sub_rlm_num_ptc_calls_python: int = 0
     sub_rlm_num_ptc_calls_bash: int = 0
 
+    # Continual harness refinement passes (model-proposed harness edits).
+    num_refinements: int = 0
+    has_refined: int = 0
+    refinement_edits_applied: int = 0
+    refinement_edits_rejected: int = 0
+    num_auto_refine_reviews: int = 0
+
     stop_reason: str = ""
 
     # Internal counters for derived metrics
@@ -203,6 +221,13 @@ class RLMMetrics:
             self._turns_between_compactions_total += event.turns_since_last_compaction
             self._compaction_chars_dropped_total += event.dropped_chars
             self._compaction_summary_chars_total += event.summary_chars
+        elif isinstance(event, RefinementApplied):
+            if event.review_only:
+                self.num_auto_refine_reviews += 1
+            else:
+                self.num_refinements += 1
+                self.refinement_edits_applied += event.edits_applied
+                self.refinement_edits_rejected += event.edits_rejected
         else:
             raise TypeError(f"Unsupported builtin metric event: {type(event)!r}")
 
@@ -217,6 +242,7 @@ class RLMMetrics:
                 self._ipython_input_loc_total / self._ipython_call_count
             )
         self.has_compacted = 1 if self.num_compactions > 0 else 0
+        self.has_refined = 1 if self.num_refinements > 0 else 0
         self.has_ptc = (
             1
             if any(

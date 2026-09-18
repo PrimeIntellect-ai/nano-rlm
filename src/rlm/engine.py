@@ -38,9 +38,32 @@ from rlm.compaction import (
     truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
+from rlm.harness import (
+    ANCESTOR_DIRS_ENV,
+    GLOBAL_DIR_ENV,
+    LOCAL_DIR_ENV,
+    HarnessView,
+    build_view,
+    local_dir,
+)
 from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
-from rlm.prompt import build_system_prompt
+from rlm.prompt import build_system_prompt, render_harness
+from rlm.refinement import (
+    RefinementFailed,
+    RefinementRejected,
+    RefinementResult,
+    apply_proposal,
+    baseline_of,
+    find_result,
+    load_history,
+    notice_text,
+    parse_proposal,
+    parse_review,
+    refine_prompt,
+    review_prompt,
+    rollback_proposal,
+)
 from rlm.session import Session
 from rlm.skills import enable_builtin_skills
 from rlm.supervisor import SessionTreeSupervisor
@@ -58,6 +81,7 @@ from rlm.tools import (
 from rlm.types import (
     CompactionApplied,
     ProgrammaticToolCallStats,
+    RefinementApplied,
     RLMMetrics,
     RLMResult,
     TokenUsage,
@@ -211,6 +235,8 @@ class RLMEngine:
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
+        self.harness_config = config.harness
+        self._harness: HarnessView | None = None
 
         # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
@@ -252,6 +278,14 @@ class RLMEngine:
         definition a state with a full reserve of room, so a checkpoint over it fits."""
         self._compacted = False
         self._last_call_id: str | None = None
+        self._last_request_id: str | None = None
+        self._task_text = ""
+
+        # Continual harness refinement bookkeeping.
+        self._refinement_count = 0
+        self._turns_since_refine_review = 0
+        self._last_refine_review_at: float | None = None
+        self._compact_refine_pending = False
 
         # Metrics
         self._metrics = RLMMetrics()
@@ -305,8 +339,14 @@ class RLMEngine:
         *,
         message_type: str = "user",
         event_ids: list[str] | None = None,
+        refine: dict | None = None,
     ) -> RLMResult:
-        """Run one user turn while preserving conversation and kernel state."""
+        """Run one user turn while preserving conversation and kernel state.
+
+        ``refine`` (``instructions``, ``global_``, ``rollback_id``) runs a host-requested
+        harness refinement before the turn; with an empty prompt the refinement is the
+        whole turn and its notice is the answer.
+        """
         if self._closed or self._close_task is not None:
             raise RuntimeError("RLM engine is closed")
         self._empty_reply_nudges = 0  # the nudge budget is per user turn
@@ -329,6 +369,8 @@ class RLMEngine:
 
         self._has_result = False
         self._prompt_kernel_notices = []
+        if prompt.strip():
+            self._task_text = prompt
 
         if not self._started:
             try:
@@ -361,20 +403,35 @@ class RLMEngine:
                 prompt, agent=parent_id, kind="instruction"
             )
         try:
-            self.session.log(
-                {
-                    "id": prompt_id,
-                    "type": message_type,
-                    **({"event_ids": event_ids} if event_ids else {}),
-                    "turn": self._turn,
-                    "content": prompt,
-                    "message": message,
-                    **({"provenance": provenance} if provenance else {}),
-                },
-                in_context=True,
-            )
-            self._last_good = len(self.session.messages)
-            result = await self._run_loop()
+            if refine is not None:
+                if self._harness is None:
+                    raise ValueError(
+                        "the continual harness is disabled for this session"
+                    )
+                refined = await self._refine(trigger="host", **refine)
+            if refine is not None and not prompt.strip():
+                self._metrics.stop_reason = "refined"
+                result = RLMResult(
+                    answer=notice_text(refined)
+                    if refined is not None
+                    else "[refinement declined]",
+                    session_dir=self.session.dir,
+                )
+            else:
+                self.session.log(
+                    {
+                        "id": prompt_id,
+                        "type": message_type,
+                        **({"event_ids": event_ids} if event_ids else {}),
+                        "turn": self._turn,
+                        "content": prompt,
+                        "message": message,
+                        **({"provenance": provenance} if provenance else {}),
+                    },
+                    in_context=True,
+                )
+                self._last_good = len(self.session.messages)
+                result = await self._run_loop()
         except BaseException as exc:
             self._pending_kernel_notices.extend(self._prompt_kernel_notices)
             attempted_turns = self._turn - turn_before
@@ -481,6 +538,20 @@ class RLMEngine:
                     self._owns_supervisor = False
                 raise
 
+        harness_dirs: dict[str, str] = {}
+        if self.harness_config.enabled:
+            ancestors = list(self.runtime_config.invocation.ancestor_harness_dirs)
+            self._harness = build_view(
+                local_dir(self.session.dir),
+                global_dir=self.harness_config.global_dir,
+                ancestor_dirs=ancestors,
+            )
+            harness_dirs[LOCAL_DIR_ENV] = str(self._harness.local.dir)
+            harness_dirs[GLOBAL_DIR_ENV] = (
+                str(self._harness.global_.dir) if self._harness.global_ else ""
+            )
+            harness_dirs[ANCESTOR_DIRS_ENV] = os.pathsep.join(ancestors)
+
         self._repl = IPythonREPL(
             cwd=self.cwd,
             session=self.session,
@@ -490,6 +561,7 @@ class RLMEngine:
             broker_endpoint=broker_endpoint,
             exec_timeout=self.exec_timeout,
             allow_git=self.allow_git,
+            harness_dirs=harness_dirs,
         )
         try:
             startup = asyncio.create_task(asyncio.to_thread(self._repl.start))
@@ -505,15 +577,7 @@ class RLMEngine:
             if cancelled:
                 raise asyncio.CancelledError
 
-            system_prompt = self._load_system_prompt(self._active_tools)
-
-            self.session.log(
-                {
-                    "type": "system",
-                    "message": {"role": "system", "content": system_prompt},
-                },
-                in_context=True,
-            )
+            self._install_system_prompt(prompt)
             self._last_good = len(self.session.messages)
             self._started = True
         except BaseException:
@@ -658,6 +722,7 @@ class RLMEngine:
                 break
             self._deliver_kernel_notices()
             self._deliver_supervisor_input()
+            await self._refine_at_boundary()
             messages = self.session.messages
             self._turn = turn + 1
             try:
@@ -1055,9 +1120,15 @@ class RLMEngine:
         *,
         checkpoint: bool = False,
         compaction_id: str | None = None,
+        refinement_id: str | None = None,
     ) -> tuple[Any, TokenUsage]:
+        """One model request. ``checkpoint`` marks a side call (compaction summary or
+        harness refinement): it spends tokens but is not a work turn."""
+        checkpoint = checkpoint or refinement_id is not None
         request_id = self._semantic_edges.start_request(
-            self._invocation_id, compaction_id=compaction_id
+            self._invocation_id,
+            compaction_id=compaction_id,
+            refinement_id=refinement_id,
         )
         request: dict = {
             "model": self.model,
@@ -1079,6 +1150,7 @@ class RLMEngine:
             self._semantic_edges.fail_request(request_id)
             raise
         self._semantic_edges.finish_request(request_id)
+        self._last_request_id = request_id
         usage = extract_usage(response)
         self._total_usage.prompt_tokens += usage.prompt_tokens
         self._total_usage.completion_tokens += usage.completion_tokens
@@ -1086,6 +1158,7 @@ class RLMEngine:
         self._own_new_tokens += new_tokens
         if not checkpoint:
             self._own_turns += 1
+            self._turns_since_refine_review += 1
         if self._supervisor is not None:
             if checkpoint:
                 self._supervisor.record_usage(new_tokens)
@@ -1274,6 +1347,7 @@ class RLMEngine:
         )
         self._branch_start_turn = turn + 1
         self._metrics.turns_since_last_compaction = 0
+        self._compact_refine_pending = True
 
     def execution_snapshot(self) -> dict:
         """Return a credential-free snapshot of cumulative execution state."""
@@ -1321,12 +1395,302 @@ class RLMEngine:
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "max_compaction_attempts": self.max_compaction_attempts,
                 "allow_git": self.runtime_config.policy.allow_git,
+                "harness_enabled": self.harness_config.enabled,
+                "harness_global": self.harness_config.global_dir is not None,
+                "auto_refine": self.harness_config.auto_refine,
+                "refine_turn_interval": self.harness_config.refine_turn_interval,
+                "refine_cooldown_seconds": self.harness_config.refine_cooldown_seconds,
+                "max_refinements": self.harness_config.max_refinements,
+                "max_refinement_attempts": self.harness_config.max_refinement_attempts,
             },
+            "harness": self._harness.counts() if self._harness is not None else None,
             "semantic_edges": self._semantic_edges.snapshot(),
         }
         return snapshot
 
-    def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
+    async def _refine_at_boundary(self) -> None:
+        """Run a kernel-requested refinement, else consider an automatic one, between
+        two model calls: never inside a cell."""
+        if self._harness is None:
+            return
+        request = (
+            self._supervisor.take_refine_request(self._invocation_id)
+            if self._supervisor is not None
+            else None
+        )
+        if request is not None:
+            await self._refine(trigger="kernel", **request)
+            return
+        await self._maybe_auto_refine()
+
+    async def _maybe_auto_refine(self) -> None:
+        config = self.harness_config
+        if not config.auto_refine or self.depth != 0 or self._harness is None:
+            return
+        if (
+            config.max_refinements is not None
+            and self._refinement_count >= config.max_refinements
+        ):
+            return
+        reason = "compact" if self._compact_refine_pending else "turn_interval"
+        if reason == "turn_interval" and (
+            self._turns_since_refine_review < config.refine_turn_interval
+        ):
+            return
+        now = time.monotonic()
+        if (
+            self._last_refine_review_at is not None
+            and now - self._last_refine_review_at < config.refine_cooldown_seconds
+        ):
+            return
+        self._compact_refine_pending = False
+        turns = self._turns_since_refine_review
+        self._turns_since_refine_review = 0
+        self._last_refine_review_at = now
+
+        refinement = self._semantic_edges.begin_refinement(self._invocation_id)
+        prompt = review_prompt(
+            self._harness,
+            load_history(self._harness.local),
+            trigger=reason,
+            turns_since_review=turns,
+        )
+        try:
+            response, _ = await self._call_model(
+                [*self.session.messages, {"role": "user", "content": prompt}],
+                refinement_id=refinement.refinement_id,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            should_refine, rationale, instructions = parse_review(text)
+        except (APIStatusError, RefinementRejected) as error:
+            self._semantic_edges.finish_refinement(refinement.refinement_id, "failed")
+            logger.warning("rlm: auto-refine review failed: %s", error)
+            return
+        except BaseException:
+            self._semantic_edges.finish_refinement(
+                refinement.refinement_id, "cancelled"
+            )
+            raise
+        self._metrics.record(
+            RefinementApplied(
+                trigger=f"auto:{reason}",
+                edits_applied=0,
+                edits_rejected=0,
+                review_only=True,
+            )
+        )
+        self.session.log(
+            {
+                "type": "refinement_review",
+                "reason": reason,
+                "should_refine": should_refine,
+                "rationale": rationale,
+                "request_id": self._last_request_id,
+            }
+        )
+        if not should_refine:
+            self._semantic_edges.finish_refinement(refinement.refinement_id, "declined")
+            return
+        self._semantic_edges.release_refinement_request(refinement.refinement_id)
+        await self._refine(
+            trigger=f"auto:{reason}", instructions=instructions, refinement=refinement
+        )
+
+    async def _refine(
+        self,
+        *,
+        trigger: str,
+        instructions: str | None = None,
+        global_: bool = False,
+        rollback_id: str | None = None,
+        refinement=None,
+    ) -> RefinementResult | None:
+        """One refinement pass: plan (or build a rollback), apply, rebuild the system
+        prompt, and tell the model what changed. A pass that produces no usable
+        proposal is reported in the conversation and never ends the run.
+        """
+        view = self._harness
+        if view is None:
+            raise RuntimeError("the continual harness is disabled for this session")
+        store = view.global_ if global_ else view.local
+        if store is None:
+            raise RefinementFailed("no global harness store is configured")
+        config = self.harness_config
+        if (
+            config.max_refinements is not None
+            and self._refinement_count >= config.max_refinements
+        ):
+            self._log_refinement_notice(
+                f"Refinement declined: this agent reached max_refinements="
+                f"{config.max_refinements}.",
+                reason="limit",
+            )
+            return None
+        if self._supervisor is not None:
+            self._supervisor.set_refine_in_flight(self._invocation_id, True)
+        importable = {*discover_skills(self.session.dir), "rlm"}
+        usage_total = TokenUsage()
+        request_ids: list[str] = []
+        baseline = None
+        try:
+            if rollback_id is not None:
+                proposal = rollback_proposal(find_result(store, rollback_id))
+            else:
+                if refinement is None:
+                    refinement = self._semantic_edges.begin_refinement(
+                        self._invocation_id
+                    )
+                baseline = baseline_of(store)
+                prompt = refine_prompt(
+                    view,
+                    load_history(store),
+                    scope=store.scope,
+                    instructions=instructions,
+                    importable_names=sorted(importable),
+                )
+                proposal = None
+                base = self.session.messages
+                for _ in range(config.max_refinement_attempts):
+                    try:
+                        response, usage = await self._call_model(
+                            [*base, {"role": "user", "content": prompt}],
+                            refinement_id=refinement.refinement_id,
+                        )
+                    except APIStatusError as error:
+                        if not is_context_overflow(error):
+                            raise
+                        base = self.session.messages[: self._last_good]
+                        continue
+                    request_ids.append(self._last_request_id)
+                    usage_total.prompt_tokens += usage.prompt_tokens
+                    usage_total.completion_tokens += usage.completion_tokens
+                    choice = response.choices[0]
+                    text = (choice.message.content or "").strip()
+                    if choice.finish_reason == "stop" and not choice.message.tool_calls:
+                        try:
+                            proposal = parse_proposal(text)
+                            break
+                        except RefinementRejected as error:
+                            logger.info("rlm: refinement reply rejected: %s", error)
+                    self._semantic_edges.release_refinement_request(
+                        refinement.refinement_id
+                    )
+                if proposal is None:
+                    raise RefinementFailed(
+                        f"no usable proposal after {config.max_refinement_attempts} attempts"
+                    )
+            result = apply_proposal(
+                store,
+                proposal,
+                trigger=trigger,
+                importable_names=importable,
+                baseline=baseline,
+                rollback_of=rollback_id,
+                usage={
+                    "prompt_tokens": usage_total.prompt_tokens,
+                    "completion_tokens": usage_total.completion_tokens,
+                },
+                request_ids=request_ids,
+            )
+        except BaseException as exc:
+            if refinement is not None:
+                self._semantic_edges.finish_refinement(
+                    refinement.refinement_id,
+                    "cancelled"
+                    if isinstance(exc, asyncio.CancelledError)
+                    else "failed",
+                )
+            if self._supervisor is not None:
+                self._supervisor.set_refine_in_flight(self._invocation_id, False)
+            if isinstance(exc, RefinementFailed):
+                self._log_refinement_notice(
+                    f"Refinement failed: {exc}", reason="failed"
+                )
+                return None
+            raise
+
+        self._refinement_count += 1
+        window = self._install_system_prompt(self._task_text)
+        message, provenance = runtime_event(
+            "refinement", notice_text(result), trigger=trigger, scope=result.scope
+        )
+        self.session.log(
+            {
+                "type": "refinement",
+                "trigger": trigger,
+                "result": result.to_dict(),
+                "rebuilt_window": window,
+                "message": message,
+                "provenance": provenance,
+            },
+            in_context=True,
+        )
+        applied = sum(1 for e in result.applied_edits if e.applied)
+        self._metrics.record(
+            RefinementApplied(
+                trigger=trigger,
+                edits_applied=applied,
+                edits_rejected=len(result.applied_edits) - applied,
+            )
+        )
+        if refinement is not None:
+            self._semantic_edges.finish_refinement(
+                refinement.refinement_id, "completed"
+            )
+        if self._supervisor is not None:
+            self._supervisor.set_refine_in_flight(self._invocation_id, False)
+        return result
+
+    def _log_refinement_notice(self, text: str, *, reason: str) -> None:
+        message, provenance = runtime_event("refinement", text, reason=reason)
+        self.session.log(
+            {
+                "type": "refinement_declined",
+                "reason": reason,
+                "message": message,
+                "provenance": provenance,
+            },
+            in_context=True,
+        )
+
+    def _install_system_prompt(self, task_text: str) -> int | None:
+        """Build the system prompt and make it the context's first message.
+
+        The first call seeds the context; later calls (the harness changed) replace the
+        system message in place, opening a new context window whose other messages keep
+        their indices. Returns that window's index when one was opened.
+        """
+        system_message = {
+            "role": "system",
+            "content": self._load_system_prompt(self._active_tools, task_text),
+        }
+        messages = self.session.messages
+        if messages and messages[0].get("role") == "system":
+            index = self.session.log({"type": "system", "message": system_message})
+            indices = [index, *self.session.context_indices[1:]]
+            return self.session.replace_context(
+                [system_message, *messages[1:]], reason="harness", indices=indices
+            )
+        self.session.log({"type": "system", "message": system_message}, in_context=True)
+        return None
+
+    def _harness_block(self, task_text: str) -> str | None:
+        if self._harness is None:
+            return None
+        has_ipython = any(tool.name == "ipython" for tool in self._active_tools)
+        return render_harness(
+            self._harness,
+            max_entries_per_kind=self.harness_config.max_prompt_entries_per_kind,
+            max_content_chars=self.harness_config.max_prompt_content_chars,
+            max_refinements=self.harness_config.max_prompt_refinements,
+            query=task_text,
+            has_ipython=has_ipython,
+            can_delegate=has_ipython and self.depth < self.max_depth,
+        )
+
+    def _load_system_prompt(
+        self, active_tools: list[BuiltinTool], task_text: str = ""
+    ) -> str:
         return build_system_prompt(
             self.cwd,
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
@@ -1344,6 +1708,7 @@ class RLMEngine:
             agent_info=self._supervisor.agent_context(self._invocation_id)
             if self._supervisor
             else None,
+            harness_block=self._harness_block(task_text),
         )
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:

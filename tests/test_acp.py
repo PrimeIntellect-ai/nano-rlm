@@ -18,6 +18,7 @@ from conftest import DummyClient, DummyMessage, DummyToolCall, make_runtime_conf
 from rlm.acp import (
     ACP_SEMANTIC_EDGES_METADATA_KEY,
     CONTRACT_METADATA_KEY,
+    REFINE_METADATA_KEY,
     RUNTIME_METADATA_KEY,
     SESSION_METADATA_KEY,
     RLMACPAgent,
@@ -25,6 +26,7 @@ from rlm.acp import (
 from rlm.engine import RLMEngine
 from rlm.config import (
     ExecutionPolicy,
+    HarnessConfig,
     InvocationContext,
     ProviderConfig,
     RuntimeConfig,
@@ -101,13 +103,15 @@ class _Engine:
         self.runtime_config = runtime_config
         self.invocation_id = invocation_id
         self.prompts: list[str] = []
+        self.refines: list[dict | None] = []
         self.prompt_started = asyncio.Event()
         self.closed = False
         self.stop_reason = "done"
         self.instances.append(self)
 
-    async def prompt(self, prompt: str) -> RLMResult:
+    async def prompt(self, prompt: str, *, refine: dict | None = None) -> RLMResult:
         self.prompts.append(prompt)
+        self.refines.append(refine)
         self.prompt_started.set()
         if prompt == "wait":
             await asyncio.Future()
@@ -152,7 +156,15 @@ class _Engine:
                 "max_compactions": None,
                 "max_compaction_attempts": 5,
                 "allow_git": False,
+                "harness_enabled": True,
+                "harness_global": False,
+                "auto_refine": False,
+                "refine_turn_interval": 12,
+                "refine_cooldown_seconds": 300,
+                "max_refinements": None,
+                "max_refinement_attempts": 3,
             },
+            "harness": None,
             "semantic_edges": {"edges": []},
         }
 
@@ -830,6 +842,80 @@ async def test_acp_requires_runtime_metadata(tmp_path):
         await agent.new_session(str(tmp_path))
 
     assert agent._sessions == {}
+
+
+async def test_acp_runtime_contract_carries_harness_config(monkeypatch, tmp_path):
+    """The optional ``harness`` object reaches the engine; unknown keys are refused."""
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    await _initialize(agent)
+
+    created = await agent.new_session(
+        str(tmp_path),
+        **_runtime_metadata(
+            harness={"enabled": True, "global_dir": str(tmp_path / "global")}
+        ),
+    )
+    engine = _Engine.instances[0]
+    assert engine.runtime_config.harness == HarnessConfig(
+        global_dir=str(tmp_path / "global")
+    )
+    await agent.close_session(created.session_id)
+
+    with pytest.raises(RequestError) as rejected:
+        await agent.new_session(
+            str(tmp_path), **_runtime_metadata(harness={"skills": []})
+        )
+    assert "harness.skills" in str(rejected.value.data)
+    assert agent._sessions == {}
+
+
+async def test_acp_prompt_meta_requests_host_refinement(monkeypatch, tmp_path):
+    """``ai.prime.rlm/refine-v1`` reaches the engine, permits an empty prompt, is
+    validated strictly, and is refused when the harness is disabled."""
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    await _initialize(agent)
+
+    created = await agent.new_session(str(tmp_path), **_runtime_metadata())
+    await agent.prompt(
+        created.session_id,
+        [text_block("")],
+        **{REFINE_METADATA_KEY: {"instructions": "focus", "global": True}},
+    )
+    await agent.prompt(created.session_id, [text_block("work")])
+    engine = _Engine.instances[0]
+    assert engine.prompts == ["", "work"]
+    assert engine.refines == [
+        {"instructions": "focus", "global_": True, "rollback_id": None},
+        None,
+    ]
+    with pytest.raises(RequestError) as rejected:
+        await agent.prompt(
+            created.session_id,
+            [text_block("x")],
+            **{REFINE_METADATA_KEY: {"instructions": "focus", "scope": "global"}},
+        )
+    assert "scope" in str(rejected.value.data)
+    with pytest.raises(RequestError):
+        await agent.prompt(created.session_id, [text_block("")])
+    await agent.close_session(created.session_id)
+
+    disabled = await agent.new_session(
+        str(tmp_path), **_runtime_metadata(harness={"enabled": False})
+    )
+    with pytest.raises(RequestError) as refused:
+        await agent.prompt(
+            disabled.session_id, [text_block("")], **{REFINE_METADATA_KEY: {}}
+        )
+    assert "requires an enabled harness" in str(refused.value.data)
+    await agent.close_session(disabled.session_id)
 
 
 async def test_acp_session_reuses_engine(monkeypatch, tmp_path):

@@ -219,6 +219,16 @@ class BrokerWatchHandleRequest(TypedDict):
     subscription_id: Annotated[str, Field(min_length=1)]
 
 
+class BrokerRefineRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["refine.run", "refine.status"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    instructions: Annotated[str, Field(min_length=1, max_length=8192)] | None
+    global_: bool
+    rollback_id: Annotated[str, Field(min_length=1, max_length=128)] | None
+
+
 class BrokerSkillRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid")
     op: Literal["skill.call"]
@@ -245,6 +255,7 @@ BrokerRequest = Annotated[
     | BrokerShellHandleRequest
     | BrokerShellEnvRequest
     | BrokerHintsRequest
+    | BrokerRefineRequest
     | BrokerShellReadRequest
     | BrokerWatchAgentRequest
     | BrokerWatchJobRequest

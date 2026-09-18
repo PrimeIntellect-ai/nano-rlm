@@ -27,6 +27,7 @@ from rlm.broker import (
 )
 from rlm.config import RuntimeConfig
 from rlm.semantic import SemanticEdgeTracker
+from rlm.harness import local_dir
 from rlm.mcp import (
     MCPRegistry,
     MCPServer,
@@ -114,6 +115,10 @@ class _Invocation:
         default_factory=list
     )  # (tag, text) for next turn
     muted_hints: set[str] = field(default_factory=set)  # rlm.hints.mute()
+    refine_request: dict | None = (
+        None  # rlm.refine.run(); taken at the next turn boundary
+    )
+    refine_in_flight: bool = False
     long_run_notes: int = 0
     env_prefixes: dict[str, int] = field(default_factory=dict)  # VAR -> prefix count
     env_prefix_hinted: set[str] = field(default_factory=set)
@@ -420,7 +425,11 @@ class SessionTreeSupervisor:
         persistent: bool,
     ) -> _Invocation:
         policy = parent.runtime_config.policy
-        context = parent.runtime_config.invocation.child()
+        context = parent.runtime_config.invocation.child(
+            str(local_dir(parent.session.dir))
+            if parent.runtime_config.harness.enabled
+            else None
+        )
         if name is not None and any(
             agent.parent_id == parent.id and (agent.name == name or agent.id == name)
             for agent in self._invocations.values()
@@ -635,6 +644,15 @@ class SessionTreeSupervisor:
             "call) and returns its output. Native wait is for events from agents or "
             "watches, not for jobs you hold.",
         )
+
+    def take_refine_request(self, invocation_id: str) -> dict | None:
+        """Claim the agent's pending refine request, if any, for the coming turn."""
+        agent = self._invocations[invocation_id]
+        request, agent.refine_request = agent.refine_request, None
+        return request
+
+    def set_refine_in_flight(self, invocation_id: str, in_flight: bool) -> None:
+        self._invocations[invocation_id].refine_in_flight = in_flight
 
     def hint(self, invocation_id: str, tag: str, text: str) -> None:
         """Queue a tagged hint for an agent from outside the supervisor (engine-side observations)."""
@@ -1002,6 +1020,26 @@ class SessionTreeSupervisor:
             elif op == "hints.unmute":
                 parent.muted_hints -= tags
             return {"muted": sorted(parent.muted_hints)}
+        if op == "refine.status":
+            return {
+                "pending": parent.refine_request is not None,
+                "in_flight": parent.refine_in_flight,
+            }
+        if op == "refine.run":
+            harness = parent.runtime_config.harness
+            if not harness.enabled:
+                return {"scheduled": False, "reason": "harness disabled"}
+            if request["global_"] and harness.global_dir is None:
+                return {"scheduled": False, "reason": "no global harness store"}
+            if self._budget_exhausted(parent):
+                return {"scheduled": False, "reason": "tree budget exhausted"}
+            # A second request before the turn ends only updates the instructions.
+            parent.refine_request = {
+                "instructions": request["instructions"],
+                "global_": request["global_"],
+                "rollback_id": request["rollback_id"],
+            }
+            return {"scheduled": True}
         if op == "inbox.list":
             return [
                 {

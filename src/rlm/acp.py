@@ -44,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from rlm.engine import RLMEngine
 from rlm.config import (
     ExecutionPolicy,
+    HarnessConfig,
     InvocationContext,
     ProviderConfig,
     RuntimeConfig,
@@ -54,6 +55,7 @@ from rlm.session import Session
 CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
+REFINE_METADATA_KEY = "ai.prime.rlm/refine-v1"
 ACP_SEMANTIC_EDGES_METADATA_KEY = "ai.prime.acp/semantic-edges-v1"
 
 
@@ -76,6 +78,7 @@ class _RuntimeMetadata(_ContractModel):
     builtin_tools: list[Annotated[str, Field(min_length=1)]] | None = None
     kernel_env: dict[str, str]
     search_api_key: str | None
+    harness: HarnessConfig | None = None
 
 
 class _UsageSnapshot(_ContractModel):
@@ -106,6 +109,13 @@ class _LimitsSnapshot(_ContractModel):
     max_compactions: int | None = Field(default=None, gt=0)
     max_compaction_attempts: int = Field(gt=0)
     allow_git: bool
+    harness_enabled: bool
+    harness_global: bool
+    auto_refine: bool
+    refine_turn_interval: int = Field(gt=0)
+    refine_cooldown_seconds: int = Field(ge=0)
+    max_refinements: int | None = Field(default=None, gt=0)
+    max_refinement_attempts: int = Field(gt=0)
 
 
 class _SemanticEdge(_ContractModel):
@@ -118,6 +128,13 @@ class _SemanticEdgeSet(_ContractModel):
     edges: list[_SemanticEdge]
 
 
+class _HarnessSnapshot(_ContractModel):
+    local: dict[str, int]
+    global_: dict[str, int] | None = Field(alias="global")
+    ancestors: int = Field(ge=0)
+    refinements: int = Field(ge=0)
+
+
 class _SessionSnapshot(_ContractModel):
     session_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
     last_stop_reason: str | None
@@ -128,6 +145,15 @@ class _SessionSnapshot(_ContractModel):
     programmatic_tool_call_stats: _ProgrammaticToolCallSnapshot
     supervisor: _SupervisorSnapshot
     limits: _LimitsSnapshot
+    harness: _HarnessSnapshot | None
+
+
+class _RefineRequest(_ContractModel):
+    """``ai.prime.rlm/refine-v1`` on ``session/prompt``: a host-requested refinement."""
+
+    instructions: str | None = None
+    global_: bool = Field(default=False, alias="global")
+    rollback_id: str | None = None
 
 
 @dataclass
@@ -164,7 +190,9 @@ def _session_metadata(state: _SessionState) -> dict[str, Any]:
     semantic_edges = _SemanticEdgeSet.model_validate(snapshot.pop("semantic_edges"))
     validated = _SessionSnapshot.model_validate(snapshot)
     return {
-        SESSION_METADATA_KEY: validated.model_dump(mode="json", exclude_none=True),
+        SESSION_METADATA_KEY: validated.model_dump(
+            mode="json", exclude_none=True, by_alias=True
+        ),
         ACP_SEMANTIC_EDGES_METADATA_KEY: semantic_edges.model_dump(
             mode="json", exclude_none=True
         ),
@@ -215,6 +243,7 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
             ),
             kernel_env=tuple(payload.kernel_env.items()),
             search_api_key=payload.search_api_key,
+            harness=payload.harness or HarnessConfig(),
         ),
         payload.session_id,
     )
@@ -252,15 +281,39 @@ def _prompt_text(
         | ResourceContentBlock
         | EmbeddedResourceContentBlock
     ],
+    *,
+    allow_empty: bool = False,
 ) -> str:
     if any(not isinstance(block, TextContentBlock) for block in prompt):
         raise RequestError.invalid_params(
             {"reason": "RLM currently accepts text prompt blocks only"}
         )
     text = "".join(block.text for block in prompt)
-    if not text:
+    if not text and not allow_empty:
         raise RequestError.invalid_params({"reason": "prompt has no text"})
     return text
+
+
+def _refine_request(meta_kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    """The optional host refinement request carried in ``session/prompt`` ``_meta``."""
+    if REFINE_METADATA_KEY not in meta_kwargs:
+        return None
+    try:
+        payload = _RefineRequest.model_validate(meta_kwargs[REFINE_METADATA_KEY])
+    except ValidationError as error:
+        raise RequestError.invalid_params(
+            {
+                "reason": (
+                    f"{REFINE_METADATA_KEY} has invalid fields: "
+                    f"{_validation_fields(error)}"
+                )
+            }
+        ) from error
+    return {
+        "instructions": payload.instructions,
+        "global_": payload.global_,
+        "rollback_id": payload.rollback_id,
+    }
 
 
 class RLMACPAgent(Agent):
@@ -340,10 +393,16 @@ class RLMACPAgent(Agent):
         if state is None:
             raise RequestError.resource_not_found(session_id)
 
+        refine = _refine_request(kwargs)
+        if refine is not None and not state.engine.runtime_config.harness.enabled:
+            raise RequestError.invalid_params(
+                {"reason": f"{REFINE_METADATA_KEY} requires an enabled harness"}
+            )
+        text = _prompt_text(prompt, allow_empty=refine is not None)
         async with state.lock:
             if state.closing:
                 raise RequestError.resource_not_found(session_id)
-            task = asyncio.create_task(state.engine.prompt(_prompt_text(prompt)))
+            task = asyncio.create_task(state.engine.prompt(text, refine=refine))
             state.prompt_task = task
             try:
                 result = await asyncio.shield(task)

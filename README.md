@@ -68,7 +68,7 @@ configuration.
 Model calls also carry a private `X-ACP-Model-Request-ID` correlation header.
 RLM publishes sparse, labeled relationships between those request IDs under
 `ai.prime.acp/semantic-edges-v1`: `continuation`, `subagent_call`,
-`subagent_return`, and `compaction`. `continuation` preserves same-agent causal
+`subagent_return`, `compaction`, `refinement_attempt`, and `refinement`. `continuation` preserves same-agent causal
 order even when a consumer's physical token-prefix graph splits. ACP consumers
 can resolve the request IDs onto their own message nodes while harnesses that do
 not understand the extension ignore it.
@@ -81,7 +81,7 @@ not understand the extension ignore it.
 
 All runtime configuration enters through the `ai.prime.rlm/runtime-v1` contract object
 (model, provider credentials, execution policy, prompt configuration, skills, builtin tools, kernel
-environment, search credential). Prompt configuration is role-aware: optional
+environment, search credential, and an optional `harness` object; see [Continual harness](#continual-harness)). Prompt configuration is role-aware: optional
 `subagent_append_to_system_prompt` (nodes that can still recurse) and
 `leaf_append_to_system_prompt` (depth == max_depth) override `append_to_system_prompt`
 for sub-agents, each falling back to the next-more-general tier. Recursive children inherit the parent's configuration
@@ -208,6 +208,8 @@ Every invocation writes to `$RLM_HOME/sessions/<id>/`. Nested session directorie
 .rlm/sessions/abc123/
 ├── meta.json
 ├── messages.jsonl
+├── harness/
+│   └── harness_state.json
 ├── sub-d4e5/
 │   ├── meta.json
 │   ├── messages.jsonl
@@ -216,6 +218,92 @@ Every invocation writes to `$RLM_HOME/sessions/<id>/`. Nested session directorie
 ```
 
 These artifacts are consumable for debugging, visualization, or training-data extraction.
+
+## Continual harness
+
+The continual harness is durable state that supplements the immutable system prompt: `prompt`
+notes (narrow behavioural policies), `memory` entries (facts, decisions, failures), `skill`
+entries (descriptions of how to call an importable module, with a `reference` and an
+`arguments` contract) and `subagent` specs (reusable delegation roles). Each agent's local
+store lives at `<session>/harness/harness_state.json`. A child reads its ancestors' local
+stores read-only alongside its own. The contract's `harness` object controls the feature:
+
+```json
+"harness": {
+  "enabled": true,
+  "global_dir": null,
+  "max_prompt_entries_per_kind": 6,
+  "max_prompt_content_chars": 180,
+  "max_prompt_refinements": 5,
+  "auto_refine": false,
+  "refine_turn_interval": 12,
+  "refine_cooldown_seconds": 300,
+  "max_refinements": null,
+  "max_refinement_attempts": 3
+}
+```
+
+`global_dir` names a store shared across sessions; `null` (the default) keeps every session
+hermetic. The system prompt carries a compact `## Continual harness` block: per-kind counts,
+the most relevant entries within the caps (ranked against the task text when a kind
+overflows) and recent refinement events. Entries are displayed as `[local:id]`,
+`[ancestor:id]` or `[global:id]`.
+
+Inside the kernel, `rlm.harness` is the synchronous Python API:
+
+```python
+h = rlm.harness.harness()                      # the view this agent sees
+print(h.overview())
+h.search("pytest venv")                        # ranked by term overlap
+h.get("memory", "ancestor:parent_lesson")      # ids exactly as displayed
+h.create_memory("Project venv", "run tests with ./.venv/bin/python -m pytest")
+h.create_skill("Release lookup", "query websearch with '<pkg> release'",
+               reference={"type": "python", "import": "websearch", "callable": "run",
+                          "call_pattern": "await websearch(queries=[...])"},
+               arguments={"queries": {"type": "array", "required": True}})
+h.update_memory("project_venv", "Project venv", "...", global_=True)   # needs global_dir
+```
+
+`update_*`/`delete_*` take the bare id or a `local:`/`global:` prefix; ancestor entries raise
+`PermissionError`. A `skill` entry describes an already-importable module; it is not a
+package (see [Skills](#skills) for the on-disk skill contract). Stores are rewritten
+atomically under a file lock and reloaded when another writer changed them, so the engine
+and the kernel share one file safely. `harness(session_dir=...)` loads a session's local
+store outside a running session.
+
+### Refinement
+
+Refinement is a side model call, like compaction: the live conversation is extended with
+one user message asking for a JSON proposal of create/update/delete edits, the proposal is
+validated and applied under the store's lock, the system prompt is rebuilt in place (a new
+`context_window` with `reason="harness"` that keeps every other message index), and a
+`<runtime_event kind="refinement">` notice tells the model what changed. Rejected edits
+(unknown module in a `skill` reference, edits to the base system prompt, entries that
+changed while planning, …) are recorded with an error and the rest still apply. Each
+store's `refinements.jsonl` holds one full result per pass with per-edit `before`/`after`
+snapshots; a rollback replays those snapshots in reverse and needs no model call.
+
+Three triggers, all of which run between model calls and never inside a cell:
+
+- **Kernel**: `await rlm.refine.run(instructions=None, global_=False, rollback_id=None)`
+  returns `{"scheduled": True}` (or a reason) and the pass runs at the next boundary;
+  `await rlm.refine.status()` reports `pending`/`in_flight`.
+- **Host**: `session/prompt` may carry `ai.prime.rlm/refine-v1` in `_meta`:
+  `{"instructions": "...", "global": false, "rollback_id": null}`. The pass runs before
+  the turn; with an empty prompt it is the whole turn and the notice is the answer
+  (`stop_reason` `refined`). The key is refused when the harness is disabled.
+- **Auto** (`auto_refine`, off by default, root agent only): every `refine_turn_interval`
+  work turns and after each compaction, subject to `refine_cooldown_seconds`, a cheap
+  review call decides whether the trajectory holds evidence worth persisting; only an
+  approving review triggers a plan.
+
+`max_refinements` caps passes per engine; `max_refinement_attempts` bounds how often an
+unusable reply (truncated JSON, prose, a tool call) is resampled before the pass is
+reported as failed in the conversation and the run continues. Plan and review calls carry
+`refinement_attempt` semantic edges from the last work request; the applied plan request
+becomes the source of a `refinement` edge into the next work request, which also keeps its
+ordinary `continuation` edge. Refinement counts and edit totals appear in the session
+metrics; the `session-v1` snapshot carries per-scope entry counts under `harness`.
 
 ## Skills
 
