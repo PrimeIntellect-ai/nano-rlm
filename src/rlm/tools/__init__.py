@@ -12,6 +12,7 @@ from rlm.tools.skills import (
     TASK_SKILLS_DIR,
     discover_skills,
     get_installed_skills,
+    list_authored_skills,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "get_active_tools",
     "get_builtin_tool",
     "get_installed_skills",
+    "list_authored_skills",
 ]

@@ -332,3 +332,86 @@ async def test_spawned_child_inherits_parent_store_as_ancestor(tmp_path):
 
     assert seen == [(1, (str(local_dir(session.dir)),))]
     assert child.runtime_config.harness.global_dir == str(tmp_path / "global")
+
+
+def _write_package(root, name: str, body: str, *, flat: bool = False) -> None:
+    package = root / name if flat else root / name / "src" / name
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(body)
+
+
+def test_list_authored_skills_layouts_and_collisions(tmp_path):
+    from rlm.tools.skills import discover_skills, list_authored_skills
+
+    assert list_authored_skills(None) == []
+    assert list_authored_skills(tmp_path / "missing") == []
+    root = tmp_path / "skills"
+    _write_package(
+        root,
+        "word_count",
+        "async def run(text: str) -> int:\n    return len(text.split())\n",
+    )
+    _write_package(
+        root, "flat_tool", "async def run() -> str:\n    return 'flat'\n", flat=True
+    )
+    (root / "not a package").mkdir()
+    (root / "no_init").mkdir()
+    assert list_authored_skills(root) == [
+        ("flat_tool", str(root)),
+        ("word_count", str(root / "word_count" / "src")),
+    ]
+    assert discover_skills(None, root)[-2:] == ["flat_tool", "word_count"]
+
+    _write_package(root, "say", "async def run(s: str) -> str:\n    return s\n")
+    with pytest.raises(ValueError, match="installed and authored: say"):
+        discover_skills(None, root)
+
+
+async def test_authored_packages_are_importable_in_the_kernel(session, tmp_path):
+    root = tmp_path / "skills"
+    _write_package(
+        root,
+        "word_count",
+        'async def run(text: str, top: int = 5) -> str:\n    """Count words."""\n    return f"{len(text.split())} words"\n',
+    )
+    _write_package(root, "broken", "import definitely_missing_module\n")
+    code = (
+        "print(await word_count('a b c'))\n"
+        "print(inspect.signature(word_count))\n"
+        "try:\n"
+        "    await broken()\n"
+        "except RuntimeError as e:\n"
+        "    print('broken:', e)\n"
+        "print(os.environ['RLM_HARNESS_SKILLS_DIR'] == " + repr(str(root)) + ")"
+    )
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})]),
+            DummyMessage(content="ok"),
+        ]
+    )
+    config = make_runtime_config(harness=HarnessConfig(skills_dir=str(root)))
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+
+    await engine.run("use the authored skill")
+
+    output = tool_result(client)
+    assert "3 words" in output
+    assert "(text: str, top: int = 5)" in output
+    assert "broken: import of authored skill 'broken' failed" in output
+    assert "definitely_missing_module" in output
+    assert output.strip().endswith("True")
+    system_prompt = client.calls[0]["messages"][0]["content"]
+    assert "`word_count`" in system_prompt and "`broken`" in system_prompt
+    assert f"persist across sessions under {root}" in system_prompt
+    assert engine.execution_snapshot()["limits"]["harness_skills_dir"] is True
+
+
+def test_render_harness_mentions_skills_dir_only_when_set(tmp_path):
+    view = build_view(tmp_path / "h")
+    assert "Authored skill packages" not in render_harness(view)
+    assert "Authored skill packages" not in render_harness(
+        view, skills_dir="/s", has_ipython=False
+    )
+    block = render_harness(view, skills_dir="/s")
+    assert "/s/<name>/src/<name>/__init__.py" in block

@@ -239,7 +239,8 @@ stores read-only alongside its own. The contract's `harness` object controls the
   "refine_turn_interval": 12,
   "refine_cooldown_seconds": 300,
   "max_refinements": null,
-  "max_refinement_attempts": 3
+  "max_refinement_attempts": 3,
+  "skills_dir": null
 }
 ```
 
@@ -270,6 +271,21 @@ package (see [Skills](#skills) for the on-disk skill contract). Stores are rewri
 atomically under a file lock and reloaded when another writer changed them, so the engine
 and the kernel share one file safely. `harness(session_dir=...)` loads a session's local
 store outside a running session.
+
+### Authored skill packages
+
+Refinement never writes code: a `skill` entry describes an importable module, and the
+agent can already write a package under its session directory and import it. `skills_dir`
+gives such packages a place that survives the session. At kernel start every
+`<skills_dir>/<name>/src/<name>/__init__.py` (or flat `<skills_dir>/<name>/__init__.py`)
+is put on `sys.path` and pre-imported by name like an installed skill, with the same
+`await <name>(...)` wrapper around its `run()`; a package that fails to import binds a
+placeholder whose call raises the import error, so a broken package never breaks the
+kernel. Names must not collide with installed or MCP-generated skills. Authored packages
+may only use what is already in the kernel venv (no `pip install`) and are IPython-only.
+The system prompt tells the agent the layout, to import-test before recording a `skill`
+entry, and that `RLM_HARNESS_SKILLS_DIR` names the directory. `null` (the default) keeps
+authored packages session-local.
 
 ### Refinement
 

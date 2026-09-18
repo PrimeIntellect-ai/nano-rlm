@@ -74,6 +74,9 @@ class HarnessConfig(_ConfigModel):
     """Refinement passes per engine before further requests are declined."""
     max_refinement_attempts: int = Field(default=3, gt=0)
     """Proposal attempts within one pass; an unusable reply is resampled."""
+    skills_dir: str | None = None
+    """Persistent directory of agent-authored skill packages, put on the kernel's
+    sys.path at start. None (default) keeps authored packages session-local."""
 
 
 class ExecutionPolicy(_ConfigModel):

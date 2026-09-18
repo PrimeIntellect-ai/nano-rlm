@@ -35,14 +35,48 @@ def get_installed_skills() -> list[str]:
     return sorted(skills)
 
 
-def discover_skills(session_dir: Path | None = None) -> list[str]:
-    """Return unambiguous installed and session-local skill module names."""
+def list_authored_skills(skills_dir: str | Path | None) -> list[tuple[str, str]]:
+    """Agent-authored packages under the contract's persistent skills directory.
+
+    Each ``<skills_dir>/<name>/`` is a package: either the on-disk skill layout
+    ``<name>/src/<name>/__init__.py`` or a flat ``<name>/__init__.py``. Returns
+    ``(import name, sys.path entry)`` pairs; nothing is installed.
+    """
+    if skills_dir is None:
+        return []
+    root = Path(skills_dir)
+    if not root.is_dir():
+        return []
+    authored: list[tuple[str, str]] = []
+    for package_dir in sorted(root.iterdir()):
+        name = _normalize_skill_name(package_dir.name)
+        if not package_dir.is_dir() or not name.isidentifier():
+            continue
+        if (package_dir / "src" / name / "__init__.py").is_file():
+            authored.append((name, str(package_dir / "src")))
+        elif (package_dir / "__init__.py").is_file() and name == package_dir.name:
+            authored.append((name, str(root)))
+    return authored
+
+
+def discover_skills(
+    session_dir: Path | None = None, skills_dir: str | Path | None = None
+) -> list[str]:
+    """Return unambiguous installed, session-local and authored skill module names."""
     installed = get_installed_skills()
     generated = list_skill_modules(session_dir) if session_dir is not None else []
-    collisions = sorted(set(installed) & set(generated))
+    authored = [name for name, _ in list_authored_skills(skills_dir)]
+    for label, names in (("generated", generated), ("authored", authored)):
+        collisions = sorted(set(installed) & set(names))
+        if collisions:
+            raise ValueError(
+                f"skill name collision between installed and {label}: "
+                + ", ".join(collisions)
+            )
+    collisions = sorted(set(generated) & set(authored))
     if collisions:
-        names = ", ".join(collisions)
         raise ValueError(
-            f"skill name collision between installed and generated: {names}"
+            "skill name collision between generated and authored: "
+            + ", ".join(collisions)
         )
-    return [*installed, *generated]
+    return [*installed, *generated, *authored]

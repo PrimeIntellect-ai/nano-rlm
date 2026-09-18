@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
-from rlm.tools.skills import discover_skills
+from rlm.tools.skills import discover_skills, list_authored_skills
 from rlm.types import IpythonExecuted
 
 if TYPE_CHECKING:
@@ -265,6 +265,7 @@ class IPythonREPL:
         exec_timeout: int | None = None,
         allow_git: bool | None = None,
         harness_dirs: Mapping[str, str] | None = None,
+        skills_dir: str | None = None,
     ):
         self.cwd = cwd
         self.session = session
@@ -276,6 +277,8 @@ class IPythonREPL:
         self.allow_git = allow_git
         # RLM_HARNESS_* variables naming the stores this agent's rlm.harness view reads.
         self.harness_dirs = dict(harness_dirs or {})
+        # Persistent directory of agent-authored skill packages (contract-provided).
+        self.skills_dir = skills_dir
         self._km = None
         self._kc = None
         self._ipc_dir = None
@@ -332,9 +335,15 @@ class IPythonREPL:
         depth = (
             int(os.environ.get("RLM_DEPTH", "0")) if self.depth is None else self.depth
         )
-        # Pip-installed skills + the MCP-tool modules generated into the session dir (rlm.mcp);
-        # the session dir goes on the kernel's sys.path so those import by name.
-        skill_names = discover_skills(self.session.dir if self.session else None)
+        # Pip-installed skills + the MCP-tool modules generated into the session dir (rlm.mcp)
+        # + authored packages under skills_dir; the session dir and each authored package's
+        # parent go on the kernel's sys.path so those import by name.
+        skill_names = discover_skills(
+            self.session.dir if self.session else None, self.skills_dir
+        )
+        authored = list_authored_skills(self.skills_dir)
+        authored_names = [name for name, _ in authored]
+        authored_paths = list(dict.fromkeys(path for _, path in authored))
 
         setup_code = f"""\
 import os, sys, asyncio, types, json, time, functools, inspect
@@ -342,6 +351,9 @@ from pathlib import Path
 os.chdir({self.cwd!r})
 if {bool(session_dir)!r}:
     sys.path.append({session_dir!r})
+for _path in {authored_paths!r}:
+    if _path not in sys.path:
+        sys.path.append(_path)
 os.environ['RLM_SESSION_DIR'] = {session_dir!r} or ''
 os.environ['RLM_DEPTH'] = str({depth!r} + 1)
 os.environ['NO_COLOR'] = '1'
@@ -410,8 +422,24 @@ if {bool(self.broker_endpoint)!r}:
         {self.broker_endpoint.capability if self.broker_endpoint else None!r},
     ))
 
+class _BrokenSkill:
+    # An authored package that failed to import: calling it explains why, and the
+    # kernel itself keeps working so the agent can fix the package.
+    def __init__(self, name, error):
+        self.__name__ = name
+        self.__doc__ = f"import of authored skill {{name!r}} failed: {{error}}"
+        self._error = error
+    async def __call__(self, *args, **kwargs):
+        raise RuntimeError(self.__doc__) from self._error
+
 for _name in {skill_names!r}:
-    _module = __import__(_name)
+    try:
+        _module = __import__(_name)
+    except Exception as _error:
+        if _name not in {authored_names!r}:
+            raise
+        globals()[_name] = _BrokenSkill(_name, _error)
+        continue
     _source = None if getattr(_module, '__rlm_brokered__', False) else 'python'
     globals()[_name] = _wrap_callable(_module, _source)
 

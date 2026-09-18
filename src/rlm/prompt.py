@@ -339,6 +339,15 @@ correction that should persist; use the direct `create_*` calls when you already
 exact entry to write. `await rlm.refine.run(rollback_id=...)` undoes a listed refinement.
 Keep entries small and evidence-backed."""
 
+HARNESS_SKILLS_DIR_PROMPT = """Authored skill packages persist across sessions under %(skills_dir)s and are imported by
+name at kernel start (a broken package binds a placeholder whose call explains the import
+error). To add one, write `%(skills_dir)s/<name>/src/<name>/__init__.py` defining
+`async def run(...)` with typed keyword arguments and a docstring, using only the packages
+pre-installed in the kernel (no pip), then import-test it in this kernel before recording
+`h.create_skill(...)` with `reference={"type": "python", "import": "<name>", "callable":
+"run", "call_pattern": "await <name>(...)"}`. The entry describes how to use the package;
+the package is the code. It becomes pre-imported in later sessions."""
+
 HARNESS_SPAWN_HINT = (
     "(invoke a spec by turning it into a concise task prompt and spawning with "
     "`await rlm.agent.spawn(task, name=...)`; collect the answer with `await child.result()`)"
@@ -354,6 +363,7 @@ def render_harness(
     query: str | None = None,
     has_ipython: bool = True,
     can_delegate: bool = False,
+    skills_dir: str | None = None,
 ) -> str:
     """The harness block for the system prompt: per-kind counts, the most relevant
     entries within the caps, and recent refinement events."""
@@ -361,6 +371,8 @@ def render_harness(
     lines = [HARNESS_INTRO, ""]
     if has_ipython:
         lines.extend([HARNESS_API_PROMPT, ""])
+        if skills_dir:
+            lines.extend([HARNESS_SKILLS_DIR_PROMPT % {"skills_dir": skills_dir}, ""])
     total = 0
     for kind in KINDS:
         records = view.entries(kind)
