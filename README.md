@@ -292,9 +292,12 @@ At kernel start every authored package's `src/` goes on `sys.path` and the modul
 pre-imported by name with the same `await <name>(...)` wrapper as an installed skill. A
 package that breaks the contract or fails to import binds a placeholder whose call raises
 the reason, so a bad package never breaks the kernel. Names must not collide with installed
-or MCP-generated skills. The system prompt states the contract and tells the agent to
-import-test before recording a `skill` entry; `RLM_HARNESS_SKILLS_DIR` names the
-directory. `null` (the default) keeps authored packages session-local.
+or MCP-generated skills. A package written or edited during the session is brought in
+without a restart by `rlm.harness.load_skills("<name>")` (no names = all), which
+reloads and rebinds it exactly as kernel start does and returns `{name: reason}` with
+`None` for a usable skill. The system prompt states the contract and this workflow;
+`RLM_HARNESS_SKILLS_DIR` names the directory. `null` (the default) keeps authored
+packages session-local.
 
 ### Refinement
 

@@ -336,17 +336,12 @@ class IPythonREPL:
             int(os.environ.get("RLM_DEPTH", "0")) if self.depth is None else self.depth
         )
         # Pip-installed skills + the MCP-tool modules generated into the session dir (rlm.mcp)
-        # + authored packages under skills_dir; the session dir and each authored package's
-        # parent go on the kernel's sys.path so those import by name.
+        # + authored packages under skills_dir; the session dir goes on the kernel's sys.path
+        # so generated modules import by name, and rlm.tools.kernel_skills binds the rest.
         skill_names = discover_skills(
             self.session.dir if self.session else None, self.skills_dir
         )
-        authored = list_authored_skills(self.skills_dir)
-        # name -> (SKILL.md path, discovery-time contract error)
-        authored_info = {
-            skill.name: (skill.skill_md, skill.error) for skill in authored
-        }
-        authored_paths = list(dict.fromkeys(skill.path for skill in authored))
+        authored_names = [s.name for s in list_authored_skills(self.skills_dir)]
 
         setup_code = f"""\
 import os, sys, asyncio, types, json, time, functools, inspect
@@ -354,9 +349,6 @@ from pathlib import Path
 os.chdir({self.cwd!r})
 if {bool(session_dir)!r}:
     sys.path.append({session_dir!r})
-for _path in {authored_paths!r}:
-    if _path not in sys.path:
-        sys.path.append(_path)
 os.environ['RLM_SESSION_DIR'] = {session_dir!r} or ''
 os.environ['RLM_DEPTH'] = str({depth!r} + 1)
 os.environ['NO_COLOR'] = '1'
@@ -370,53 +362,8 @@ import nest_asyncio
 nest_asyncio.apply()
 
 
-def _log_programmatic_call(tool_name, source):
-    # Matches the line format written by install.sh's bash wrapper so
-    # ProgrammaticToolCallStats.from_log parses both sources identically.
-    session_dir = os.environ.get('RLM_SESSION_DIR', '')
-    if not session_dir:
-        return
-    try:
-        with open(os.path.join(session_dir, 'programmatic_tool_calls.jsonl'), 'a') as f:
-            f.write(json.dumps({{
-                'tool': tool_name,
-                'source': source,
-                'timestamp': time.time(),
-            }}) + '\\n')
-    except OSError:
-        pass
-
-
-class _CallableModule(types.ModuleType):
-    # Make `await <skill>(...)` shorthand for `await <skill>.run(...)`.
-    # __call__ is looked up on the type, not the instance, so the
-    # override has to live on the class.
-    async def __call__(self, *args, **kwargs):
-        return await self.run(*args, **kwargs)
-
-
-def _wrap_callable(mod, log_source, register=True):
-    # log_source: 'python' for skills (logged to programmatic_tool_calls.jsonl),
-    # Brokered skills are counted by the supervisor.
-    wrapped = _CallableModule(mod.__name__)
-    wrapped.__dict__.update(mod.__dict__)
-    if log_source is not None:
-        _original_run = wrapped.run
-        @functools.wraps(_original_run)
-        async def _logged_run(*args, **kwargs):
-            _log_programmatic_call(mod.__name__, log_source)
-            return await _original_run(*args, **kwargs)
-        wrapped.run = _logged_run
-    # Mirror run's signature and docstring onto the module so
-    # `inspect.signature(<skill>)` and `help(<skill>)` expose the real API
-    # surface instead of `_CallableModule.__call__`'s `(*args, **kwargs)`
-    # and the file-level module docstring.
-    wrapped.__signature__ = inspect.signature(wrapped.run)
-    wrapped.__doc__ = wrapped.run.__doc__
-    if register:
-        sys.modules[mod.__name__] = wrapped
-    return wrapped
-
+from rlm.tools.kernel_skills import load_authored as _rlm_load_authored
+from rlm.tools.kernel_skills import wrap_callable as _wrap_callable
 
 if {bool(self.broker_endpoint)!r}:
     import rlm.broker as _rlm_broker
@@ -425,38 +372,13 @@ if {bool(self.broker_endpoint)!r}:
         {self.broker_endpoint.capability if self.broker_endpoint else None!r},
     ))
 
-class _BrokenSkill:
-    # An authored package that violates the skill contract or failed to import:
-    # calling it explains why, and the kernel keeps working so the agent can fix it.
-    def __init__(self, name, reason, cause=None):
-        self.__name__ = name
-        self.__doc__ = f"authored skill {{name!r}} is unusable: {{reason}}"
-        self._cause = cause
-    async def __call__(self, *args, **kwargs):
-        raise RuntimeError(self.__doc__) from self._cause
-
-_authored_info = {authored_info!r}
 for _name in {skill_names!r}:
-    if _name in _authored_info:
-        _skill_md, _error = _authored_info[_name]
-        if _error is not None:
-            globals()[_name] = _BrokenSkill(_name, _error)
-            continue
-        try:
-            _module = __import__(_name)
-        except Exception as _e:
-            globals()[_name] = _BrokenSkill(_name, f"import failed: {{_e}}", _e)
-            continue
-        if not inspect.iscoroutinefunction(getattr(_module, 'run', None)):
-            globals()[_name] = _BrokenSkill(_name, "it must define `async def run(...)`")
-            continue
-        if not _module.run.__doc__:
-            # SKILL.md stands in for a missing docstring so help(<name>) stays useful.
-            _module.run.__doc__ = Path(_skill_md).read_text()
-    else:
-        _module = __import__(_name)
+    if _name in {authored_names!r}:
+        continue
+    _module = __import__(_name)
     _source = None if getattr(_module, '__rlm_brokered__', False) else 'python'
     globals()[_name] = _wrap_callable(_module, _source)
+_rlm_load_authored({self.skills_dir!r}, globals())
 
 import rlm
 """

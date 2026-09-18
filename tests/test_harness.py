@@ -426,6 +426,54 @@ async def test_authored_packages_are_importable_in_the_kernel(session, tmp_path)
     assert engine.execution_snapshot()["limits"]["harness_skills_dir"] is True
 
 
+async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
+    session, tmp_path
+):
+    root = tmp_path / "skills"
+    root.mkdir()
+    write_package = (
+        "from pathlib import Path\n"
+        f"pkg = Path({str(root)!r}) / 'greeter' / 'src' / 'greeter'\n"
+        "pkg.mkdir(parents=True, exist_ok=True)\n"
+        "(pkg / '__init__.py').write_text(BODY)\n"
+        f"(Path({str(root)!r}) / 'greeter' / 'SKILL.md').write_text('# greeter')\n"
+    )
+    first = (
+        "BODY = 'async def run(name: str) -> str:\\n    return f\"hi {name}\"\\n'\n"
+        + write_package
+        + "print(rlm.harness.load_skills())\n"
+        "print(await greeter(name='ann'))\n"
+        "print(rlm.harness.load_skills('say', 'nope'))\n"
+    )
+    second = (
+        "BODY = 'async def run(name: str) -> str:\\n    return f\"bye {name}\"\\n'\n"
+        + write_package
+        + "print(rlm.harness.load_skills('greeter'))\n"
+        "print(await greeter(name='ann'))\n"
+        "print(inspect.signature(greeter))\n"
+    )
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": first})]),
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": second})]),
+            DummyMessage(content="ok"),
+        ]
+    )
+    config = make_runtime_config(harness=HarnessConfig(skills_dir=str(root)))
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+
+    await engine.run("author a skill")
+
+    output = tool_result(client)
+    assert "{'greeter': None}" in output and "hi ann" in output
+    assert "'say': \"'say' is an installed or generated skill\"" in output
+    assert "'nope': \"no package 'nope' under" in output
+    output = tool_result(client, turn=1)
+    assert "{'greeter': None}" in output and "bye ann" in output
+    assert "(name: str)" in output
+    assert "programmatic_tool_calls.jsonl" in {p.name for p in session.dir.iterdir()}
+
+
 def test_render_harness_mentions_skills_dir_only_when_set(tmp_path):
     view = build_view(tmp_path / "h")
     assert "Authored skill packages" not in render_harness(view)

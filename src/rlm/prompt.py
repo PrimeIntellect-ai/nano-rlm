@@ -346,9 +346,11 @@ by name at kernel start. They follow the installed-skill contract minus installa
 keyword arguments and a Google-style docstring; an optional `pyproject.toml` must name the
 distribution `rlm-skill-<name>`. Use only packages already in the kernel venv (no pip). A
 package that breaks the contract or fails to import binds a placeholder whose call explains
-the problem. Import-test in this kernel before recording `h.create_skill(...)` with
-`reference={"type": "python", "import": "<name>", "callable": "run", "call_pattern":
-"await <name>(...)"}`: the entry describes how to use the package; the package is the code."""
+the problem. After writing or editing a package, `rlm.harness.load_skills("<name>")`
+(re)loads it into this kernel and returns `{name: reason_or_None}`; test it with
+`await <name>(...)` before recording `h.create_skill(...)` with `reference={"type":
+"python", "import": "<name>", "callable": "run", "call_pattern": "await <name>(...)"}`:
+the entry describes how to use the package; the package is the code."""
 
 HARNESS_SPAWN_HINT = (
     "(invoke a spec by turning it into a concise task prompt and spawning with "
