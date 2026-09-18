@@ -9,12 +9,15 @@ from rlm.tools.registry import (
 )
 from rlm.tools.skills import (
     SKILLS_DIR,
+    AuthoredSkill,
     TASK_SKILLS_DIR,
     discover_skills,
     get_installed_skills,
+    list_authored_skills,
 )
 
 __all__ = [
+    "AuthoredSkill",
     "BuiltinTool",
     "IPythonREPL",
     "SKILLS_DIR",
@@ -26,4 +29,5 @@ __all__ = [
     "get_active_tools",
     "get_builtin_tool",
     "get_installed_skills",
+    "list_authored_skills",
 ]

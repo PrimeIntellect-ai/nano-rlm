@@ -239,7 +239,8 @@ stores read-only alongside its own. The contract's `harness` object controls the
   "refine_turn_interval": 12,
   "refine_cooldown_seconds": 300,
   "max_refinements": null,
-  "max_refinement_attempts": 3
+  "max_refinement_attempts": 3,
+  "skills_dir": null
 }
 ```
 
@@ -270,6 +271,63 @@ package (see [Skills](#skills) for the on-disk skill contract). Stores are rewri
 atomically under a file lock and reloaded when another writer changed them, so the engine
 and the kernel share one file safely. `harness(session_dir=...)` loads a session's local
 store outside a running session.
+
+### Skill entries versus skill packages
+
+Three things share the word "skill", and they are different kinds of object:
+
+| | Installed skill | Authored skill package | Harness `skill` entry |
+| --- | --- | --- | --- |
+| What it is | A Python package installed into rlm's venv | A Python package under `skills_dir`, imported from `sys.path` | A JSON record in `harness_state.json` |
+| Contains | Code: `async def run(...)` | Code: `async def run(...)` | Text: title, when/how to call something, a `reference` (`import`, `callable`, `call_pattern`) and an `arguments` schema |
+| Created by | A human, via `install.sh` at image build | The agent, mid-session, by writing files | The agent (`h.create_skill(...)`) or the refinement pass |
+| Lives | The venv; every session | `<skills_dir>/<name>/`; every session sharing that dir | One store: session-local, an ancestor's, or global |
+| The kernel sees | `await websearch(...)` | `await greeter(...)` | Nothing executable; it is rendered into the system prompt |
+| Refinement can | Never touch it | Never touch it | Create, update, delete, roll back |
+
+The relationship is pointer to target. An entry's `reference.import` names a module that
+must already be importable (an installed skill, an authored package, an MCP proxy module,
+or `rlm` itself); apply-time validation rejects an entry that points anywhere else. The
+entry adds what code cannot carry: when this call is the right move, which arguments
+matter for a kind of task, gotchas learned from use. One package can be described by
+several entries, and a package with no entry is still callable, just not surfaced as a
+routing hint.
+
+The split gives the two layers different lifecycles. Packages are code, so they go
+through the main loop: the agent writes them, `load_skills()` imports them, it tests
+them, and mistakes are observed and iterated on. Refinement, a one-shot JSON proposal
+with `before`/`after` snapshots, is kept away from them because a file write cannot be
+undone by replaying a snapshot and a side model call should not mint code that
+auto-executes in future sessions. Entries are state, so they go through refinement:
+small, validated, snapshotted, reversible; a wrong one costs a bad hint in the prompt,
+not a broken kernel. The typical arc is: notice a repeated procedure, write a package,
+`load_skills` and test it, record a `skill` entry pointing at it; future sessions see the
+entry in their system prompt with the package already pre-imported.
+
+### Authored skill packages
+
+`skills_dir` gives agent-written packages a place that survives the session. An authored
+package is an installed skill minus installation — the [skill contract](#skill-contract)
+applies with these adjustments:
+
+- Required: `<skills_dir>/<name>/SKILL.md` and `<skills_dir>/<name>/src/<name>/__init__.py`
+  defining `async def run(...)`. The kernel checks both; `run`'s docstring falls back to
+  `SKILL.md` for `help(<name>)`.
+- Optional: `pyproject.toml`; when present its `[project] name` must be `rlm-skill-<name>`
+  so the package can be promoted to an installed skill unchanged. Nothing is installed, so
+  dependencies are limited to what is already in the kernel venv and there is no console
+  script: authored packages are IPython-only.
+
+At kernel start every authored package's `src/` goes on `sys.path` and the module is
+pre-imported by name with the same `await <name>(...)` wrapper as an installed skill. A
+package that breaks the contract or fails to import binds a placeholder whose call raises
+the reason, so a bad package never breaks the kernel. Names must not collide with installed
+or MCP-generated skills. A package written or edited during the session is brought in
+without a restart by `rlm.harness.load_skills("<name>")` (no names = all), which
+reloads and rebinds it exactly as kernel start does and returns `{name: reason}` with
+`None` for a usable skill. The system prompt states the contract and this workflow;
+`RLM_HARNESS_SKILLS_DIR` names the directory. `null` (the default) keeps authored
+packages session-local.
 
 ### Refinement
 

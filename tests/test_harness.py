@@ -332,3 +332,153 @@ async def test_spawned_child_inherits_parent_store_as_ancestor(tmp_path):
 
     assert seen == [(1, (str(local_dir(session.dir)),))]
     assert child.runtime_config.harness.global_dir == str(tmp_path / "global")
+
+
+def _write_package(root, name: str, body: str, *, skill_md: bool = True) -> None:
+    package = root / name / "src" / name
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(body)
+    if skill_md:
+        (root / name / "SKILL.md").write_text(
+            f"# {name}\n\nCall `await {name}(...)`.\n"
+        )
+
+
+def test_list_authored_skills_checks_the_contract_without_importing(tmp_path):
+    from rlm.tools.skills import discover_skills, list_authored_skills
+
+    assert list_authored_skills(None) == []
+    assert list_authored_skills(tmp_path / "missing") == []
+    root = tmp_path / "skills"
+    _write_package(root, "word_count", "async def run(text: str) -> int: ...\n")
+    _write_package(root, "no_md", "async def run(): ...\n", skill_md=False)
+    (root / "flat").mkdir()
+    (root / "flat" / "__init__.py").write_text("async def run(): ...\n")
+    _write_package(root, "bad_name", "async def run(): ...\n")
+    (root / "bad_name" / "pyproject.toml").write_text('[project]\nname = "bad-name"\n')
+    _write_package(root, "good_name", "async def run(): ...\n")
+    (root / "good_name" / "pyproject.toml").write_text(
+        '[project]\nname = "rlm-skill-good_name"\n'
+    )
+    (root / "not a package").mkdir()
+
+    skills = {s.name: s for s in list_authored_skills(root)}
+    assert set(skills) == {"word_count", "no_md", "flat", "bad_name", "good_name"}
+    assert skills["word_count"].error is None
+    assert skills["word_count"].path == str(root / "word_count" / "src")
+    assert skills["word_count"].skill_md == str(root / "word_count" / "SKILL.md")
+    assert skills["good_name"].error is None
+    assert skills["no_md"].error == "expected no_md/SKILL.md"
+    assert skills["flat"].error == "expected flat/src/flat/__init__.py"
+    assert "'rlm-skill-bad_name'" in skills["bad_name"].error
+    assert discover_skills(None, root)[-5:] == sorted(skills)
+
+    _write_package(root, "say", "async def run(s: str) -> str: ...\n")
+    with pytest.raises(ValueError, match="installed and authored: say"):
+        discover_skills(None, root)
+
+
+async def test_authored_packages_are_importable_in_the_kernel(session, tmp_path):
+    root = tmp_path / "skills"
+    _write_package(
+        root,
+        "word_count",
+        'async def run(text: str, top: int = 5) -> str:\n    """Count words."""\n    return f"{len(text.split())} words"\n',
+    )
+    _write_package(root, "undocumented", "async def run() -> str:\n    return 'ok'\n")
+    _write_package(root, "broken", "import definitely_missing_module\n")
+    _write_package(root, "sync_run", "def run():\n    return 1\n")
+    _write_package(root, "no_md", "async def run(): ...\n", skill_md=False)
+    code = (
+        "print(await word_count('a b c'))\n"
+        "print(inspect.signature(word_count))\n"
+        "print(undocumented.__doc__.strip())\n"
+        "for bad in (broken, sync_run, no_md):\n"
+        "    try:\n"
+        "        await bad()\n"
+        "    except RuntimeError as e:\n"
+        "        print(e)\n"
+        "print(os.environ['RLM_HARNESS_SKILLS_DIR'] == " + repr(str(root)) + ")"
+    )
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})]),
+            DummyMessage(content="ok"),
+        ]
+    )
+    config = make_runtime_config(harness=HarnessConfig(skills_dir=str(root)))
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+
+    await engine.run("use the authored skill")
+
+    output = tool_result(client)
+    assert "3 words" in output
+    assert "(text: str, top: int = 5)" in output
+    assert "Call `await undocumented(...)`." in output
+    assert "'broken' is unusable: import failed" in output
+    assert "definitely_missing_module" in output
+    assert "'sync_run' is unusable: it must define `async def run(...)`" in output
+    assert "'no_md' is unusable: expected no_md/SKILL.md" in output
+    assert output.strip().endswith("True")
+    system_prompt = client.calls[0]["messages"][0]["content"]
+    assert "`word_count`" in system_prompt and "`broken`" in system_prompt
+    assert f"persist across sessions under {root}" in system_prompt
+    assert engine.execution_snapshot()["limits"]["harness_skills_dir"] is True
+
+
+async def test_load_skills_brings_a_package_written_mid_session_into_the_kernel(
+    session, tmp_path
+):
+    root = tmp_path / "skills"
+    root.mkdir()
+    write_package = (
+        "from pathlib import Path\n"
+        f"pkg = Path({str(root)!r}) / 'greeter' / 'src' / 'greeter'\n"
+        "pkg.mkdir(parents=True, exist_ok=True)\n"
+        "(pkg / '__init__.py').write_text(BODY)\n"
+        f"(Path({str(root)!r}) / 'greeter' / 'SKILL.md').write_text('# greeter')\n"
+    )
+    first = (
+        "BODY = 'async def run(name: str) -> str:\\n    return f\"hi {name}\"\\n'\n"
+        + write_package
+        + "print(rlm.harness.load_skills())\n"
+        "print(await greeter(name='ann'))\n"
+        "print(rlm.harness.load_skills('say', 'nope'))\n"
+    )
+    second = (
+        "BODY = 'async def run(name: str) -> str:\\n    return f\"bye {name}\"\\n'\n"
+        + write_package
+        + "print(rlm.harness.load_skills('greeter'))\n"
+        "print(await greeter(name='ann'))\n"
+        "print(inspect.signature(greeter))\n"
+    )
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": first})]),
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": second})]),
+            DummyMessage(content="ok"),
+        ]
+    )
+    config = make_runtime_config(harness=HarnessConfig(skills_dir=str(root)))
+    engine = RLMEngine(client=client, session=session, runtime_config=config)  # type: ignore
+
+    await engine.run("author a skill")
+
+    output = tool_result(client)
+    assert "{'greeter': None}" in output and "hi ann" in output
+    assert "'say': \"'say' is an installed or generated skill\"" in output
+    assert "'nope': \"no package 'nope' under" in output
+    output = tool_result(client, turn=1)
+    assert "{'greeter': None}" in output and "bye ann" in output
+    assert "(name: str)" in output
+    assert "programmatic_tool_calls.jsonl" in {p.name for p in session.dir.iterdir()}
+
+
+def test_render_harness_mentions_skills_dir_only_when_set(tmp_path):
+    view = build_view(tmp_path / "h")
+    assert "Authored skill packages" not in render_harness(view)
+    assert "Authored skill packages" not in render_harness(
+        view, skills_dir="/s", has_ipython=False
+    )
+    block = render_harness(view, skills_dir="/s")
+    assert "/s/<name>/src/<name>/__init__.py" in block and "/s/<name>/SKILL.md" in block

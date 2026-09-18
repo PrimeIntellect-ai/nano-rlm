@@ -41,6 +41,7 @@ HARNESS_DIR_NAME = "harness"
 LOCAL_DIR_ENV = "RLM_HARNESS_LOCAL_DIR"
 GLOBAL_DIR_ENV = "RLM_HARNESS_GLOBAL_DIR"
 ANCESTOR_DIRS_ENV = "RLM_HARNESS_ANCESTOR_DIRS"
+SKILLS_DIR_ENV = "RLM_HARNESS_SKILLS_DIR"
 
 
 def _now() -> str:
@@ -857,6 +858,34 @@ def harness(session_dir: str | Path | None = None) -> HarnessView:
     )
 
 
+def load_skills(*names: str) -> dict[str, str | None]:
+    """Bring authored skill packages into this kernel now, without a restart.
+
+    Reloads every package under the session's skills directory (or just ``names``)
+    and rebinds each by name in the user namespace, exactly as kernel start does.
+    Returns ``{name: reason}`` where ``None`` means the skill is usable; a reason names
+    the contract violation or import error, and the bound name raises it when called.
+    """
+    import sys
+
+    from rlm.mcp import list_skill_modules
+    from rlm.tools.kernel_skills import load_authored
+    from rlm.tools.skills import get_installed_skills
+
+    session_dir = os.environ.get("RLM_SESSION_DIR") or None
+    reserved = {
+        "rlm",
+        *get_installed_skills(),
+        *(list_skill_modules(Path(session_dir)) if session_dir else []),
+    }
+    return load_authored(
+        os.environ.get(SKILLS_DIR_ENV) or None,
+        sys.modules["__main__"].__dict__,
+        names,
+        reserved=reserved,
+    )
+
+
 __all__ = [
     "KINDS",
     "HarnessEntry",
@@ -868,6 +897,7 @@ __all__ = [
     "build_view",
     "format_entry",
     "harness",
+    "load_skills",
     "local_dir",
     "query_terms",
     "score_entry",

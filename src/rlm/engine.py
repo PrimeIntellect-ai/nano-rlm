@@ -42,6 +42,7 @@ from rlm.harness import (
     ANCESTOR_DIRS_ENV,
     GLOBAL_DIR_ENV,
     LOCAL_DIR_ENV,
+    SKILLS_DIR_ENV,
     HarnessView,
     build_view,
     local_dir,
@@ -237,6 +238,7 @@ class RLMEngine:
         self.allow_git = config.policy.allow_git
         self.harness_config = config.harness
         self._harness: HarnessView | None = None
+        self._skills_dir = config.harness.skills_dir if config.harness.enabled else None
 
         # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
@@ -522,7 +524,11 @@ class RLMEngine:
                 if any(tool.name == "ipython" for tool in self._active_tools):
                     self._active_tool_schemas.append(WAIT_SCHEMA)
                 if self.mcp_servers or "search" in self.skills:
-                    reserved_names = {"rlm", *local_skills, *discover_skills()}
+                    reserved_names = {
+                        "rlm",
+                        *local_skills,
+                        *discover_skills(skills_dir=self._skills_dir),
+                    }
                     brokered_skills = self._supervisor.write_brokered_skill_modules(
                         self.session.dir, reserved_names
                     )
@@ -551,6 +557,7 @@ class RLMEngine:
                 str(self._harness.global_.dir) if self._harness.global_ else ""
             )
             harness_dirs[ANCESTOR_DIRS_ENV] = os.pathsep.join(ancestors)
+            harness_dirs[SKILLS_DIR_ENV] = self.harness_config.skills_dir or ""
 
         self._repl = IPythonREPL(
             cwd=self.cwd,
@@ -562,6 +569,7 @@ class RLMEngine:
             exec_timeout=self.exec_timeout,
             allow_git=self.allow_git,
             harness_dirs=harness_dirs,
+            skills_dir=self._skills_dir,
         )
         try:
             startup = asyncio.create_task(asyncio.to_thread(self._repl.start))
@@ -1402,6 +1410,7 @@ class RLMEngine:
                 "refine_cooldown_seconds": self.harness_config.refine_cooldown_seconds,
                 "max_refinements": self.harness_config.max_refinements,
                 "max_refinement_attempts": self.harness_config.max_refinement_attempts,
+                "harness_skills_dir": self._skills_dir is not None,
             },
             "harness": self._harness.counts() if self._harness is not None else None,
             "semantic_edges": self._semantic_edges.snapshot(),
@@ -1528,7 +1537,7 @@ class RLMEngine:
             return None
         if self._supervisor is not None:
             self._supervisor.set_refine_in_flight(self._invocation_id, True)
-        importable = {*discover_skills(self.session.dir), "rlm"}
+        importable = {*discover_skills(self.session.dir, self._skills_dir), "rlm"}
         usage_total = TokenUsage()
         request_ids: list[str] = []
         baseline = None
@@ -1686,6 +1695,7 @@ class RLMEngine:
             query=task_text,
             has_ipython=has_ipython,
             can_delegate=has_ipython and self.depth < self.max_depth,
+            skills_dir=self._skills_dir,
         )
 
     def _load_system_prompt(
@@ -1694,7 +1704,7 @@ class RLMEngine:
         return build_system_prompt(
             self.cwd,
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
-            discover_skills(self.session.dir),
+            discover_skills(self.session.dir, self._skills_dir),
             depth=self.depth,
             session_dir=str(self.session.dir),
             allow_recursion=self.depth < self.max_depth,

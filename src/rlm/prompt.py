@@ -339,6 +339,19 @@ correction that should persist; use the direct `create_*` calls when you already
 exact entry to write. `await rlm.refine.run(rollback_id=...)` undoes a listed refinement.
 Keep entries small and evidence-backed."""
 
+HARNESS_SKILLS_DIR_PROMPT = """Authored skill packages persist across sessions under %(skills_dir)s and are pre-imported
+by name at kernel start. They follow the installed-skill contract minus installation:
+`%(skills_dir)s/<name>/SKILL.md` (what it does and how to call it) and
+`%(skills_dir)s/<name>/src/<name>/__init__.py` defining `async def run(...)` with typed
+keyword arguments and a Google-style docstring; an optional `pyproject.toml` must name the
+distribution `rlm-skill-<name>`. Use only packages already in the kernel venv (no pip). A
+package that breaks the contract or fails to import binds a placeholder whose call explains
+the problem. After writing or editing a package, `rlm.harness.load_skills("<name>")`
+(re)loads it into this kernel and returns `{name: reason_or_None}`; test it with
+`await <name>(...)` before recording `h.create_skill(...)` with `reference={"type":
+"python", "import": "<name>", "callable": "run", "call_pattern": "await <name>(...)"}`:
+the entry describes how to use the package; the package is the code."""
+
 HARNESS_SPAWN_HINT = (
     "(invoke a spec by turning it into a concise task prompt and spawning with "
     "`await rlm.agent.spawn(task, name=...)`; collect the answer with `await child.result()`)"
@@ -354,6 +367,7 @@ def render_harness(
     query: str | None = None,
     has_ipython: bool = True,
     can_delegate: bool = False,
+    skills_dir: str | None = None,
 ) -> str:
     """The harness block for the system prompt: per-kind counts, the most relevant
     entries within the caps, and recent refinement events."""
@@ -361,6 +375,8 @@ def render_harness(
     lines = [HARNESS_INTRO, ""]
     if has_ipython:
         lines.extend([HARNESS_API_PROMPT, ""])
+        if skills_dir:
+            lines.extend([HARNESS_SKILLS_DIR_PROMPT % {"skills_dir": skills_dir}, ""])
     total = 0
     for kind in KINDS:
         records = view.entries(kind)

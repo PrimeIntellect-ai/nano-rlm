@@ -274,7 +274,7 @@ async def test_skill_introspection(session):
 
     Without ``functools.wraps`` + a ``__signature__`` override on the
     callable module, ``inspect.signature(say)`` returns
-    ``_CallableModule.__call__``'s ``(*args, **kwargs)`` and
+    ``CallableModule.__call__``'s ``(*args, **kwargs)`` and
     ``inspect.signature(say.run)`` returns the logger shim's
     ``(*args, **kwargs)`` — both useless for the model that prompt.py
     tells to introspect the skill API.

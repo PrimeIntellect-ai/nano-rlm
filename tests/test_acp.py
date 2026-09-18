@@ -163,6 +163,7 @@ class _Engine:
                 "refine_cooldown_seconds": 300,
                 "max_refinements": None,
                 "max_refinement_attempts": 3,
+                "harness_skills_dir": False,
             },
             "harness": None,
             "semantic_edges": {"edges": []},

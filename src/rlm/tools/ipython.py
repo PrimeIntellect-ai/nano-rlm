@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
-from rlm.tools.skills import discover_skills
+from rlm.tools.skills import discover_skills, list_authored_skills
 from rlm.types import IpythonExecuted
 
 if TYPE_CHECKING:
@@ -265,6 +265,7 @@ class IPythonREPL:
         exec_timeout: int | None = None,
         allow_git: bool | None = None,
         harness_dirs: Mapping[str, str] | None = None,
+        skills_dir: str | None = None,
     ):
         self.cwd = cwd
         self.session = session
@@ -276,6 +277,8 @@ class IPythonREPL:
         self.allow_git = allow_git
         # RLM_HARNESS_* variables naming the stores this agent's rlm.harness view reads.
         self.harness_dirs = dict(harness_dirs or {})
+        # Persistent directory of agent-authored skill packages (contract-provided).
+        self.skills_dir = skills_dir
         self._km = None
         self._kc = None
         self._ipc_dir = None
@@ -332,9 +335,13 @@ class IPythonREPL:
         depth = (
             int(os.environ.get("RLM_DEPTH", "0")) if self.depth is None else self.depth
         )
-        # Pip-installed skills + the MCP-tool modules generated into the session dir (rlm.mcp);
-        # the session dir goes on the kernel's sys.path so those import by name.
-        skill_names = discover_skills(self.session.dir if self.session else None)
+        # Pip-installed skills + the MCP-tool modules generated into the session dir (rlm.mcp)
+        # + authored packages under skills_dir; the session dir goes on the kernel's sys.path
+        # so generated modules import by name, and rlm.tools.kernel_skills binds the rest.
+        skill_names = discover_skills(
+            self.session.dir if self.session else None, self.skills_dir
+        )
+        authored_names = [s.name for s in list_authored_skills(self.skills_dir)]
 
         setup_code = f"""\
 import os, sys, asyncio, types, json, time, functools, inspect
@@ -355,53 +362,8 @@ import nest_asyncio
 nest_asyncio.apply()
 
 
-def _log_programmatic_call(tool_name, source):
-    # Matches the line format written by install.sh's bash wrapper so
-    # ProgrammaticToolCallStats.from_log parses both sources identically.
-    session_dir = os.environ.get('RLM_SESSION_DIR', '')
-    if not session_dir:
-        return
-    try:
-        with open(os.path.join(session_dir, 'programmatic_tool_calls.jsonl'), 'a') as f:
-            f.write(json.dumps({{
-                'tool': tool_name,
-                'source': source,
-                'timestamp': time.time(),
-            }}) + '\\n')
-    except OSError:
-        pass
-
-
-class _CallableModule(types.ModuleType):
-    # Make `await <skill>(...)` shorthand for `await <skill>.run(...)`.
-    # __call__ is looked up on the type, not the instance, so the
-    # override has to live on the class.
-    async def __call__(self, *args, **kwargs):
-        return await self.run(*args, **kwargs)
-
-
-def _wrap_callable(mod, log_source, register=True):
-    # log_source: 'python' for skills (logged to programmatic_tool_calls.jsonl),
-    # Brokered skills are counted by the supervisor.
-    wrapped = _CallableModule(mod.__name__)
-    wrapped.__dict__.update(mod.__dict__)
-    if log_source is not None:
-        _original_run = wrapped.run
-        @functools.wraps(_original_run)
-        async def _logged_run(*args, **kwargs):
-            _log_programmatic_call(mod.__name__, log_source)
-            return await _original_run(*args, **kwargs)
-        wrapped.run = _logged_run
-    # Mirror run's signature and docstring onto the module so
-    # `inspect.signature(<skill>)` and `help(<skill>)` expose the real API
-    # surface instead of `_CallableModule.__call__`'s `(*args, **kwargs)`
-    # and the file-level module docstring.
-    wrapped.__signature__ = inspect.signature(wrapped.run)
-    wrapped.__doc__ = wrapped.run.__doc__
-    if register:
-        sys.modules[mod.__name__] = wrapped
-    return wrapped
-
+from rlm.tools.kernel_skills import load_authored as _rlm_load_authored
+from rlm.tools.kernel_skills import wrap_callable as _wrap_callable
 
 if {bool(self.broker_endpoint)!r}:
     import rlm.broker as _rlm_broker
@@ -411,9 +373,12 @@ if {bool(self.broker_endpoint)!r}:
     ))
 
 for _name in {skill_names!r}:
+    if _name in {authored_names!r}:
+        continue
     _module = __import__(_name)
     _source = None if getattr(_module, '__rlm_brokered__', False) else 'python'
     globals()[_name] = _wrap_callable(_module, _source)
+_rlm_load_authored({self.skills_dir!r}, globals())
 
 import rlm
 """
