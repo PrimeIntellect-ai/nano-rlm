@@ -400,7 +400,7 @@ def build_system_prompt(
             )
         if depth > 0:
             parts.append(
-                "Your final answer is your deliverable: it reaches your parent as an `agent.completed` event and through `result()`. Use `await rlm.agent.send_to_parent(message)` for interim findings, blockers or questions, not to repeat the final report; it returns an event ID and your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
+                "Your final answer is your deliverable: it reaches your parent automatically as an `agent.completed` event and through `result()`. You finish by replying without calling any tool; that reply is your final answer, so put the complete report there. Do not send the final report with `await rlm.agent.send_to_parent(message)`; use it only for interim findings, blockers or questions while you are still working. It returns an event ID and your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
             )
         else:
             parts.append(
