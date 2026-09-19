@@ -4,7 +4,7 @@ A minimal CLI coding agent with a persistent IPython execution environment and o
 
 By default the model gets a single built-in tool, `ipython`: a persistent IPython kernel for Python, and Bash commands and background jobs via `rlm.shell.run`. File edits, shell work, and orchestration all go through it. The runtime contract's `builtin_tools` list can select a different tool set (`bash`, `edit`, `fetch`, `ipython`) for native tool-calling runs.
 
-For convenience, rlm ships built-in *skills* that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via the contract's `builtin_tools`).
+For convenience, rlm ships built-in _skills_ that can be enabled per session via the runtime contract's `skills` list (off by default): `edit` (single-occurrence string replacement), `search` (web search via Serper, needs `SERPER_API_KEY`), and `fetch` (retrieve a URL as cleaned text). Enabled skills are pre-imported into the IPython kernel like any other skill (see [Skills](#skills)), so the agent calls `await edit(path=..., old_str=..., new_str=...)`, `await search(query=...)`, or `await fetch(url=...)`. `fetch` also exists as a native builtin tool with the same semantics, for tool-calling runs (opt-in via the contract's `builtin_tools`).
 
 Context compaction is on by default: the engine compacts when 16k tokens remain below an advertised model context window. Termination comes from the default tree-wide budget of 1M new tokens (`max_total_tokens`). The policy can set an explicit `summarize_at_tokens` threshold. The IPython kernel keeps running across compaction, so REPL state survives (see [Compaction](#compaction)).
 
@@ -13,7 +13,7 @@ Inside IPython, the `rlm` package is available in the namespace. When recursion 
 ## Install
 
 ```bash
-git clone https://github.com/PrimeIntellect-ai/nano-rlm.git
+git clone https://github.com/mannuch/nano-rlm.git
 cd nano-rlm
 uv sync
 source .venv/bin/activate
@@ -107,8 +107,8 @@ and context retention policy are unchanged.
 
 The process environment configures only process infrastructure:
 
-| Variable | Default | Description |
-| ---------- | --------- | ------------- |
+| Variable   | Default  | Description                          |
+| ---------- | -------- | ------------------------------------ |
 | `RLM_HOME` | `~/.rlm` | Root directory for sessions and data |
 
 ## Recursion
@@ -276,14 +276,14 @@ store outside a running session.
 
 Three things share the word "skill", and they are different kinds of object:
 
-| | Installed skill | Authored skill package | Harness `skill` entry |
-| --- | --- | --- | --- |
-| What it is | A Python package installed into rlm's venv | A Python package under `skills_dir`, imported from `sys.path` | A JSON record in `harness_state.json` |
-| Contains | Code: `async def run(...)` | Code: `async def run(...)` | Text: title, when/how to call something, a `reference` (`import`, `callable`, `call_pattern`) and an `arguments` schema |
-| Created by | A human, via `install.sh` at image build | The agent, mid-session, by writing files | The agent (`h.create_skill(...)`) or the refinement pass |
-| Lives | The venv; every session | `<skills_dir>/<name>/`; every session sharing that dir | One store: session-local, an ancestor's, or global |
-| The kernel sees | `await websearch(...)` | `await greeter(...)` | Nothing executable; it is rendered into the system prompt |
-| Refinement can | Never touch it | Never touch it | Create, update, delete, roll back |
+|                 | Installed skill                            | Authored skill package                                        | Harness `skill` entry                                                                                                   |
+| --------------- | ------------------------------------------ | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| What it is      | A Python package installed into rlm's venv | A Python package under `skills_dir`, imported from `sys.path` | A JSON record in `harness_state.json`                                                                                   |
+| Contains        | Code: `async def run(...)`                 | Code: `async def run(...)`                                    | Text: title, when/how to call something, a `reference` (`import`, `callable`, `call_pattern`) and an `arguments` schema |
+| Created by      | A human, via `install.sh` at image build   | The agent, mid-session, by writing files                      | The agent (`h.create_skill(...)`) or the refinement pass                                                                |
+| Lives           | The venv; every session                    | `<skills_dir>/<name>/`; every session sharing that dir        | One store: session-local, an ancestor's, or global                                                                      |
+| The kernel sees | `await websearch(...)`                     | `await greeter(...)`                                          | Nothing executable; it is rendered into the system prompt                                                               |
+| Refinement can  | Never touch it                             | Never touch it                                                | Create, update, delete, roll back                                                                                       |
 
 The relationship is pointer to target. An entry's `reference.import` names a module that
 must already be importable (an installed skill, an authored package, an MCP proxy module,
@@ -431,11 +431,11 @@ A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) too
 ```json
 {
   "mcpServers": {
-    "remote": {"url": "http://127.0.0.1:8000/mcp"},
+    "remote": { "url": "http://127.0.0.1:8000/mcp" },
     "local": {
       "command": "/path/to/tool-server",
       "args": ["--stdio"],
-      "env": {"API_KEY": "..."}
+      "env": { "API_KEY": "..." }
     }
   }
 }
@@ -609,12 +609,12 @@ notifies the owner automatically and needs no subscription.
 Events enter the same pull-based inbox and carry `subscription_id`. Their
 `content` contains a `target` (agent ID, job ID, or absolute path) plus:
 
-| Event | References |
-| --- | --- |
-| `watch.agent` | `start` and exclusive `end` message indices: `(await researcher.history()).messages[start:end]` |
-| `watch.job` | `start` and exclusive `end` byte cursors for `job.read(cursor=start)` |
-| `watch.path` | Changed `paths` and a `truncated` flag |
-| `watch.failed` | An `error` explaining why the subscription stopped |
+| Event          | References                                                                                      |
+| -------------- | ----------------------------------------------------------------------------------------------- |
+| `watch.agent`  | `start` and exclusive `end` message indices: `(await researcher.history()).messages[start:end]` |
+| `watch.job`    | `start` and exclusive `end` byte cursors for `job.read(cursor=start)`                           |
+| `watch.path`   | Changed `paths` and a `truncated` flag                                                          |
+| `watch.failed` | An `error` explaining why the subscription stopped                                              |
 
 Subscriptions start with future activity, not historical replay. Agent and job
 ranges can be coalesced across several steps/chunks; changes are batched over
