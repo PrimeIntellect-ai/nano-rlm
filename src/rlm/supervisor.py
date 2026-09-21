@@ -22,6 +22,7 @@ from rlm.broker import (
     BrokerEndpoint,
     parse_request,
     read_frame,
+    agent_result_to_payload,
     result_to_payload,
     write_frame,
 )
@@ -45,7 +46,7 @@ from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
-from rlm.types import ProgrammaticToolCallStats, RLMResult
+from rlm.types import AgentResult, ProgrammaticToolCallStats, RLMResult, TokenUsage
 
 # Per-agent limits for runtime hints.
 MAX_LONG_RUN_NOTES = 3
@@ -129,6 +130,8 @@ class _Invocation:
     announced_loud: int = 0  # events that count toward the unread notice
     announced_quiet: int = 0
     wait_hints: int = 0  # wait-held-job hints spent
+    turns: int = 0
+    new_tokens: int = 0
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -263,10 +266,16 @@ class SessionTreeSupervisor:
         """Live tree-total NEW tokens (completion + uncached prompt, every engine)."""
         return self._total_tokens
 
-    def record_call(self, tokens: int) -> None:
-        """Count one work-loop model call: a tree turn plus its new tokens."""
+    def record_call(self, tokens: int, agent_id: str | None = None) -> None:
+        """Count one work-loop model call: a tree turn plus its new tokens, and with the
+        calling agent's id its own counters as well."""
         self._total_turns += 1
         self._total_tokens += tokens
+        agent = self._invocations.get(agent_id) if agent_id else None
+        if agent is None:
+            return
+        agent.turns += 1
+        agent.new_tokens += tokens
 
     def record_usage(self, tokens: int) -> None:
         """Add new tokens without a turn (compaction/checkpoint calls)."""
@@ -408,6 +417,7 @@ class SessionTreeSupervisor:
             - agent.started_at,
             "session_dir": str(agent.session.dir),
             "error": agent.error,
+            "turns": agent.turns,
             "cleanup_error": agent.cleanup_error,
         }
 
@@ -744,8 +754,18 @@ class SessionTreeSupervisor:
         self._publish(owner, event)
 
     def agent_step(self, agent_id: str, start: int) -> None:
-        self._subscriptions.activity(
-            "agent", agent_id, start, self._invocations[agent_id].session.message_count
+        """A child's assistant/tool step is fully logged: publish watch.agent activity and
+        check the progress thresholds a parent subscribed to
+        (watch.agent(every_turns=/every_tokens=)), so the event's slice includes the step."""
+        agent = self._invocations[agent_id]
+        end = agent.session.message_count
+        self._subscriptions.activity("agent", agent_id, start, end)
+        self._subscriptions.progress(
+            agent.id,
+            agent.turns,
+            agent.new_tokens,
+            end,
+            {"name": agent.name, "status": agent.status},
         )
 
     def _publish_job_output(self, job: JobRecord, start: int) -> None:
@@ -755,12 +775,18 @@ class SessionTreeSupervisor:
         op = request["op"]
         if op == "watch.agent":
             child = self._child(parent, request["agent_id"])
+            thresholds = {
+                key: request[key]
+                for key in ("every_turns", "every_tokens")
+                if request.get(key) is not None
+            }
             sub = self._subscriptions.register(
                 parent.id,
-                "agent",
+                "progress" if thresholds else "agent",
                 child.id,
                 cursor=child.session.message_count,
                 completed=child.status in {"completed", "failed", "cancelled"},
+                thresholds=thresholds or None,
             )
         elif op == "watch.job":
             job = self._shell_jobs.get(parent.id, request["job_id"])
@@ -1039,7 +1065,11 @@ class SessionTreeSupervisor:
                 self._event(
                     parent,
                     "agent.message",
-                    request["message"],
+                    {
+                        "agent_id": parent.id,
+                        "name": parent.name,
+                        "text": request["message"],
+                    },
                     self._scopes[request["scope_id"]].request_id,
                 ),
             )
@@ -1094,15 +1124,28 @@ class SessionTreeSupervisor:
         elif op == "agent.cancel":
             await self._terminate(child)
         elif op == "agent.result":
+            yield_after = min(request["yield_after"], RUN_BLOCK_MAX_SECONDS)
+            if not child.done.is_set() and yield_after > 0:
+                try:
+                    await asyncio.wait_for(child.done.wait(), timeout=yield_after)
+                except asyncio.TimeoutError:
+                    pass
             if child.status in {"failed", "cancelled"}:
                 self.semantic_edges.finish_subagent(child.id)
                 raise RuntimeError(child.error or "agent cancelled")
-            if child.result is None:
-                return None
-            self.semantic_edges.finish_subagent(
-                child.id, request_id=child.result_request_id
+            if child.result is not None:
+                self.semantic_edges.finish_subagent(
+                    child.id, request_id=child.result_request_id
+                )
+            return agent_result_to_payload(
+                AgentResult(
+                    status=child.status,
+                    answer=None if child.result is None else child.result.answer,
+                    session_dir=child.session.dir,
+                    usage=TokenUsage() if child.result is None else child.result.usage,
+                    turns=child.turns,
+                )
             )
-            return result_to_payload(child.result)
         return self._info(child)
 
     async def _start_skill_call(
@@ -1200,7 +1243,22 @@ class SessionTreeSupervisor:
                         self._event(
                             child,
                             "agent.completed",
-                            {"agent_id": child.id, "status": child.status},
+                            {
+                                "agent_id": child.id,
+                                "name": child.name,
+                                "status": child.status,
+                                "answer": (
+                                    child.result.answer[-COMPLETED_TAIL_BYTES:]
+                                    if child.result is not None and child.result.answer
+                                    else None
+                                ),
+                                "turns": (
+                                    child.result.turns
+                                    if child.result is not None
+                                    else None
+                                ),
+                                "error": child.error,
+                            },
                             self.semantic_edges.last_request_id(child.id),
                         ),
                     )
@@ -1212,6 +1270,7 @@ class SessionTreeSupervisor:
     async def _close_agent_subscriptions(self, agent_id: str) -> None:
         try:
             self._subscriptions.finish("agent", agent_id)
+            self._subscriptions.finish("progress", agent_id)
         finally:
             await self._subscriptions.close(agent_id)
 

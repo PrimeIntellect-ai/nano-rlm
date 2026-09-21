@@ -15,7 +15,7 @@ from rlm.shell import ShellJob
 class SubscriptionInfo:
     id: str
     owner_id: str
-    kind: Literal["agent", "job", "path"]
+    kind: Literal["agent", "progress", "job", "path"]
     target: str
     recursive: bool
     status: Literal["active", "completed", "cancelled", "failed"]
@@ -34,9 +34,28 @@ class SubscriptionHandle:
         )
 
 
-async def agent(target: AgentHandle) -> SubscriptionHandle:
-    """Watch a direct child's future conversation activity after complete steps."""
-    info = await broker.agent_request("watch.agent", agent_id=target.id)
+async def agent(
+    target: AgentHandle,
+    *,
+    every_turns: int | None = None,
+    every_tokens: int | None = None,
+) -> SubscriptionHandle:
+    """Watch a direct child. Without thresholds: a `watch.agent` event after each complete
+    step (conversation activity). With every_turns= and/or every_tokens=: a `watch.progress`
+    event each time the child's own model calls or new tokens cross the next multiple, with
+    content turns, tokens, name, status and the history slice start:end since the previous
+    event — read `(await child.history()).messages[start:end]`, then `await child.steer(...)` if needed."""
+    for key, value in (("every_turns", every_turns), ("every_tokens", every_tokens)):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise TypeError(f"{key} must be a positive int or None")
+    info = await broker.agent_request(
+        "watch.agent",
+        agent_id=target.id,
+        every_turns=every_turns,
+        every_tokens=every_tokens,
+    )
     return SubscriptionHandle(info["id"])
 
 

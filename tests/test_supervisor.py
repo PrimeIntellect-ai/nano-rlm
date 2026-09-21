@@ -46,6 +46,7 @@ async def _start_child(supervisor, capability, scope, prompt):
                 "capability": capability,
                 "scope_id": scope,
                 "agent_id": child.id,
+                "yield_after": 0,
             }
         )
         from rlm.broker import result_from_payload
@@ -317,6 +318,7 @@ async def test_failed_child_returns_last_committed_request_to_parent(tmp_path):
                     "capability": endpoint.capability,
                     "scope_id": scope,
                     "agent_id": child.id,
+                    "yield_after": 0,
                 }
             )
         resumed_request = supervisor.semantic_edges.start_request(supervisor.root_id)
@@ -630,6 +632,7 @@ async def test_child_outcome_survives_cleanup_failure(tmp_path, abnormal):
             capability=endpoint.capability,
             scope_id=scope,
             agent_id=child.id,
+            yield_after=0,
         )
         if abnormal:
             with pytest.raises(RuntimeError, match="abnormal exit"):
