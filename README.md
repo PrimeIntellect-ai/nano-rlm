@@ -87,6 +87,8 @@ environment, search credential). Prompt configuration is role-aware: optional
 for sub-agents, each falling back to the next-more-general tier. Recursive children inherit the parent's configuration
 in-memory (`model_copy`); nothing is re-read from the process environment.
 
+`policy.delegation_prompt` (default off) appends the delegation guidance — when to spawn children, how to brief, watch, collect and reconcile them — for every agent that can still delegate.
+
 `system_prompt_path` supplies task instructions in place of the default task role.
 The runtime guide is always appended, including when a custom prompt file is used.
 The role-appropriate append instructions are included between the task instructions

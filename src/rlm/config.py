@@ -52,6 +52,9 @@ class ExecutionPolicy(_ConfigModel):
     """Resource and context-management policy for one RLM engine."""
 
     max_depth: int = Field(default=1, ge=0)
+    delegation_prompt: bool = False
+    """Append the delegation guidance (when to spawn, how to brief, watch, collect and
+    reconcile children) to the system prompt of every agent that can still delegate."""
     max_total_turns: int | None = Field(default=None, gt=0)
     """Tree-total turn budget (one turn = one work-loop model call, any engine; compaction
     calls don't count). Once reached, every engine stops before its next model call
