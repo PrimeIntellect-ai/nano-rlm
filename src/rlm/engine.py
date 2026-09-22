@@ -1150,6 +1150,29 @@ class RLMEngine:
                 ) from error
             raise
 
+    def _shorter_summary_input(
+        self,
+        base: list[dict],
+        messages: list[dict],
+        *,
+        prompt_tokens: int | None,
+        remove_tokens: int,
+    ) -> list[dict]:
+        """Hollow the summary input further; fall back to the last good snapshot when the
+        retained beginning and end alone are too large; fail instead of resending it."""
+        shorter = hollow_middle(
+            base, prompt_tokens=prompt_tokens, remove_tokens=remove_tokens
+        )
+        if shorter != base:
+            return shorter
+        fallback = messages[: self._last_good]
+        if len(fallback) < len(base):
+            return fallback
+        raise CompactionFailed(
+            "summary input cannot be shortened further: the retained context alone "
+            "exceeds the model's window"
+        )
+
     async def _compact_branch(
         self,
         messages: list[dict],
@@ -1185,7 +1208,8 @@ class RLMEngine:
             # remain intact until a complete summary succeeds.
             base = messages
             summary_text = ""
-            for _ in range(self.max_compaction_attempts):
+            for attempt in range(self.max_compaction_attempts):
+                last_attempt = attempt + 1 == self.max_compaction_attempts
                 checkpoint = [
                     *base,
                     {"role": "user", "content": checkpoint_prompt},
@@ -1199,9 +1223,13 @@ class RLMEngine:
                 except APIStatusError as e:
                     if not is_context_overflow(e):
                         raise
-                    base = hollow_middle(
-                        base, prompt_tokens=None, remove_tokens=RESERVE_TOKENS
-                    )
+                    if not last_attempt:
+                        base = self._shorter_summary_input(
+                            base,
+                            messages,
+                            prompt_tokens=None,
+                            remove_tokens=RESERVE_TOKENS,
+                        )
                     continue
                 choice = response.choices[0]
                 message = choice.message
@@ -1213,17 +1241,22 @@ class RLMEngine:
                     summary_text = text
                     break
                 self._semantic_edges.release_summary_request(compaction.compaction_id)
-                if choice.finish_reason == "length" and (
-                    self.summarize_at_tokens is None
-                    or usage.prompt_tokens >= self.summarize_at_tokens
+                if (
+                    not last_attempt
+                    and choice.finish_reason == "length"
+                    and (
+                        self.summarize_at_tokens is None
+                        or usage.prompt_tokens >= self.summarize_at_tokens
+                    )
                 ):
                     excess = (
                         max(0, usage.prompt_tokens - self.summarize_at_tokens)
                         if self.summarize_at_tokens is not None
                         else RESERVE_TOKENS
                     )
-                    base = hollow_middle(
+                    base = self._shorter_summary_input(
                         base,
+                        messages,
                         prompt_tokens=usage.prompt_tokens,
                         remove_tokens=excess + 1024,
                     )

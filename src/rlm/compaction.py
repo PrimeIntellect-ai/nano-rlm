@@ -199,7 +199,10 @@ def hollow_middle(
     total = len(json.dumps(messages, ensure_ascii=False))
     measured = prompt_tokens or max(1, (total + 3) // 4)
     marker = {"role": "user", "content": OMITTED_CONTEXT}
-    needed = total * remove_tokens / measured + len(json.dumps(marker))
+    # The measured prompt also covers the checkpoint prompt and forwarded tool schemas,
+    # which are not in `messages`, so the chars-per-token ratio runs low; over-remove a
+    # little rather than spend another attempt.
+    needed = 1.25 * total * remove_tokens / measured + len(json.dumps(marker))
     # Grow a contiguous hole around the middle while retaining both endpoints.
     left = right = len(groups) // 2
     removed = sizes[left]

@@ -601,3 +601,36 @@ def test_middle_hole_grows_without_orphaning_tools():
         if m["role"] == "tool":
             assert second[i - 1]["tool_calls"][0]["id"] == m["tool_call_id"]
     assert messages == original
+
+
+async def test_unshrinkable_summary_input_fails_fast(session):
+    """A retained beginning and end that alone overflow are not resent unchanged."""
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(content="partial"),
+                finish_reason="length",
+                prompt_tokens=200_000,
+            ),
+            _response(DummyMessage(content="never requested")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config(max_compaction_attempts=3),
+    )
+    engine.summarize_at_tokens = 114688
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "x" * 400_000},
+    ]
+    session.replace_context(messages, reason="start")
+    engine._last_good = len(messages)
+    try:
+        with pytest.raises(CompactionFailed, match="cannot be shortened"):
+            await engine._compact_branch(messages, turn=0)
+        assert len(client.calls) == 1
+    finally:
+        engine.close()
