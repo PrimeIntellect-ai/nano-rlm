@@ -1150,24 +1150,24 @@ class RLMEngine:
                 ) from error
             raise
 
+    @staticmethod
     def _shorter_summary_input(
-        self,
         base: list[dict],
-        messages: list[dict],
+        snapshot: list[dict] | None,
         *,
         prompt_tokens: int | None,
         remove_tokens: int,
-    ) -> list[dict]:
-        """Hollow the summary input further; fall back to the last good snapshot when the
-        retained beginning and end alone are too large; fail instead of resending it."""
+    ) -> tuple[list[dict], list[dict] | None]:
+        """Hollow the summary input further. When hollowing cannot shrink it, try the last
+        good snapshot once (it fit the window when it was live, whatever its message count);
+        fail rather than resend an input unchanged."""
         shorter = hollow_middle(
             base, prompt_tokens=prompt_tokens, remove_tokens=remove_tokens
         )
         if shorter != base:
-            return shorter
-        fallback = messages[: self._last_good]
-        if len(fallback) < len(base):
-            return fallback
+            return shorter, snapshot
+        if snapshot is not None and snapshot != base:
+            return snapshot, None
         raise CompactionFailed(
             "summary input cannot be shortened further: the retained context alone "
             "exceeds the model's window"
@@ -1207,6 +1207,7 @@ class RLMEngine:
             # Only the summary request is shortened; the live context and ledger
             # remain intact until a complete summary succeeds.
             base = messages
+            snapshot: list[dict] | None = messages[: self._last_good]
             summary_text = ""
             for attempt in range(self.max_compaction_attempts):
                 last_attempt = attempt + 1 == self.max_compaction_attempts
@@ -1224,9 +1225,9 @@ class RLMEngine:
                     if not is_context_overflow(e):
                         raise
                     if not last_attempt:
-                        base = self._shorter_summary_input(
+                        base, snapshot = self._shorter_summary_input(
                             base,
-                            messages,
+                            snapshot,
                             prompt_tokens=None,
                             remove_tokens=RESERVE_TOKENS,
                         )
@@ -1254,9 +1255,9 @@ class RLMEngine:
                         if self.summarize_at_tokens is not None
                         else RESERVE_TOKENS
                     )
-                    base = self._shorter_summary_input(
+                    base, snapshot = self._shorter_summary_input(
                         base,
-                        messages,
+                        snapshot,
                         prompt_tokens=usage.prompt_tokens,
                         remove_tokens=excess + 1024,
                     )

@@ -634,3 +634,45 @@ async def test_unshrinkable_summary_input_fails_fast(session):
         assert len(client.calls) == 1
     finally:
         engine.close()
+
+
+async def test_hollowed_input_falls_back_to_last_good_snapshot(session):
+    """A longer-by-count snapshot that fit when it was live is tried before failing."""
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(content="partial"),
+                finish_reason="length",
+                prompt_tokens=200_000,
+            ),
+            _response(
+                DummyMessage(content="partial"),
+                finish_reason="length",
+                prompt_tokens=200_000,
+            ),
+            _response(DummyMessage(content="complete summary")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config(max_compaction_attempts=4),
+    )
+    engine.summarize_at_tokens = 114688
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "step one"},
+        {"role": "assistant", "content": "step two"},
+        {"role": "assistant", "content": "x" * 400_000},
+    ]
+    session.replace_context(messages, reason="start")
+    engine._last_good = 4
+    try:
+        await engine._compact_branch(messages, turn=0)
+        hollowed = client.calls[1]["messages"]
+        assert hollowed[2] == {"role": "user", "content": OMITTED_CONTEXT}
+        assert client.calls[2]["messages"][:-1] == messages[:4]
+        assert len(client.calls) == 3
+    finally:
+        engine.close()
