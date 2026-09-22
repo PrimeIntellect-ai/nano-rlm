@@ -155,6 +155,29 @@ def test_runtime_guidance_matches_agent_capabilities():
     assert "rlm.agent.spawn(" in root
     assert "rlm.watch.agent(" in root
     assert "You have no parent" in root
+    assert "## Delegating work" not in root
+
+    guided = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        allow_recursion=True,
+        delegation_prompt=True,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+    )
+    assert "## Delegating work" in guided
+    guided_leaf = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        depth=1,
+        allow_recursion=False,
+        delegation_prompt=True,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+    )
+    assert "## Delegating work" not in guided_leaf
 
 
 @pytest.mark.parametrize("tool", ["add", "ipython"])

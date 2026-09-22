@@ -302,6 +302,14 @@ history, then `await child.steer("report what you have and stop")` if it should 
 subscription itself does not direct the child.
 """
 
+DELEGATION_PROMPT = """## Delegating work
+When a task has independent parts that benefit from separate investigation, delegate them to subagents while you work on another part. Give each child a bounded, self-contained brief, relevant context, and a clear expected result. Avoid duplicating the same investigation yourself unless independent verification is useful.
+Use persistent=False for a one-shot assignment and persistent=True when you expect follow-ups on the same context.
+For longer assignments, register await rlm.watch.agent(child, every_turns=10) to receive progress updates. Inspect the referenced slice of (await child.history()).messages when you need to assess progress. Steer a child if its scope drifts or its remaining work is unlikely to help; cancel work you no longer need.
+Collect reports with result = await child.result(). Check result.running before treating the assignment as finished; a persistent child may retain an earlier answer while working again. A native wait waking does not establish completion. Use completion-event status and error fields to distinguish success from failure.
+Reconcile the relevant reports with your own evidence before answering. Finish, collect, or cancel outstanding work according to whether you still need it.
+"""
+
 HISTORY_PROMPT = """## Conversation history
 `from rlm import history; h = await history()` reads a snapshot of your ledger.
 `h.messages[i]` addresses a session-wide message; `h.windows[w].messages[i]` addresses
@@ -326,6 +334,7 @@ def build_system_prompt(
     depth: int = 0,
     session_dir: str | None = None,
     allow_recursion: bool,
+    delegation_prompt: bool = False,
     allow_git: bool,
     active_tools: list[BuiltinTool],
     shell_skills: list[str] | None = None,
@@ -394,6 +403,8 @@ def build_system_prompt(
         )
         if can_delegate:
             parts.append(AGENT_PROMPT)
+            if delegation_prompt:
+                parts.append(DELEGATION_PROMPT)
         else:
             parts.append(
                 "Delegation is disabled at this depth. Work directly with your available tools."

@@ -1334,6 +1334,7 @@ class RLMEngine:
             depth=self.depth,
             session_dir=str(self.session.dir),
             allow_recursion=self.depth < self.max_depth,
+            delegation_prompt=self.runtime_config.policy.delegation_prompt,
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
