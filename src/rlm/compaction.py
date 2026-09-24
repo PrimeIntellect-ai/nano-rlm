@@ -164,3 +164,60 @@ def compactable(messages: list[dict]) -> bool:
     return any(
         m.get("role") != "system" and i != first_user for i, m in enumerate(messages)
     )
+
+
+OMITTED_CONTEXT = (
+    "Some middle context has been omitted to make room for summarization. "
+    "Summarize only the information provided. Do not call tools."
+)
+
+
+def hollow_middle(
+    messages: list[dict], *, prompt_tokens: int | None, remove_tokens: int
+) -> list[dict]:
+    """Shorten summary input, keeping its beginning and end and whole tool exchanges.
+
+    Measured input usage calibrates the serialized-size estimate. Provider tokenization
+    and tool-schema overhead can differ; further truncated attempts shrink again.
+    """
+    import json
+
+    system = []
+    groups: list[list[dict]] = []
+    for message in messages:
+        if message.get("role") == "system":
+            system.append(message)
+        elif message.get("content") == OMITTED_CONTEXT:
+            continue
+        elif message.get("role") == "tool" and groups:
+            groups[-1].append(message)
+        else:
+            groups.append([message])
+    if len(groups) < 3:
+        return messages
+    sizes = [len(json.dumps(group, ensure_ascii=False)) for group in groups]
+    total = len(json.dumps(messages, ensure_ascii=False))
+    measured = prompt_tokens or max(1, (total + 3) // 4)
+    marker = {"role": "user", "content": OMITTED_CONTEXT}
+    # The measured prompt also covers the checkpoint prompt and forwarded tool schemas,
+    # which are not in `messages`, so the chars-per-token ratio runs low; over-remove a
+    # little rather than spend another attempt.
+    needed = 1.25 * total * remove_tokens / measured + len(json.dumps(marker))
+    # Grow a contiguous hole around the middle while retaining both endpoints.
+    left = right = len(groups) // 2
+    removed = sizes[left]
+    while removed < needed and (left > 1 or right < len(groups) - 2):
+        if left > 1 and (
+            right == len(groups) - 2 or sum(sizes[:left]) > sum(sizes[right + 1 :])
+        ):
+            left -= 1
+            removed += sizes[left]
+        else:
+            right += 1
+            removed += sizes[right]
+    return [
+        *system,
+        *(message for group in groups[:left] for message in group),
+        marker,
+        *(message for group in groups[right + 1 :] for message in group),
+    ]
