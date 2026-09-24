@@ -74,6 +74,22 @@ def test_build_signature():
     assert params["day"].annotation is str
     assert params["count"].default is None
     assert params["count"].annotation is int
+    union = mcp.build_signature(
+        {
+            "properties": {
+                "body": {"type": ["array", "object"]},
+                "note": {"type": ["string", "null"]},
+            }
+        }
+    ).parameters
+    assert union["body"].annotation is inspect.Parameter.empty
+    assert union["note"].annotation is str
+
+
+def test_skill_name_keeps_unnamed_server_tools_bare():
+    assert mcp._skill_name("crm", "api.fetch") == "crm_api_fetch"
+    assert mcp._skill_name("", "api_fetch") == "api_fetch"
+    assert mcp.validate_mcp_servers({"": {"url": "http://127.0.0.1:1/mcp"}})
 
 
 async def test_real_kernel_uses_mcp_without_transport_secrets(tmp_path):
