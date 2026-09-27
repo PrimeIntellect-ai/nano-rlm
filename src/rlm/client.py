@@ -3,11 +3,13 @@
 import asyncio
 from typing import Any, Awaitable, Callable
 
+import certifi
 from openai import (
     APIConnectionError,
     APIResponseValidationError,
     APITimeoutError,
     AsyncOpenAI,
+    DefaultAsyncHttpxClient,
     InternalServerError,
     NotFoundError,
     RateLimitError,
@@ -58,6 +60,8 @@ def make_client(provider: ProviderConfig) -> AsyncOpenAI:
         api_key=provider.api_key,
         max_retries=provider.max_retries,
         default_headers=provider.headers,
+        # Minimal task images may lack a system CA bundle.
+        http_client=DefaultAsyncHttpxClient(verify=certifi.where()),
     )
 
 
