@@ -41,6 +41,7 @@ from acp.schema import (
 )
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from rlm.client import is_provider_error
 from rlm.engine import RLMEngine
 from rlm.config import (
     ExecutionPolicy,
@@ -355,8 +356,19 @@ class RLMACPAgent(Agent):
                 return PromptResponse(
                     stop_reason="cancelled", field_meta=_session_metadata(state)
                 )
-            except Exception:
+            except Exception as exc:
                 state.last_stop_reason = "error"
+                if is_provider_error(exc):
+                    # The turn's model call reached the endpoint (or the path to it) and it
+                    # faulted after our retries — not an engine failure. Tag it so the host
+                    # records a provider error rather than attributing it to the harness.
+                    raise RequestError.internal_error(
+                        {
+                            "kind": "provider",
+                            "retryable": True,
+                            "details": f"{type(exc).__name__}: {exc}",
+                        }
+                    ) from exc
                 raise
             finally:
                 state.prompt_task = None
