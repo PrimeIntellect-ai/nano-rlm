@@ -23,6 +23,7 @@ from rlm.acp import (
     RLMACPAgent,
 )
 from rlm.engine import RLMEngine
+from rlm.client import call_with_retries
 from rlm.config import (
     ExecutionPolicy,
     InvocationContext,
@@ -1003,7 +1004,10 @@ async def test_acp_cancel_keeps_session_reusable(monkeypatch, tmp_path):
     await agent.close_session(created.session_id)
 
 
-async def test_acp_failed_prompt_keeps_session_reusable(monkeypatch, tmp_path):
+@pytest.mark.parametrize("model_transport", [False, True])
+async def test_acp_failed_prompt_keeps_session_reusable(
+    monkeypatch, tmp_path, model_transport
+):
     _Engine.instances.clear()
     monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
     monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
@@ -1012,8 +1016,35 @@ async def test_acp_failed_prompt_keeps_session_reusable(monkeypatch, tmp_path):
     created = await _new_session(agent, str(tmp_path))
     engine = _Engine.instances[0]
 
-    with pytest.raises(RuntimeError, match="transient failure"):
+    if model_transport:
+        monkeypatch.setattr("rlm.client._RETRY_DELAYS", (0,))
+        original_prompt = engine.prompt
+        attempts = []
+
+        async def disconnected(**kwargs):
+            attempts.append(kwargs)
+            raise ConnectionResetError("model connection lost")
+
+        async def prompt_with_model_failure(prompt):
+            if prompt == "fail":
+                engine.prompts.append(prompt)
+                return await call_with_retries(disconnected)
+            return await original_prompt(prompt)
+
+        monkeypatch.setattr(engine, "prompt", prompt_with_model_failure)
+
+    with pytest.raises(RequestError if model_transport else RuntimeError) as excinfo:
         await agent.prompt(created.session_id, [text_block("fail")])
+
+    if model_transport:
+        assert len(attempts) == 2
+        assert excinfo.value.data == {
+            "kind": "model_transport",
+            "retryable": True,
+            "details": "ConnectionResetError: model connection lost",
+        }
+    else:
+        assert str(excinfo.value) == "transient failure"
 
     resumed = await agent.prompt(created.session_id, [text_block("after")])
     assert resumed.stop_reason == "end_turn"

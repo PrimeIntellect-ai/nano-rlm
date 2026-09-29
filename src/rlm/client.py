@@ -41,6 +41,10 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
 _RETRY_DELAYS: tuple[int, ...] = (15, 30, 60, 90, 120)
 
 
+class ModelTransportError(Exception):
+    """A model connection failed after its transport retries were exhausted."""
+
+
 def make_client(provider: ProviderConfig) -> AsyncOpenAI:
     """Create an AsyncOpenAI client from an explicit provider configuration."""
     reserved = sorted(
@@ -92,8 +96,12 @@ async def call_with_retries(
             attempt_kwargs["extra_headers"] = headers
         try:
             return await func(**attempt_kwargs)
-        except _RETRYABLE:
+        except _RETRYABLE as error:
             if attempt == len(_RETRY_DELAYS):
+                if isinstance(error, (APIConnectionError, ConnectionResetError)):
+                    raise ModelTransportError(
+                        f"{type(error).__name__}: {error}"
+                    ) from error
                 raise
 
 

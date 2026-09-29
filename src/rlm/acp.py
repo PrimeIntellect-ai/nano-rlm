@@ -41,6 +41,7 @@ from acp.schema import (
 )
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from rlm.client import ModelTransportError
 from rlm.engine import RLMEngine
 from rlm.config import (
     ExecutionPolicy,
@@ -355,8 +356,16 @@ class RLMACPAgent(Agent):
                 return PromptResponse(
                     stop_reason="cancelled", field_meta=_session_metadata(state)
                 )
-            except Exception:
+            except Exception as exc:
                 state.last_stop_reason = "error"
+                if isinstance(exc, ModelTransportError):
+                    raise RequestError.internal_error(
+                        {
+                            "kind": "model_transport",
+                            "retryable": True,
+                            "details": str(exc),
+                        }
+                    ) from exc
                 raise
             finally:
                 state.prompt_task = None
