@@ -335,7 +335,7 @@ async def test_failed_child_returns_last_committed_request_to_parent(tmp_path):
     assert {
         "source_request_id": child_request,
         "target_request_id": resumed_request,
-        "type": "subagent_return",
+        "type": "subagent_failed",
     } in edges
 
 

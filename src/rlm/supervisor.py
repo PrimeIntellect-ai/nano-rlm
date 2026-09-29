@@ -1123,6 +1123,10 @@ class SessionTreeSupervisor:
                     pass
         elif op == "agent.cancel":
             await self._terminate(child)
+            if child.status == "cancelled":
+                self.semantic_edges.record_subagent_cancel(
+                    self._scopes[request["scope_id"]].request_id, child.id
+                )
         elif op == "agent.result":
             yield_after = min(request["yield_after"], RUN_BLOCK_MAX_SECONDS)
             if not child.done.is_set() and yield_after > 0:
@@ -1130,8 +1134,15 @@ class SessionTreeSupervisor:
                     await asyncio.wait_for(child.done.wait(), timeout=yield_after)
                 except asyncio.TimeoutError:
                     pass
-            if child.status in {"failed", "cancelled"}:
-                self.semantic_edges.finish_subagent(child.id)
+            if child.status == "failed":
+                self.semantic_edges.finish_subagent(
+                    child.id, edge_type="subagent_failed"
+                )
+                raise RuntimeError(child.error or "agent failed")
+            if child.status == "cancelled":
+                self.semantic_edges.record_subagent_cancel(
+                    self._scopes[request["scope_id"]].request_id, child.id
+                )
                 raise RuntimeError(child.error or "agent cancelled")
             if child.result is not None:
                 self.semantic_edges.finish_subagent(
