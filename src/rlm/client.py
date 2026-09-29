@@ -6,7 +6,6 @@ from typing import Any, Awaitable, Callable
 import certifi
 from openai import (
     APIConnectionError,
-    APIError,
     APIResponseValidationError,
     APITimeoutError,
     AsyncOpenAI,
@@ -41,25 +40,9 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
 # Widely-spaced delays (seconds) between attempts; total ~5 min wall budget.
 _RETRY_DELAYS: tuple[int, ...] = (15, 30, 60, 90, 120)
 
-# Model-provider/transport faults: the call reached (or tried to reach) the endpoint and the
-# endpoint or the path to it faulted, rather than the engine itself failing. `APIError` is the
-# base of the openai transport/status/timeout family (APIConnectionError, APITimeoutError,
-# APIStatusError, RateLimitError, ...); `ConnectionResetError` is a raw socket drop the SDK
-# may surface directly. Used to tag a failure that escapes a turn so the host records a
-# provider error, not a harness error.
-PROVIDER_ERRORS: tuple[type[BaseException], ...] = (APIError, ConnectionResetError)
 
-
-def is_provider_error(exc: BaseException) -> bool:
-    """Whether `exc`, or any error it was raised from, is a model-provider/transport fault."""
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, PROVIDER_ERRORS):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+class ModelTransportError(Exception):
+    """A model connection failed after its transport retries were exhausted."""
 
 
 def make_client(provider: ProviderConfig) -> AsyncOpenAI:
@@ -113,8 +96,12 @@ async def call_with_retries(
             attempt_kwargs["extra_headers"] = headers
         try:
             return await func(**attempt_kwargs)
-        except _RETRYABLE:
+        except _RETRYABLE as error:
             if attempt == len(_RETRY_DELAYS):
+                if isinstance(error, (APIConnectionError, ConnectionResetError)):
+                    raise ModelTransportError(
+                        f"{type(error).__name__}: {error}"
+                    ) from error
                 raise
 
 
