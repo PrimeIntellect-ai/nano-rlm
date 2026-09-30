@@ -352,6 +352,8 @@ def build_system_prompt(
     ]
     if extra_instructions:
         parts.append(extra_instructions)
+    if can_delegate and delegation_prompt:
+        parts.append(DELEGATION_PROMPT)
     parts.append("## Agent context")
     if agent_info:
         parts.append(
@@ -403,8 +405,6 @@ def build_system_prompt(
         )
         if can_delegate:
             parts.append(AGENT_PROMPT)
-            if delegation_prompt:
-                parts.append(DELEGATION_PROMPT)
         else:
             parts.append(
                 "Delegation is disabled at this depth. Work directly with your available tools."
