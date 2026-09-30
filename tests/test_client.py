@@ -238,8 +238,16 @@ async def test_native_model_metadata_resolves_alias_context_window(monkeypatch):
     assert requests[0].url.path == "/v1/models/claude-test"
 
 
+@pytest.mark.parametrize(
+    "overflow_message",
+    [
+        "prompt is too long: 100001 tokens > 100000 maximum",
+        "input length and max_tokens exceed context limit: 95000 + 8192 > 100000",
+        "input length and `max_tokens` exceed context limit: 95000 + 8192 > 100000",
+    ],
+)
 async def test_native_retries_and_overflow_compaction_keep_cache_and_request_identity(
-    monkeypatch, session
+    monkeypatch, session, overflow_message
 ):
     monkeypatch.setattr("rlm.client._RETRY_DELAYS", (0,))
     requests = []
@@ -273,7 +281,7 @@ async def test_native_retries_and_overflow_compaction_keep_cache_and_request_ide
                     "type": "error",
                     "error": {
                         "type": "invalid_request_error",
-                        "message": "prompt is too long: 100001 tokens > 100000 maximum",
+                        "message": overflow_message,
                     },
                 },
             )

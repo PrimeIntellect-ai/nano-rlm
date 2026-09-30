@@ -67,6 +67,8 @@ _OVERFLOW_MARKERS = (
     "maximum context length",
     # Anthropic: "prompt is too long: N tokens > M maximum".
     "prompt is too long",
+    # Anthropic also checks input length plus max_tokens against the window.
+    "exceed context limit",
     # Anthropic byte-size overflow: HTTP 413 {"type": "request_too_large"}.
     "request_too_large",
     # HTTP proxies reject an oversized body with 413 "Request Entity Too Large".
