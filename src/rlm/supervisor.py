@@ -45,6 +45,7 @@ from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.session import Session
+from rlm.replay import ExecutionTape
 from rlm.skills.search import run_with_api_key as run_search
 from rlm.types import AgentResult, ProgrammaticToolCallStats, RLMResult, TokenUsage
 
@@ -170,7 +171,9 @@ class SessionTreeSupervisor:
         engine_factory: Callable[..., RLMEngine] | None = None,
         root_invocation_id: str | None = None,
         semantic_edges: SemanticEdgeTracker | None = None,
+        execution_tape: ExecutionTape | None = None,
     ) -> None:
+        self.execution_tape = execution_tape
         self._engine_factory = engine_factory
         self._server: asyncio.AbstractServer | None = None
         self._broker_dir: Path | None = None
@@ -221,7 +224,11 @@ class SessionTreeSupervisor:
             )
             self._brokered_skills[capability] = (descriptor, self._call_search)
 
-        root_id = root_invocation_id or uuid.uuid4().hex
+        root_id = root_invocation_id or (
+            execution_tape.identity("root")["id"]
+            if execution_tape is not None
+            else uuid.uuid4().hex
+        )
         root = _Invocation(
             id=root_id,
             parent_id=None,
@@ -453,11 +460,23 @@ class SessionTreeSupervisor:
             and self._total_tokens >= policy.max_total_tokens
         ):
             raise RuntimeError("token budget reached")
+        child_id = (
+            self.execution_tape.child(
+                parent.id, task=task, name=name, persistent=persistent
+            )
+            if self.execution_tape is not None
+            else uuid.uuid4().hex
+        )
+        child_dir = (
+            parent.session.dir / f"sub-{child_id}"
+            if self.execution_tape is not None
+            else Session.child_dir(parent.session.dir)
+        )
         child = _Invocation(
-            id=uuid.uuid4().hex,
+            id=child_id,
             parent_id=parent.id,
             capability=secrets.token_urlsafe(32),
-            session=Session(Session.child_dir(parent.session.dir)),
+            session=Session(child_dir),
             runtime_config=parent.runtime_config.model_copy(
                 update={"invocation": context}
             ),

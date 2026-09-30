@@ -493,3 +493,8 @@ stops with a failure event when the inbox event limit is reached. There are no
 model-authored callbacks, event selectors, or output predicates.
 
 Activity subscriptions become `completed` after their target permanently terminates, flushing pending activity and releasing their active slot. Watches of idle persistent agents remain active. Watching an already-finished target returns a completed subscription.
+
+## Experimental execution replay
+
+See [execution replay](REPLAY.md) for an opt-in session-tree recorder and replay
+prototype, a runnable sandbox example, and its reproducibility limits.

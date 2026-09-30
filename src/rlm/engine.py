@@ -44,6 +44,7 @@ from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
 from rlm.prompt import build_system_prompt
 from rlm.session import Session
+from rlm.replay import ExecutionTape
 from rlm.skills import enable_builtin_skills
 from rlm.supervisor import SessionTreeSupervisor
 from rlm.tools import (
@@ -190,6 +191,7 @@ class RLMEngine:
         semantic_edges: SemanticEdgeTracker | None = None,
         parent_session_id: str | None = None,
         spawned_by_request_id: str | None = None,
+        execution_tape: ExecutionTape | None = None,
     ):
         if runtime_config is None:
             raise ValueError(
@@ -223,6 +225,24 @@ class RLMEngine:
         self.kernel_env = dict(config.kernel_env)
         self.max_tokens = config.policy.max_tokens
 
+        if (
+            supervisor is not None
+            and execution_tape is not None
+            and execution_tape is not supervisor.execution_tape
+        ):
+            raise ValueError("engine and supervisor must share one execution tape")
+        self._execution_tape = execution_tape or (
+            supervisor.execution_tape if supervisor is not None else None
+        )
+        tape = self._execution_tape
+        if tape is not None and supervisor is None:
+            if invocation_id is not None:
+                raise ValueError("execution tape owns the root invocation ID")
+            invocation_id = tape.identity("root")["id"]
+        if tape is not None and self.compaction and self.summarize_at_tokens is None:
+            raise ValueError(
+                "execution tapes require an explicit compaction threshold or compaction=False"
+            )
         self._owns_client = client is None
         self.client = client or make_client(config.provider)
         self.session = session
@@ -336,6 +356,10 @@ class RLMEngine:
             try:
                 await self._start(prompt)
             except BaseException as exc:
+                if self._execution_tape is not None:
+                    self._execution_tape.abort(
+                        f"{self._invocation_id}: engine startup failed"
+                    )
                 self._metrics.stop_reason = (
                     "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
                 )
@@ -378,6 +402,8 @@ class RLMEngine:
             self._last_good = len(self.session.messages)
             result = await self._run_loop()
         except BaseException as exc:
+            if self._execution_tape is not None:
+                self._execution_tape.abort(f"{self._invocation_id}: prompt failed")
             self._pending_kernel_notices.extend(self._prompt_kernel_notices)
             attempted_turns = self._turn - turn_before
             try:
@@ -416,6 +442,15 @@ class RLMEngine:
         result.turns = self._turn - turn_before
         self._last_answer = result.answer
         self._has_result = True
+        if self._execution_tape is not None:
+            await self._execution_tape.event(
+                self._invocation_id,
+                "prompt.end",
+                {
+                    "answer": result.answer,
+                    "stop_reason": self.stop_reason,
+                },
+            )
         return result
 
     async def _start(self, prompt: str) -> None:
@@ -430,6 +465,19 @@ class RLMEngine:
             self.summarize_at_tokens = await discover_threshold(self.client, self.model)
 
         self._ensure_session()
+        if self._execution_tape is not None:
+            self._execution_tape.bind_path(self.session.dir, self._invocation_id)
+            await self._execution_tape.event(
+                self._invocation_id,
+                "engine.start",
+                {
+                    "cwd": self.cwd,
+                    "config": self.runtime_config.model_dump(
+                        mode="json",
+                        exclude={"provider", "search_api_key", "kernel_env"},
+                    ),
+                },
+            )
 
         self.session.write_meta(
             session_id=self.session.dir.name,
@@ -459,6 +507,7 @@ class RLMEngine:
                     mcp_servers=self.mcp_servers,
                     root_invocation_id=self._invocation_id,
                     semantic_edges=self._semantic_edges,
+                    execution_tape=self._execution_tape,
                 )
                 self._owns_supervisor = True
             try:
@@ -786,6 +835,16 @@ class RLMEngine:
             tc = msg.tool_calls[0]
             tool_name = tc.function.name
             tool_args = parsed_args[0]
+            if self._execution_tape is not None:
+                await self._execution_tape.event(
+                    self._invocation_id,
+                    "tool.start",
+                    {
+                        "id": tc.id,
+                        "name": tool_name,
+                        "arguments": tool_args,
+                    },
+                )
             t0 = time.time()
             tool = get_builtin_tool(tool_name, self.builtin_tools)
             if tool_name == "wait" and self._supervisor is not None:
@@ -877,6 +936,15 @@ class RLMEngine:
                 self._metrics.record(event)
 
             result = tool_result.content
+            if self._execution_tape is not None:
+                await self._execution_tape.event(
+                    self._invocation_id,
+                    "tool.end",
+                    {
+                        "id": tc.id,
+                        "content": result,
+                    },
+                )
 
             content = truncate_tool_output(
                 result, self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
@@ -1074,9 +1142,18 @@ class RLMEngine:
                 request["parallel_tool_calls"] = False
 
         try:
-            response = await call_with_retries(
-                self.client.chat.completions.create, **request
-            )
+
+            async def invoke():
+                return await call_with_retries(
+                    self.client.chat.completions.create, **request
+                )
+
+            if self._execution_tape is None:
+                response = await invoke()
+            else:
+                response = await self._execution_tape.model(
+                    self._invocation_id, request, invoke
+                )
         except BaseException:
             self._semantic_edges.fail_request(request_id)
             raise
