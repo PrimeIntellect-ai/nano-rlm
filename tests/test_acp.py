@@ -1207,18 +1207,19 @@ async def test_steering_wakes_native_wait_after_tool_result(session):
         client=client, session=session, runtime_config=make_runtime_config()
     )
     turn = asyncio.create_task(engine.prompt("wait for a mention"))
+
+    async def wake_and_finish():
+        while (
+            engine._supervisor is None
+            or engine._supervisor._invocations[engine._invocation_id].status
+            != "waiting"
+        ):
+            await asyncio.sleep(0.01)
+        assert await engine.steer("mention", "wait-mention") == {"outcome": "injected"}
+        assert (await turn).answer == "notified"
+
     try:
-        async with asyncio.timeout(10):
-            while (
-                engine._supervisor is None
-                or engine._supervisor._invocations[engine._invocation_id].status
-                != "waiting"
-            ):
-                await asyncio.sleep(0.01)
-            assert await engine.steer("mention", "wait-mention") == {
-                "outcome": "injected"
-            }
-            assert (await turn).answer == "notified"
+        await asyncio.wait_for(wake_and_finish(), timeout=10)
         messages = client.calls[-1]["messages"]
         index = next(i for i, m in enumerate(messages) if m.get("content") == "mention")
         assert messages[index - 1]["role"] == "tool"
