@@ -3,7 +3,10 @@
 from collections.abc import Mapping
 from typing import Any
 
-from openai import APIError, APIStatusError, AsyncOpenAI
+import anthropic
+from openai import APIError, APIStatusError
+
+from rlm.client import ModelClient
 
 CHECKPOINT_PROMPT = """Create a concise continuation summary for the current task.
 Preserve what is needed to resume accurately:
@@ -49,6 +52,7 @@ _CONTEXT_FIELDS = (
     "context_length",
     "context_window",
     "max_context_length",
+    "max_input_tokens",
 )
 _OVERFLOW_MARKERS = (
     # OpenAI error code "context_length_exceeded"; OpenRouter relays the raw body.
@@ -79,7 +83,7 @@ class CompactionFailed(Exception):
     """Every checkpoint attempt failed - the caller ends the run cleanly instead."""
 
 
-def is_context_overflow(error: APIStatusError) -> bool:
+def is_context_overflow(error: APIStatusError | anthropic.APIStatusError) -> bool:
     details = f"{error} {error.body or ''}"
     # An overflow is deterministic: a 400, or a 413 for a byte-size cap.
     return error.status_code in (400, 413) and any(
@@ -110,7 +114,7 @@ def _model_context_window(payload: Mapping[str, Any], model: str) -> int | None:
     return None
 
 
-async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
+async def discover_threshold(client: ModelClient, model: str) -> int | None:
     key = (str(getattr(client, "base_url", None)), model)
     if key not in _window_cache:
         try:
@@ -120,14 +124,18 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
                 if hasattr(client, "with_options")
                 else client
             )
-            page = await lister.models.list()
-            # Context-window fields are provider extensions in model_extra.
-            payload = {
-                "data": [
-                    {"id": card.id, **(card.model_extra or {})} for card in page.data
-                ]
-            }
-        except (APIError, AttributeError):
+            if isinstance(lister, anthropic.AsyncAnthropic):
+                card = await lister.models.retrieve(model)
+                payload = {"data": [{**card.model_dump(), "id": model}]}
+            else:
+                page = await lister.models.list()
+                payload = {
+                    "data": [
+                        {"id": card.id, **(card.model_extra or {})}
+                        for card in page.data
+                    ]
+                }
+        except (APIError, anthropic.APIError, AttributeError):
             # A transient listing failure must not disable compaction for the
             # rest of the process - leave the cache empty so the next engine retries.
             return None

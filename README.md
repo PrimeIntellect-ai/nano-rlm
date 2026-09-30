@@ -113,6 +113,48 @@ The process environment configures only process infrastructure:
 | ---------- | --------- | ------------- |
 | `RLM_HOME` | `~/.rlm` | Root directory for sessions and data |
 
+### Anthropic prompt caching
+
+When `provider.base_url` points to `https://api.anthropic.com` (with or without
+`/v1`), rlm uses the native Anthropic Messages API. Anthropic's
+[OpenAI-compatible endpoint does not support prompt caching](https://platform.claude.com/docs/en/api/openai-sdk).
+For a custom Messages endpoint, set `provider.api_format` to `"anthropic"`;
+`"openai"` explicitly selects Chat Completions. Other endpoints keep using
+Chat Completions by default.
+
+Native Anthropic requests enable
+[automatic prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+with a five-minute lifetime. The growing conversation, including tool calls and
+results, is cached, and a separate system-prompt breakpoint allows that prefix
+to be reused across compaction. Cache reads refresh the lifetime. Prompts below
+the model's minimum cacheable length are not cached.
+
+The ACP runtime contract accepts these optional provider fields:
+
+| Field | Default | Description |
+| ---------- | --------- | ------------- |
+| `api_format` | `"auto"` | `"auto"`, `"openai"`, or `"anthropic"` |
+| `prompt_cache` | `"5m"` | Native Anthropic cache lifetime: `"5m"`, `"1h"`, or `"off"` |
+| `max_output_tokens` | `8192` | Native Anthropic output limit per request; distinct from the session's cumulative `policy.max_tokens` budget |
+
+Cache writes count as new input; cache reads do not spend the tree's
+`max_total_tokens` budget. Full prompt usage still includes uncached input,
+cache writes, and cache reads so context thresholds account for the whole
+conversation. Five-minute cache writes cost 1.25× the base input rate; one-hour
+writes cost 2×. Compaction starts a new conversation prefix, so its first request
+can require new cache writes.
+
+To verify caching against the API, set `ANTHROPIC_API_KEY` in the environment and
+run the opt-in live tests. They use Claude Haiku 4.5 and cover cold/warm caches,
+growing history, both cache lifetimes, caching disabled, tool execution,
+compaction, and ACP stdio follow-up prompts:
+
+```bash
+RLM_LIVE_ANTHROPIC=1 uv run pytest -s tests/test_anthropic_live.py
+```
+
+These tests make billable API calls and are skipped in the regular suite.
+
 ## Recursion
 
 The supervisor owns each agent's identity, task, runtime, and lifetime. Python variables hold handles, so losing a variable or ending a cell does not stop its agent.

@@ -273,6 +273,16 @@ def test_new_tokens_excludes_cached_prompt():
     )
     assert _new_tokens(cached, usage) == 150
     assert _new_tokens(SimpleNamespace(usage=None), usage) == 1050
+    native_detail = SimpleNamespace(
+        usage=SimpleNamespace(
+            cache_read_input_tokens=900, cache_creation_input_tokens=100
+        )
+    )
+    assert _new_tokens(native_detail, usage) == 150
+    cached.usage.cache_read_input_tokens = 900
+    assert _new_tokens(cached, usage) == 150
+    cached.usage.prompt_tokens_details.cached_tokens = 2000
+    assert _new_tokens(cached, usage) == 50
 
 
 async def test_tree_token_budget_stops_engine(session):
