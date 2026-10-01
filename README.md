@@ -74,10 +74,13 @@ snapshot of cumulative usage, metrics, tool-call stats, supervisor counters,
 and limits under `ai.prime.rlm/session-v1`.
 
 Every actual model call carries a standard HTTP `Idempotency-Key` header that
-stays stable across SDK and outer retries (retry attempts are distinguished by
+stays stable across request retries (retry attempts are distinguished by
 `x-stainless-retry-count`), so an inference proxy can deduplicate replayed
 requests. Both header names are reserved and rejected in provider
-configuration.
+configuration. `provider.max_retries` bounds retries of each model call (default
+5), with SDK retries disabled. Connection failures, HTTP 408/409/429, and 5xx
+responses are retried with jittered backoff; provider retry advice and
+`Retry-After` are honored. Completed turns and tool executions are preserved.
 
 Model calls also carry a private `X-ACP-Model-Request-ID` correlation header.
 RLM publishes sparse, labeled relationships between those request IDs under

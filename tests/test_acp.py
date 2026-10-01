@@ -1032,7 +1032,7 @@ async def test_acp_failed_prompt_keeps_session_reusable(
         async def prompt_with_model_failure(prompt):
             if prompt == "fail":
                 engine.prompts.append(prompt)
-                return await call_with_retries(disconnected)
+                return await call_with_retries(disconnected, max_retries=1)
             return await original_prompt(prompt)
 
         monkeypatch.setattr(engine, "prompt", prompt_with_model_failure)

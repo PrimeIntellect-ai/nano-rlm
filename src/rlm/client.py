@@ -1,20 +1,19 @@
 """Thin LLM client wrapper. Extracts token usage from responses."""
 
 import asyncio
+import math
+import random
+import time
+from email.utils import parsedate_to_datetime
 from typing import Any, Awaitable, Callable
 
 import certifi
 from openai import (
     APIConnectionError,
-    APIResponseValidationError,
-    APITimeoutError,
+    APIStatusError,
     AsyncOpenAI,
     DefaultAsyncHttpxClient,
-    InternalServerError,
-    NotFoundError,
-    RateLimitError,
 )
-from pydantic import ValidationError
 
 from rlm.config import ProviderConfig
 from rlm.semantic import (
@@ -26,19 +25,34 @@ from rlm.types import TokenUsage
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 RETRY_COUNT_HEADER = "x-stainless-retry-count"
 
-_RETRYABLE: tuple[type[BaseException], ...] = (
-    APIConnectionError,
-    APITimeoutError,
-    InternalServerError,
-    NotFoundError,
-    RateLimitError,
-    APIResponseValidationError,
-    ValidationError,
-    ConnectionResetError,
-)
+_RETRY_DELAYS = (0.5, 1, 2, 4, 8)
 
-# Widely-spaced delays (seconds) between attempts; total ~5 min wall budget.
-_RETRY_DELAYS: tuple[int, ...] = (15, 30, 60, 90, 120)
+
+def _retry_delay(error: Exception, attempt: int) -> float | None:
+    if isinstance(error, APIStatusError):
+        headers = error.response.headers
+        if headers.get("x-should-retry") == "false":
+            return None
+        if headers.get("x-should-retry") != "true" and not (
+            error.status_code in (408, 409, 429) or error.status_code >= 500
+        ):
+            return None
+        try:
+            if "retry-after-ms" in headers:
+                delay = float(headers["retry-after-ms"]) / 1000
+            else:
+                value = headers.get("retry-after", "")
+                try:
+                    delay = float(value)
+                except ValueError:
+                    delay = parsedate_to_datetime(value).timestamp() - time.time()
+            if math.isfinite(delay) and delay >= 0:
+                return delay
+        except (ValueError, TypeError, OverflowError):
+            pass
+    elif not isinstance(error, (APIConnectionError, ConnectionResetError)):
+        return None
+    return _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)] * random.uniform(0.75, 1)
 
 
 class ModelTransportError(Exception):
@@ -62,7 +76,7 @@ def make_client(provider: ProviderConfig) -> AsyncOpenAI:
     return AsyncOpenAI(
         base_url=provider.base_url,
         api_key=provider.api_key,
-        max_retries=provider.max_retries,
+        max_retries=0,
         default_headers=provider.headers,
         # Minimal task images may lack a system CA bundle.
         http_client=DefaultAsyncHttpxClient(verify=certifi.where()),
@@ -78,31 +92,25 @@ def model_call_headers(request_id: str) -> dict[str, str]:
 
 
 async def call_with_retries(
-    func: Callable[..., Awaitable[Any]], /, **kwargs: Any
+    func: Callable[..., Awaitable[Any]], /, *, max_retries: int = 5, **kwargs: Any
 ) -> Any:
-    """Call ``func(**kwargs)`` with widely-spaced retries on transient errors.
-
-    Extends the SDK's retry set with ``NotFoundError`` to ride out intermittent
-    tunnel/proxy 404s that the SDK itself does not retry.
-    """
-    for attempt in range(len(_RETRY_DELAYS) + 1):
-        if attempt:
-            await asyncio.sleep(_RETRY_DELAYS[attempt - 1])
-        attempt_kwargs = kwargs
-        if attempt:
-            attempt_kwargs = dict(kwargs)
-            headers = dict(attempt_kwargs.get("extra_headers") or {})
-            headers[RETRY_COUNT_HEADER] = str(attempt)
-            attempt_kwargs["extra_headers"] = headers
+    """Retry one model request without replaying completed turns or tools."""
+    for attempt in range(max_retries + 1):
+        attempt_kwargs = dict(kwargs)
+        headers = dict(attempt_kwargs.get("extra_headers") or {})
+        headers[RETRY_COUNT_HEADER] = str(attempt)
+        attempt_kwargs["extra_headers"] = headers
         try:
             return await func(**attempt_kwargs)
-        except _RETRYABLE as error:
-            if attempt == len(_RETRY_DELAYS):
+        except (APIStatusError, APIConnectionError, ConnectionResetError) as error:
+            delay = _retry_delay(error, attempt)
+            if attempt == max_retries or delay is None:
                 if isinstance(error, (APIConnectionError, ConnectionResetError)):
                     raise ModelTransportError(
                         f"{type(error).__name__}: {error}"
                     ) from error
                 raise
+            await asyncio.sleep(delay)
 
 
 def extract_usage(response) -> TokenUsage:

@@ -108,6 +108,9 @@ class DummyResponse:
 class DummyClient:
     """Replays scripted DummyMessages, one per ``chat.completions.create`` call."""
 
+    def with_options(self, **kwargs):
+        return self
+
     def __init__(self, messages: list[DummyMessage]):
         self.scripted = list(messages)
         self.calls: list[dict[str, Any]] = []
