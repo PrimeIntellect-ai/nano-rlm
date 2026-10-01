@@ -23,6 +23,7 @@ from rlm.acp import (
     RLMACPAgent,
 )
 from rlm.engine import RLMEngine
+from rlm.history import History
 from rlm.client import call_with_retries
 from rlm.config import (
     ExecutionPolicy,
@@ -845,7 +846,10 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert initialized.agent_capabilities.mcp_capabilities.http is True
     assert initialized.agent_capabilities.load_session is False
     assert initialized.agent_capabilities.field_meta is None
-    assert initialized.field_meta == {CONTRACT_METADATA_KEY: True}
+    assert initialized.field_meta == {
+        CONTRACT_METADATA_KEY: True,
+        "steering": {"supported": True},
+    }
 
     created = await agent.new_session(
         str(tmp_path),
@@ -1099,6 +1103,162 @@ async def test_acp_stdio_lifecycle(tmp_path):
         closed = await connection.close_session(created.session_id)
 
     assert initialized.agent_info.name == "rlm"
-    assert initialized.field_meta == {CONTRACT_METADATA_KEY: True}
+    assert initialized.field_meta == {
+        CONTRACT_METADATA_KEY: True,
+        "steering": {"supported": True},
+    }
     assert created.field_meta is None
     assert closed.field_meta[SESSION_METADATA_KEY]["session_id"] == "wire-session"
+
+
+@pytest.mark.parametrize("cancel_after_delivery", [False, True])
+async def test_steering_at_model_boundary_and_retry(
+    session, monkeypatch, cancel_after_delivery
+):
+    client = DummyClient(
+        [DummyMessage(content="initial"), DummyMessage(content="notified")]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    second_entered = asyncio.Event()
+    finish = asyncio.Event()
+    create = client.create
+
+    async def blocked_create(**kwargs):
+        if not client.calls:
+            entered.set()
+            await release.wait()
+        else:
+            second_entered.set()
+            await finish.wait()
+        return await create(**kwargs)
+
+    monkeypatch.setattr(client, "create", blocked_create)
+    assert (await engine.steer("mention", "n1"))["outcome"] == "promptRequired"
+    turn = asyncio.create_task(engine.prompt("work"))
+    try:
+        await asyncio.wait_for(entered.wait(), 20)
+        receipt = asyncio.create_task(engine.steer("mention", "n1"))
+        duplicate = asyncio.create_task(engine.steer("mention", "n1"))
+        await asyncio.sleep(0)
+        assert not receipt.done()
+        release.set()
+        assert await asyncio.wait_for(receipt, 5) == {"outcome": "injected"}
+        assert await duplicate == {"outcome": "injected"}
+        await second_entered.wait()
+        if cancel_after_delivery:
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+        else:
+            finish.set()
+            assert (await turn).answer == "notified"
+        assert (
+            sum(
+                m.get("content") == "mention"
+                for m in History(engine.session.dir).user_messages()
+            )
+            == 1
+        )
+        assert sum(m.get("content") == "mention" for m in engine.session.messages) == 1
+        assert await engine.steer("mention", "n1") == {"outcome": "injected"}
+        with pytest.raises(ValueError, match="different content"):
+            await engine.steer("changed", "n1")
+        assert (await engine.steer("later", "n2"))["outcome"] == "promptRequired"
+    finally:
+        turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+        await engine.aclose()
+
+
+async def test_acp_steering_capability_validation_and_idle(tmp_path):
+    agent = RLMACPAgent()
+    initialized = await _initialize(agent)
+    assert initialized.field_meta["steering"] == {"supported": True}
+    session = await _new_session(agent, str(tmp_path))
+    try:
+        params = {
+            "sessionId": session.session_id,
+            "prompt": [{"type": "text", "text": "mention"}],
+        }
+        assert await agent.ext_method("session/steering", params) == {
+            "outcome": "promptRequired",
+            "reason": "noRunningTurn",
+        }
+        with pytest.raises(RequestError):
+            await agent.ext_method("session/steering", {**params, "prompt": []})
+        with pytest.raises(RequestError):
+            await agent.ext_method("unknown", params)
+    finally:
+        await agent.shutdown()
+
+
+async def test_steering_wakes_native_wait_after_tool_result(session):
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("wait", {"timeout": 300})]),
+            DummyMessage(content="notified"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )
+    turn = asyncio.create_task(engine.prompt("wait for a mention"))
+
+    async def wake_and_finish():
+        while (
+            engine._supervisor is None
+            or engine._supervisor._invocations[engine._invocation_id].status
+            != "waiting"
+        ):
+            await asyncio.sleep(0.01)
+        assert await engine.steer("mention", "wait-mention") == {"outcome": "injected"}
+        assert (await turn).answer == "notified"
+
+    try:
+        await asyncio.wait_for(wake_and_finish(), timeout=10)
+        messages = client.calls[-1]["messages"]
+        index = next(i for i, m in enumerate(messages) if m.get("content") == "mention")
+        assert messages[index - 1]["role"] == "tool"
+        assert messages[index - 1]["tool_call_id"] == "call_0"
+    finally:
+        turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+        await engine.aclose()
+
+
+async def test_steering_unconsumed_at_budget_boundary(session, monkeypatch):
+    client = DummyClient([DummyMessage(content="done")])
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=make_runtime_config(
+            policy=ExecutionPolicy(max_total_turns=1, compaction=False)
+        ),
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    create = client.create
+
+    async def blocked_create(**kwargs):
+        entered.set()
+        await release.wait()
+        return await create(**kwargs)
+
+    monkeypatch.setattr(client, "create", blocked_create)
+    turn = asyncio.create_task(engine.prompt("work"))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        receipt = asyncio.create_task(engine.steer("mention", "capped"))
+        await asyncio.sleep(0)
+        release.set()
+        await turn
+        assert (await receipt)["outcome"] == "promptRequired"
+        assert all(m.get("content") != "mention" for m in session.messages)
+        assert "capped" not in engine._steering_ids
+    finally:
+        turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+        await engine.aclose()

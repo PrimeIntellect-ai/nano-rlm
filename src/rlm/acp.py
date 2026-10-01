@@ -291,7 +291,7 @@ class RLMACPAgent(Agent):
                 ),
             ),
             agent_info=Implementation(name="rlm", title="RLM", version=version("rlm")),
-            field_meta={CONTRACT_METADATA_KEY: True},
+            field_meta={CONTRACT_METADATA_KEY: True, "steering": {"supported": True}},
         )
 
     async def new_session(
@@ -411,6 +411,43 @@ class RLMACPAgent(Agent):
                 ),
                 field_meta=_session_metadata(state),
             )
+
+    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method != "session/steering":
+            raise RequestError.method_not_found(method)
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str):
+            raise RequestError.invalid_params({"reason": "sessionId must be a string"})
+        state = self._sessions.get(session_id)
+        if state is None or state.closing:
+            raise RequestError.resource_not_found(session_id)
+        blocks = params.get("prompt")
+        if (
+            not isinstance(blocks, list)
+            or not blocks
+            or any(
+                not isinstance(block, dict)
+                or block.get("type") != "text"
+                or not isinstance(block.get("text"), str)
+                for block in blocks
+            )
+        ):
+            raise RequestError.invalid_params(
+                {"reason": "steering requires text content blocks"}
+            )
+        text = "\n".join(block["text"] for block in blocks)
+        message_id = params.get("messageId")
+        if not text.strip() or (
+            message_id is not None
+            and (not isinstance(message_id, str) or not message_id)
+        ):
+            raise RequestError.invalid_params(
+                {"reason": "invalid steering text or messageId"}
+            )
+        try:
+            return await state.engine.steer(text, message_id)
+        except ValueError as error:
+            raise RequestError.invalid_params({"reason": str(error)}) from error
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         state = self._sessions.get(session_id)

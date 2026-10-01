@@ -43,6 +43,20 @@ not advertise `session/load`: an arbitrary live Python kernel cannot be
 reconstructed after the ACP process exits, so clients must keep the process
 alive for the lifetime of a session.
 
+RLM advertises `_meta.steering.supported` during ACP initialization. Clients can
+send `_session/steering` with `sessionId` and text `prompt` blocks while a turn is
+running. Messages enter the conversation as user messages at the next model step,
+after any tool results; tools are not interrupted. Steering wakes the native
+`wait` tool so the next model step can consume the message. The request returns `injected`
+when the message has entered the conversation, or `promptRequired` with reason
+`noRunningTurn` when no active turn can consume it. Idle steering never starts a
+new turn. Clients can set `_meta.steering.idleBehavior` to `promptRequired`.
+
+An optional `messageId` deduplicates retries within the session; reusing an ID with
+different content fails. Injected messages survive prompt rollback and are kept in
+the user-request history used by compaction. Queued messages that cannot be applied
+remain unconsumed. Worlds uses this interface to deliver its attention inbox.
+
 RLM's ACP surface is a versioned training contract. `initialize` advertises the exact
 `ai.prime.rlm/contract-v1` marker in its response `_meta`; clients must require
 it, then provide one complete `ai.prime.rlm/runtime-v1` object in
