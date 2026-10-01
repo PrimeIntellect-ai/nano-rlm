@@ -28,13 +28,24 @@ RETRY_COUNT_HEADER = "x-stainless-retry-count"
 _RETRY_DELAYS = (0.5, 1, 2, 4, 8)
 
 
+def _is_tunnel_unavailable(error: BaseException) -> bool:
+    return (
+        isinstance(error, APIStatusError)
+        and error.status_code == 404
+        and "text/html" in error.response.headers.get("content-type", "")
+        and "Tunnel not found or no longer active." in error.response.text
+    )
+
+
 def _retry_delay(error: Exception, attempt: int) -> float | None:
     if isinstance(error, APIStatusError):
         headers = error.response.headers
         if headers.get("x-should-retry") == "false":
             return None
         if headers.get("x-should-retry") != "true" and not (
-            error.status_code in (408, 409, 429) or error.status_code >= 500
+            _is_tunnel_unavailable(error)
+            or error.status_code in (408, 409, 429)
+            or error.status_code >= 500
         ):
             return None
         try:
@@ -105,7 +116,9 @@ async def call_with_retries(
         except (APIStatusError, APIConnectionError, ConnectionResetError) as error:
             delay = _retry_delay(error, attempt)
             if attempt == max_retries or delay is None:
-                if isinstance(error, (APIConnectionError, ConnectionResetError)):
+                if isinstance(
+                    error, (APIConnectionError, ConnectionResetError)
+                ) or _is_tunnel_unavailable(error):
                     raise ModelTransportError(
                         f"{type(error).__name__}: {error}"
                     ) from error

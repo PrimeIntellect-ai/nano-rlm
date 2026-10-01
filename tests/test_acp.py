@@ -331,8 +331,9 @@ async def test_engine_cancelled_prompt_can_be_retried(session):
     )
 
 
+@pytest.mark.parametrize("failure", ["connection", "tunnel404"])
 async def test_model_call_idempotency_survives_retry_and_compaction(
-    monkeypatch, session
+    monkeypatch, session, failure
 ):
     monkeypatch.setattr("rlm.client._RETRY_DELAYS", (0,))
     client = DummyClient(
@@ -348,6 +349,17 @@ async def test_model_call_idempotency_survives_retry_and_compaction(
     async def flaky_first_call(**kwargs):
         attempts.append(kwargs)
         if len(attempts) == 1:
+            if failure == "tunnel404":
+                import httpx
+                from openai import NotFoundError
+
+                response = httpx.Response(
+                    404,
+                    request=httpx.Request("POST", "https://example.test/v1"),
+                    text="<html><p>Tunnel not found or no longer active.</p></html>",
+                    headers={"content-type": "text/html"},
+                )
+                raise NotFoundError("tunnel unavailable", response=response, body=None)
             raise ConnectionResetError("retry")
         return await create(**kwargs)
 
