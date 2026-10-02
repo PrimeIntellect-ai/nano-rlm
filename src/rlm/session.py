@@ -12,11 +12,22 @@ from rlm.types import ChildSessionAggregate, ProgrammaticToolCallStats
 
 
 class Session:
-    def __init__(self, session_dir: Path | None = None):
+    def __init__(self, session_dir: Path | None = None, name: str | None = None):
         if session_dir is None:
-            sid = uuid.uuid4().hex[:12]
-            rlm_home = Path(os.environ.get("RLM_HOME") or Path.home() / ".rlm")
-            session_dir = rlm_home / "sessions" / sid
+            sid = name or uuid.uuid4().hex[:12]
+            sessions = (
+                Path(os.environ.get("RLM_HOME") or Path.home() / ".rlm") / "sessions"
+            )
+            sessions.mkdir(parents=True, exist_ok=True)
+            session_dir = sessions / sid
+            n = 0
+            while True:
+                try:
+                    session_dir.mkdir()
+                    break
+                except FileExistsError:
+                    n += 1
+                    session_dir = sessions / f"{sid}-{n}"
         # Session writes must remain valid if the working directory changes.
         self.dir = Path(session_dir).resolve()
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -253,9 +264,9 @@ class Session:
         self._msg_file.close()
 
     @staticmethod
-    def child_dir(parent_dir: Path | str) -> Path:
+    def child_dir(parent_dir: Path | str, name: str | None = None) -> Path:
         """Create and return a new child session directory under parent_dir."""
-        child_id = uuid.uuid4().hex[:8]
+        child_id = name or uuid.uuid4().hex[:8]
         child = Path(parent_dir) / f"sub-{child_id}"
         child.mkdir()
         return child

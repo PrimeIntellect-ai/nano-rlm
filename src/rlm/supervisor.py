@@ -27,6 +27,7 @@ from rlm.broker import (
     write_frame,
 )
 from rlm.config import RuntimeConfig
+from rlm.ids import Ids
 from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import (
     MCPRegistry,
@@ -189,6 +190,8 @@ class SessionTreeSupervisor:
         self._connection_writers: set[asyncio.StreamWriter] = set()
         self._scopes: dict[str, _Scope] = {}
         self._mcp_registry = MCPRegistry(mcp_servers, cwd) if mcp_servers else None
+        root_id = root_invocation_id or uuid.uuid4().hex
+        self._ids = Ids(root_id)
         self._brokered_skills: dict[
             str,
             tuple[
@@ -197,9 +200,15 @@ class SessionTreeSupervisor:
             ],
         ] = {}
         self._subscriptions = Subscriptions(
-            self._publish_subscription, self._record_subscription
+            self._publish_subscription,
+            self._record_subscription,
+            new_id=lambda: self._ids.next("watch"),
         )
-        self._shell_jobs = ShellJobs(self._publish_job, self._publish_job_output)
+        self._shell_jobs = ShellJobs(
+            self._publish_job,
+            self._publish_job_output,
+            new_id=lambda: self._ids.next("job"),
+        )
         self._root_config = runtime_config
         if "search" in runtime_config.skills:
             capability = secrets.token_urlsafe(24)
@@ -221,7 +230,6 @@ class SessionTreeSupervisor:
             )
             self._brokered_skills[capability] = (descriptor, self._call_search)
 
-        root_id = root_invocation_id or uuid.uuid4().hex
         root = _Invocation(
             id=root_id,
             parent_id=None,
@@ -453,11 +461,12 @@ class SessionTreeSupervisor:
             and self._total_tokens >= policy.max_total_tokens
         ):
             raise RuntimeError("token budget reached")
+        child_id = self._ids.next(f"{parent.id}/agent")
         child = _Invocation(
-            id=uuid.uuid4().hex,
+            id=child_id,
             parent_id=parent.id,
             capability=secrets.token_urlsafe(32),
-            session=Session(Session.child_dir(parent.session.dir)),
+            session=Session(Session.child_dir(parent.session.dir, child_id[:8])),
             runtime_config=parent.runtime_config.model_copy(
                 update={"invocation": context}
             ),
@@ -507,7 +516,7 @@ class SessionTreeSupervisor:
         if len(json.dumps(content).encode("utf-8")) > MAX_MESSAGE_BYTES:
             raise ValueError("message exceeds 65536 bytes")
         return {
-            "id": uuid.uuid4().hex,
+            "id": self._ids.next("event"),
             "type": kind,
             "sender_id": sender.id,
             "created_at": time.time(),

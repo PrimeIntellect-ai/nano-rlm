@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from typing import Annotated, Any
@@ -308,7 +309,11 @@ class RLMACPAgent(Agent):
             )
         resolved_mcp_servers = _mcp_servers(mcp_servers)
         runtime_config, external_session_id = _runtime_config(kwargs)
-        session = Session()
+        session = Session(
+            name=hashlib.sha256(external_session_id.encode()).hexdigest()[:12]
+            if external_session_id
+            else None
+        )
         session_id = session.dir.name
         try:
             engine = RLMEngine(

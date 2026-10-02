@@ -818,7 +818,7 @@ async def test_acp_failed_session_creation_closes_session(monkeypatch, tmp_path)
         def __init__(self, **kwargs):
             raise RuntimeError("engine init failed")
 
-    monkeypatch.setattr("rlm.acp.Session", lambda: session)
+    monkeypatch.setattr("rlm.acp.Session", lambda **_: session)
     monkeypatch.setattr("rlm.acp.RLMEngine", FailingEngine)
     agent = RLMACPAgent()
     await _initialize(agent)

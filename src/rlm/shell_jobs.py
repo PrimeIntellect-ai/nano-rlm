@@ -54,10 +54,12 @@ class ShellJobs:
         self,
         publish: Callable[[JobRecord], None],
         output: Callable[[JobRecord, int], None] | None = None,
+        new_id: Callable[[], str] = lambda: uuid.uuid4().hex,
     ):
         self.jobs: dict[str, JobRecord] = {}
         self.publish = publish
         self.output = output
+        self.new_id = new_id
 
     def start(
         self,
@@ -73,7 +75,7 @@ class ShellJobs:
     ) -> dict:
         if sum(job.finished is None for job in self.jobs.values()) >= MAX_ACTIVE_JOBS:
             raise RuntimeError("active shell job limit reached")
-        job_id = uuid.uuid4().hex
+        job_id = self.new_id()
         directory = directory / "jobs" / job_id
         directory.mkdir(parents=True)
         output = directory / "output.bin"

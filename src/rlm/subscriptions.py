@@ -36,10 +36,12 @@ class Subscriptions:
         self,
         publish: Callable[[Subscription, str, dict], None],
         record: Callable[[Subscription], None],
+        new_id: Callable[[], str] = lambda: uuid.uuid4().hex,
     ):
         self.items: dict[str, Subscription] = {}
         self.publish = publish
         self.record = record
+        self.new_id = new_id
 
     def register(
         self,
@@ -61,7 +63,7 @@ class Subscriptions:
             raise RuntimeError("active subscription limit reached")
         sub = Subscription(
             SubscriptionInfo(
-                uuid.uuid4().hex,
+                self.new_id(),
                 owner_id,
                 kind,
                 target,
