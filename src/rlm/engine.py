@@ -589,7 +589,7 @@ class RLMEngine:
             allow_git=self.allow_git,
         )
         try:
-            startup = asyncio.create_task(asyncio.to_thread(self._repl.start))
+            startup = asyncio.create_task(self._repl.run_in_thread(self._repl.start))
             cancelled = False
             while True:
                 try:
@@ -922,10 +922,9 @@ class RLMEngine:
                 try:
                     if scope_id is not None:
                         repl.set_broker_scope(scope_id)
+                    run = repl.run_in_thread if repl is not None else asyncio.to_thread
                     tool_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            tool.execute, tool_args, self._tool_context(messages)
-                        )
+                        run(tool.execute, tool_args, self._tool_context(messages))
                     )
                     try:
                         tool_result = await asyncio.shield(tool_task)

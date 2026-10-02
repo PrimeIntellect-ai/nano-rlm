@@ -624,6 +624,9 @@ async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
             self.finished = False
             self.stopped = False
 
+        async def run_in_thread(self, fn, *args):
+            return await asyncio.to_thread(fn, *args)
+
         def interrupt(self):
             interrupted.set()
 
@@ -744,6 +747,9 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
             self.started = False
             self.stopped = False
             repls.append(self)
+
+        async def run_in_thread(self, fn, *args):
+            return await asyncio.to_thread(fn, *args)
 
         def start(self):
             self.started = True

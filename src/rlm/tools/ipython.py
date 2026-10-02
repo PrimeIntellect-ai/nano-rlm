@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import functools
 import os
 from queue import Empty
 import re
@@ -12,7 +14,8 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -283,6 +286,20 @@ class IPythonREPL:
         self._recovery_failed = False
         self._cell_submitted = False
         self._recovery_notices: list[str] = []
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="rlm-repl"
+        )
+
+    async def run_in_thread(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """Run blocking kernel-client work on this REPL's own thread.
+
+        jupyter_client's blocking calls reuse an event loop that jupyter_core caches in a
+        ContextVar. asyncio.to_thread runs each call in a fresh context copy, so the cache
+        never sticks and every call leaves an unclosed loop (epoll fd + socketpair) behind;
+        one long-lived thread keeps a single loop for the REPL's lifetime.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, functools.partial(fn, *args))
 
     def start(self):
         """Start the IPython kernel."""
@@ -633,3 +650,4 @@ import rlm
         if self._ipc_dir:
             shutil.rmtree(self._ipc_dir, ignore_errors=True)
             self._ipc_dir = None
+        self._executor.shutdown(wait=False)
