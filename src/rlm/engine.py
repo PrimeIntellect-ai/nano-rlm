@@ -224,7 +224,11 @@ class RLMEngine:
         self.max_tokens = config.policy.max_tokens
 
         self._owns_client = client is None
-        self.client = client or make_client(config.provider)
+        self.client = (
+            client.with_options(max_retries=0)
+            if client is not None
+            else make_client(config.provider)
+        )
         self.session = session
         self._supervisor = supervisor
         self._invocation_id = invocation_id or (
@@ -1169,7 +1173,9 @@ class RLMEngine:
 
         try:
             response = await call_with_retries(
-                self.client.chat.completions.create, **request
+                self.client.chat.completions.create,
+                max_retries=self.runtime_config.provider.max_retries,
+                **request,
             )
         except BaseException:
             self._semantic_edges.fail_request(request_id)
