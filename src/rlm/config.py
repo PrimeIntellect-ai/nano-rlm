@@ -7,6 +7,8 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
@@ -24,6 +26,12 @@ class ProviderConfig(_ConfigModel):
     api_key: str = Field(min_length=1, repr=False)
     headers: dict[str, str] = Field(default_factory=dict, repr=False)
     max_retries: int = Field(default=5, ge=0)
+    api_format: Literal["auto", "openai", "anthropic"] = "auto"
+    """Auto selects the native Messages API for api.anthropic.com."""
+    prompt_cache: Literal["off", "5m", "1h"] = "5m"
+    """Prompt-cache duration for native Anthropic requests."""
+    max_output_tokens: int = Field(default=8192, gt=0)
+    """Per-request output limit required by the native Anthropic Messages API."""
 
     @field_validator("headers")
     @classmethod
