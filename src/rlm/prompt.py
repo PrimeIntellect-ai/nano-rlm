@@ -341,6 +341,7 @@ def build_system_prompt(
     task_instructions: str | None = None,
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
+    context_prompt: str | None = None,
 ) -> str:
     """Compose task instructions with the guide for this agent's actual runtime."""
     has_ipython = _has_tool(active_tools, "ipython")
@@ -447,6 +448,8 @@ def build_system_prompt(
         )
     if _should_include_git_history_guard(active_tools, allow_git):
         parts.append(GIT_HISTORY_GUARD_PROMPT)
+    if context_prompt:
+        parts.append(context_prompt)
     return "\n\n".join(parts)
 
 
