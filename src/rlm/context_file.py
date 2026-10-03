@@ -28,9 +28,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from rlm.provenance import runtime_event
+
 CONTEXT_FILE_NAME = "LIVE_CTX_MAIN.txt"
 PROTECTED = 2
 RESERVE_TOKENS = 2048
+MAX_ROLLBACKS = 50
+ROLLBACK_MARGIN = 2048
+ROLLBACK_ESCALATE_AFTER = 3
 NUDGE_RATIOS = (0.25, 0.5, 0.75)
 ADAPTIVE_OBS_WINDOW = 3
 ADAPTIVE_OBS_MULT = 2.0
@@ -89,8 +94,7 @@ _NOTE_CONTRACT = (
     "VERIFIED or UNVERIFIED; and a NEXT line."
 )
 _OVERFLOW_CONSEQUENCE = (
-    "if you cross the limit your context is replaced by an automatic summary and its "
-    "details are lost"
+    "if you cross the limit you get one final turn and then the session ends"
 )
 
 
@@ -136,10 +140,25 @@ class ContextFile:
         self._turns: list[_Turn] = []
         self._rendered = ""
         self._nudged: set[float] = set()
+        self._ledger: dict | None = None
+        self._rolled_back_commands: list[str] = []
+        self._finalized = False
+        self.rollbacks = 0
+        self.rolled_back_messages = 0
+        self._consecutive_rollbacks = 0
 
     def prompt(self) -> str:
-        budget = f"{self.budget} tokens" if self.budget else "not fixed"
+        budget = (
+            f"{self.strict_target} tokens"
+            if self.budget
+            else "your model's full context window"
+        )
         return CONTEXT_PROMPT.format(budget=budget, path=self.path)
+
+    def protected(self, messages: list[dict]) -> int:
+        """System prompt and first user message, plus the rollback ledger once pinned."""
+        ledger = self._ledger is not None and len(messages) > PROTECTED
+        return PROTECTED + int(ledger and messages[PROTECTED] is self._ledger)
 
     # ---------------------------------------------------------------- tokens
     def count(self, messages: list[dict]) -> int:
@@ -153,7 +172,8 @@ class ContextFile:
 
     # ---------------------------------------------------------------- mirror
     def write(self, messages: list[dict], pinned: list[dict]) -> None:
-        """Mirror ``messages[PROTECTED:]``; ``pinned`` holds later user requests."""
+        """Mirror the editable region of ``messages``; ``pinned`` holds later user
+        requests."""
         self._turns = [
             _Turn(
                 message,
@@ -161,7 +181,7 @@ class ContextFile:
                 _escape_headers(rendered_text(message)),
                 any(message is p for p in pinned),
             )
-            for message in messages[PROTECTED:]
+            for message in messages[self.protected(messages) :]
         ]
         self._rendered = "\n\n".join(
             f"[[CTX_TURN {n} role={t.role}{' pinned' if t.pinned else ''}]]\n{t.body}"
@@ -188,7 +208,7 @@ class ContextFile:
                     f"`[[CTX_TURN 12 role=assistant]]` (turn index first, then role).]",
                 )
             return EditResult(None, "")
-        candidate, error = self._parse(text, messages[:PROTECTED])
+        candidate, error = self._parse(text, messages[: self.protected(messages)])
         if error:
             return EditResult(
                 None,
@@ -229,6 +249,7 @@ class ContextFile:
                 f"\n[{CONTEXT_FILE_NAME}: edit applied — context ~{before}->{after} "
                 f"tokens, {len(candidate)} turns]"
             )
+        self._consecutive_rollbacks = 0
         return EditResult(candidate, note)
 
     def _parse(self, text: str, protected: list[dict]) -> tuple[list[dict], str | None]:
@@ -287,13 +308,100 @@ class ContextFile:
         )
         return f"\n[context: ~{tokens}/{self.strict_target} tokens{over}]"
 
-    def nudge(self, messages: list[dict]) -> str | None:
-        """The paper's escalating budget nudges: a one-shot note per crossed tier, and an
-        urgent note on every turn once the headroom is smaller than recent outputs."""
+    def evaluate(self, messages: list[dict]) -> tuple[str, str | None]:
+        """The paper's pre-call budget check. Returns ``(action, notice)``: action is
+        ``continue`` (with an optional nudge), ``rollback``, ``final_turn`` (with the
+        final-turn notice) or ``stop``."""
         if not self.budget:
-            return None
+            return "continue", None
         tokens = self.count(messages)
         self._nudged = {f for f in self._nudged if tokens >= int(self.budget * f)}
+        if tokens > self.strict_target:
+            if (
+                self.rollbacks < MAX_ROLLBACKS
+                and self.strict_target > ROLLBACK_MARGIN
+                and len(messages) > self.protected(messages)
+            ):
+                return "rollback", None
+            if self._finalized:
+                return "stop", None
+            self._finalized = True
+            return "continue", (
+                f"[SYSTEM NOTICE] You have reached your context budget ({tokens}/{self.budget} "
+                "tokens). This is your FINAL turn: make sure your solution is complete and in "
+                "place — write any required output/answer to the location the task specifies (or "
+                "run your submit command) — because after this turn the session ends and your "
+                "work is evaluated as-is."
+            )
+        self._finalized = False
+        return "continue", self._nudge(messages, tokens)
+
+    def rollback(self, messages: list[dict], pinned: list[dict]) -> list[dict]:
+        """Drop the newest turns until there is room to compact, and pin (or update) the
+        rollback ledger right after the protected prefix."""
+        self.rollbacks += 1
+        self._consecutive_rollbacks += 1
+        depth = max(1, self._consecutive_rollbacks - ROLLBACK_ESCALATE_AFTER)
+        margin = min(
+            ROLLBACK_MARGIN * depth, max(3 * self.strict_target // 4, ROLLBACK_MARGIN)
+        )
+        target = max(self.strict_target - margin, 0)
+        floor = max(
+            self.protected(messages),
+            *(i + 1 for i, m in enumerate(messages) if any(m is p for p in pinned)),
+        )
+        kept = list(messages)
+        dropped: list[dict] = []
+        while len(kept) > floor and self.count(kept) > target:
+            dropped.append(kept.pop())
+            while (
+                len(kept) > floor
+                and kept[-1].get("role") == "assistant"
+                and kept[-1].get("tool_calls")
+            ):
+                dropped.append(kept.pop())
+        self.rolled_back_messages += len(dropped)
+        for message in reversed(dropped):
+            for call in message.get("tool_calls") or []:
+                try:
+                    args = json.loads(call["function"]["arguments"])
+                    command = args.get("code") or args.get("command") or ""
+                except (ValueError, AttributeError, KeyError):
+                    command = ""
+                command = " ".join(str(command).split())[:70]
+                if command and command not in self._rolled_back_commands:
+                    self._rolled_back_commands.append(command)
+        del self._rolled_back_commands[:-5]
+        had_ledger = self.protected(kept) > PROTECTED
+        ledger, _ = runtime_event(
+            "context", self._rollback_message(len(dropped), self.count(kept))
+        )
+        self._ledger = ledger
+        rest = kept[PROTECTED + 1 :] if had_ledger else kept[PROTECTED:]
+        return [*kept[:PROTECTED], ledger, *rest]
+
+    def _rollback_message(self, n_dropped: int, tokens_after: int) -> str:
+        body = (
+            f"[SYSTEM NOTICE — CONTEXT LIMIT HIT (retry {self.rollbacks}/"
+            f"{MAX_ROLLBACKS})] Your context crossed the {self.budget}-token limit, "
+            f"so your {n_dropped} most recent turn(s) were ROLLED BACK and are gone — that work is "
+            f"no longer in your context and cannot be recovered ({self.rolled_back_messages} turn(s) "
+            f"lost so far). You are now at ~{tokens_after}/{self.strict_target} tokens, which leaves "
+            "room for exactly one thing: CONDENSE YOUR CONTEXT THIS TURN and do nothing else. "
+            f"Replace stale regions with short summaries. {self._hint()}"
+        )
+        if self._rolled_back_commands:
+            body += (
+                "\nThese commands already ran and their output is what blew your budget, so their "
+                "turns were discarded. Re-running them will just lose the context again — if you "
+                "need one, make it print far less (head/grep/count instead of dumping):\n"
+                + "\n".join(f"  - {c}" for c in self._rolled_back_commands)
+            )
+        return body
+
+    def _nudge(self, messages: list[dict], tokens: int) -> str | None:
+        """Escalating budget nudges: a one-shot note per crossed tier, and an urgent note
+        on every turn once the headroom is smaller than recent outputs."""
         need = self._adaptive_headroom(messages)
         if self.strict_target - tokens < need:
             ratio = (self.strict_target - need) / self.strict_target
@@ -302,8 +410,8 @@ class ContextFile:
                 f"You are at {tokens}/{self.strict_target} tokens — over "
                 f"{int(round(ratio * 100))}% of your hard context limit and about "
                 "to be cut off. Compact your context THIS TURN (do nothing else): remove "
-                f"stale regions now. If you cross the limit your context is replaced by an "
-                f"automatic summary and its details are lost. {self._hint()}"
+                "stale regions now. If you cross the limit you get exactly one final turn and "
+                f"then the session ends with your work graded as-is. {self._hint()}"
             )
         crossed = [f for f in NUDGE_RATIOS if tokens >= int(self.budget * f)]
         to_fire = [f for f in crossed if f not in self._nudged]
@@ -336,7 +444,9 @@ class ContextFile:
         return f"CONTEXT BUDGET NUDGE: {body} {self._hint()}"
 
     def _adaptive_headroom(self, messages: list[dict]) -> int:
-        tools = [m for m in messages[PROTECTED:] if m.get("role") == "tool"]
+        tools = [
+            m for m in messages[self.protected(messages) :] if m.get("role") == "tool"
+        ]
         obs = max((self.count([m]) for m in tools[-ADAPTIVE_OBS_WINDOW:]), default=0)
         limit = self.strict_target
         by_ratio = int(ADAPTIVE_MIN_BAND * limit)

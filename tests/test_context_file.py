@@ -3,7 +3,7 @@ import re
 from conftest import DummyClient, DummyMessage, DummyToolCall, make_runtime_config
 
 from rlm.config import ExecutionPolicy
-from rlm.context_file import CONTEXT_FILE_NAME, ContextFile
+from rlm.context_file import CONTEXT_FILE_NAME, MAX_ROLLBACKS, ContextFile
 from rlm.engine import RLMEngine
 
 
@@ -150,3 +150,38 @@ async def test_engine_applies_model_edit(tmp_path, session):
     assert third[3]["tool_call_id"] == "c1"
     assert "edit applied" in third[5]["content"]
     assert "[context: ~" in third[5]["content"]
+
+
+def test_overflow_rolls_back_then_grants_a_final_turn(tmp_path):
+    context = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+    ]
+    for i in range(10):
+        call = {
+            "id": f"c{i}",
+            "type": "function",
+            "function": {"name": "ipython", "arguments": f'{{"code": "dump({i})"}}'},
+        }
+        context += [
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 4000},
+        ]
+    context_file = ContextFile(tmp_path, budget=8000)
+
+    assert context_file.evaluate(context) == ("rollback", None)
+    rolled = context_file.rollback(context, pinned=[context[1]])
+    assert rolled[:2] == context[:2]
+    assert "CONTEXT LIMIT HIT (retry 1/" in rolled[2]["content"]
+    assert "dump(9)" in rolled[2]["content"]
+    assert rolled[-1]["role"] == "tool"
+    assert context_file.count(rolled) <= context_file.strict_target - 2048
+    assert context_file.protected(rolled) == 3
+
+    context_file.write(rolled, pinned=[context[1]])
+    assert "CONTEXT LIMIT HIT" not in context_file.path.read_text()
+
+    context_file.rollbacks = MAX_ROLLBACKS
+    action, notice = context_file.evaluate(context)
+    assert action == "continue" and "FINAL turn" in notice
+    assert context_file.evaluate(context) == ("stop", None)

@@ -766,18 +766,33 @@ class RLMEngine:
             self._apply_steering()
             self._deliver_kernel_notices()
             self._deliver_supervisor_input()
-            if self._context_file is not None and (
-                nudge := self._context_file.nudge(self.session.messages)
-            ):
-                message, provenance = runtime_event("context", nudge)
-                self.session.log(
-                    {
-                        "type": "context_nudge",
-                        "message": message,
-                        "provenance": provenance,
-                    },
-                    in_context=True,
-                )
+            if self._context_file is not None:
+                action, notice = self._context_file.evaluate(self.session.messages)
+                if action == "stop":
+                    self._metrics.stop_reason = "context_budget"
+                    final_text = (
+                        _last_assistant_text(self.session.messages[salvage_from:])
+                        or "[context budget reached]"
+                    )
+                    break
+                if action == "rollback":
+                    self.session.replace_context(
+                        self._context_file.rollback(
+                            self.session.messages, self._pinned_requests
+                        ),
+                        reason="context_rollback",
+                    )
+                    self._last_good = len(self.session.messages)
+                elif notice:
+                    message, provenance = runtime_event("context", notice)
+                    self.session.log(
+                        {
+                            "type": "context_notice",
+                            "message": message,
+                            "provenance": provenance,
+                        },
+                        in_context=True,
+                    )
             messages = self.session.messages
             self._turn = turn + 1
             try:
@@ -1174,8 +1189,8 @@ class RLMEngine:
         if not compactable(messages):
             return False
         if self._context_file is not None:
-            # The model may have edited its context since the last call's usage.
-            return self._context_file.count(messages) >= self.summarize_at_tokens
+            # The model manages its own context; overflow is a rollback, not a summary.
+            return False
         tokens = usage.total + estimated_tokens(extra_text)
         return tokens >= self.summarize_at_tokens
 
