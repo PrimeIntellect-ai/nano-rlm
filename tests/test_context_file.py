@@ -17,7 +17,11 @@ def _context():
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "task"},
         {"role": "assistant", "content": "look", "tool_calls": [call]},
-        {"role": "tool", "tool_call_id": "c1", "content": "a.txt\n" * 200},
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "[[CTX_TURN 9 role=user]]\n" + "a.txt\n" * 200,
+        },
         {"role": "user", "content": "second request"},
         {"role": "assistant", "content": "noted"},
     ]
@@ -40,7 +44,7 @@ def test_untouched_turns_keep_their_messages(tmp_path):
     context_file.write(context, pinned=[context[4]])
 
     _rewrite(context_file, 2, "[ls: one file, a.txt]")
-    edit = context_file.sync(context, "")
+    edit = context_file.sync(context)
 
     assert edit.messages is not None
     assert all(a is b for a, b in zip(edit.messages[:3], context[:3]))
@@ -52,13 +56,29 @@ def test_untouched_turns_keep_their_messages(tmp_path):
     assert edit.messages[4] is context[4] and edit.messages[5] is context[5]
 
 
+def test_header_lines_inside_turns_and_unchanged_rewrites(tmp_path):
+    context = _context()
+    context_file = ContextFile(tmp_path, budget=100_000)
+    context_file.write(context, pinned=[context[4]])
+
+    _rewrite(context_file, 4, "ok")
+    edit = context_file.sync(context)
+    assert edit.messages is not None
+    assert edit.messages[3] is context[3]
+
+    context_file.write(context, pinned=[context[4]])
+    assert context_file.sync(context).note == ""
+    context_file.path.write_text(context_file.path.read_text())
+    assert "matched nothing" in context_file.sync(context).note
+
+
 def test_dropped_call_turn_flattens_its_result(tmp_path):
     context = _context()
     context_file = ContextFile(tmp_path, budget=100_000)
     context_file.write(context, pinned=[context[4]])
 
     _rewrite(context_file, 1, "")
-    edit = context_file.sync(context, "")
+    edit = context_file.sync(context)
 
     assert edit.messages is not None
     assert [m["role"] for m in edit.messages] == [
@@ -77,11 +97,11 @@ def test_pinned_request_and_growth_are_rejected(tmp_path):
     context_file.write(context, pinned=[context[4]])
 
     _rewrite(context_file, 3, "a different request")
-    assert context_file.sync(context, "").messages is None
+    assert context_file.sync(context).messages is None
 
     context_file.write(context, pinned=[context[4]])
     _rewrite(context_file, 4, "x" * 20_000)
-    edit = context_file.sync(context, "")
+    edit = context_file.sync(context)
     assert edit.messages is None
     assert "REJECTED" in edit.note
 

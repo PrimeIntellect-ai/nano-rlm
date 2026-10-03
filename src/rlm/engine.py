@@ -1003,7 +1003,7 @@ class RLMEngine:
                 result, self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
             )
             if mirrored is not None:
-                context_notes = self._sync_context_file(mirrored, tool_args, content)
+                context_notes = self._sync_context_file(mirrored, content)
                 result += context_notes
                 content += context_notes
             self.session.log_tool_result(
@@ -1529,13 +1529,11 @@ class RLMEngine:
             context_prompt=self._context_file.prompt() if self._context_file else None,
         )
 
-    def _sync_context_file(
-        self, mirrored: list[dict], tool_args: dict, content: str
-    ) -> str:
+    def _sync_context_file(self, mirrored: list[dict], content: str) -> str:
         """Apply the model's edit of the mirror file, if any, and return the edit
         receipt plus the context readout for the tool result."""
         context_file = self._context_file
-        edit = context_file.sync(mirrored[:-1], json.dumps(tool_args))
+        edit = context_file.sync(mirrored[:-1])
         if edit.messages is not None:
             self.session.replace_context([*edit.messages, mirrored[-1]], reason="edit")
             self._last_good = len(self.session.messages)

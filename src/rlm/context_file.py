@@ -23,6 +23,7 @@ and an edit that changes or drops one is rejected.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,9 @@ ADAPTIVE_MIN_BAND = 0.10
 _HEADER_RE = re.compile(
     r"^\[\[CTX_TURN\s+(\d+)\s+role=([A-Za-z]+)(\s+pinned)?\]\]\s*$", re.M
 )
+
+_HEADER_LINE_RE = re.compile(r"^(\\*\[\[CTX_TURN)", re.M)
+_ESCAPED_HEADER_RE = re.compile(r"^\\(\\*\[\[CTX_TURN)", re.M)
 
 CONTEXT_PROMPT = """## Managing your context
 
@@ -154,7 +158,7 @@ class ContextFile:
             _Turn(
                 message,
                 message.get("role", "user"),
-                rendered_text(message),
+                _escape_headers(rendered_text(message)),
                 any(message is p for p in pinned),
             )
             for message in messages[PROTECTED:]
@@ -164,16 +168,18 @@ class ContextFile:
             for n, t in enumerate(self._turns, start=1)
         )
         self.path.write_text(self._rendered, encoding="utf-8")
+        # A sentinel mtime, so any later write shows up even within timestamp granularity.
+        os.utime(self.path, ns=(0, 0))
 
-    def sync(self, messages: list[dict], code: str) -> EditResult:
+    def sync(self, messages: list[dict]) -> EditResult:
         """Read the mirror back after a tool call; ``messages`` is the context it was
-        written from and ``code`` is the tool input (for the "matched nothing" note)."""
+        written from."""
         if not self.path.exists():
             return EditResult(None, "")
         text = self.path.read_text(encoding="utf-8", errors="replace")
         before = self.count(messages)
         if text.strip() == self._rendered.strip():
-            if CONTEXT_FILE_NAME in code:
+            if self.path.stat().st_mtime_ns != 0:
                 return EditResult(
                     None,
                     f"\n[{CONTEXT_FILE_NAME}: NO change — your edit matched nothing, so "
@@ -253,6 +259,7 @@ class ContextFile:
                 continue
             if turn is not None and turn.pinned:
                 return [], f"pinned turn {n} (a user request) was changed"
+            body = _ESCAPED_HEADER_RE.sub(r"\1", body)
             new.add(len(out))
             if turn is not None and role == turn.role == "tool":
                 # An edited result stays the answer to its call, so the call turn
@@ -343,6 +350,11 @@ class ContextFile:
             "them with summaries — do not retype the text you remove. Compact settled spans; "
             "keep anything you have not finished using."
         )
+
+
+def _escape_headers(text: str) -> str:
+    """Keep header-like lines inside a turn from splitting it on read-back."""
+    return _HEADER_LINE_RE.sub(r"\\\1", text)
 
 
 def _chars(messages: list[dict]) -> int:
