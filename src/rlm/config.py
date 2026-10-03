@@ -7,9 +7,9 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Literal
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
 from rlm.semantic import ACP_EXTENSION_HEADER_NAMES

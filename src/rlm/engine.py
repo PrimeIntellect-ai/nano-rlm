@@ -214,7 +214,6 @@ class RLMEngine:
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
-        self.context_mode = config.policy.context_mode
         self._context_file: ContextFile | None = None
         self._pinned_requests: list[dict] = []
 
@@ -527,13 +526,12 @@ class RLMEngine:
         )
         self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
 
-        if (
-            self.compaction or self.context_mode == "clm"
-        ) and self.summarize_at_tokens is None:
+        clm = self.runtime_config.policy.context_mode == "clm"
+        if (self.compaction or clm) and self.summarize_at_tokens is None:
             self.summarize_at_tokens = await discover_threshold(self.client, self.model)
 
         self._ensure_session()
-        if self.context_mode == "clm":
+        if clm:
             self._context_file = ContextFile(self.session.dir, self.summarize_at_tokens)
 
         self.session.write_meta(
@@ -1179,7 +1177,12 @@ class RLMEngine:
     def _should_compact(
         self, messages: list[dict], usage: TokenUsage, extra_text: str = ""
     ) -> bool:
-        if self.summarize_at_tokens is None or not self._can_compact():
+        # In CLM mode the model manages its own context; overflow is a rollback.
+        if (
+            self._context_file is not None
+            or self.summarize_at_tokens is None
+            or not self._can_compact()
+        ):
             return False
         # A spent tree cap stops the session next iteration: don't burn a model
         # call summarizing a conversation that is about to end. (The reactive
@@ -1187,9 +1190,6 @@ class RLMEngine:
         if self._spent_tree_cap() is not None:
             return False
         if not compactable(messages):
-            return False
-        if self._context_file is not None:
-            # The model manages its own context; overflow is a rollback, not a summary.
             return False
         tokens = usage.total + estimated_tokens(extra_text)
         return tokens >= self.summarize_at_tokens

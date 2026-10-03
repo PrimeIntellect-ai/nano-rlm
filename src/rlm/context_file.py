@@ -37,13 +37,9 @@ MAX_ROLLBACKS = 50
 ROLLBACK_MARGIN = 2048
 ROLLBACK_ESCALATE_AFTER = 3
 NUDGE_RATIOS = (0.25, 0.5, 0.75)
-ADAPTIVE_OBS_WINDOW = 3
-ADAPTIVE_OBS_MULT = 2.0
-ADAPTIVE_FLOOR = 0.5
-ADAPTIVE_MIN_BAND = 0.10
 
 _HEADER_RE = re.compile(
-    r"^\[\[CTX_TURN\s+(\d+)\s+role=([A-Za-z]+)(\s+pinned)?\]\]\s*$", re.M
+    r"^\[\[CTX_TURN\s+(\d+)\s+role=([A-Za-z]+)(?:\s+pinned)?\]\]\s*$", re.M
 )
 
 _HEADER_LINE_RE = re.compile(r"^(\\*\[\[CTX_TURN)", re.M)
@@ -117,9 +113,12 @@ def rendered_text(message: dict) -> str:
 @dataclass(frozen=True)
 class _Turn:
     message: dict
-    role: str
     body: str
     pinned: bool
+
+    @property
+    def role(self) -> str:
+        return self.message.get("role", "user")
 
 
 @dataclass(frozen=True)
@@ -177,7 +176,6 @@ class ContextFile:
         self._turns = [
             _Turn(
                 message,
-                message.get("role", "user"),
                 _escape_headers(rendered_text(message)),
                 any(message is p for p in pinned),
             )
@@ -241,8 +239,8 @@ class ContextFile:
             note = (
                 f"\n[{CONTEXT_FILE_NAME}: edit applied — context ~{before}->{after} "
                 f"tokens, but STILL OVER the ~{limit}-token limit. Compact more "
-                f"NOW (delete stale turns/outputs) or your context will be summarized "
-                f"automatically.]"
+                f"NOW (delete stale turns/outputs) or you'll get one final turn "
+                f"and the session ends.]"
             )
         else:
             note = (
@@ -266,7 +264,6 @@ class ContextFile:
 
         out: list[dict] = []
         kept: set[int] = set()
-        new: set[int] = set()
         for n, role, body in sections:
             turn = self._turns[n - 1] if n and 1 <= n <= len(self._turns) else None
             if (
@@ -281,7 +278,6 @@ class ContextFile:
             if turn is not None and turn.pinned:
                 return [], f"pinned turn {n} (a user request) was changed"
             body = _ESCAPED_HEADER_RE.sub(r"\1", body)
-            new.add(len(out))
             if turn is not None and role == turn.role == "tool":
                 # An edited result stays the answer to its call, so the call turn
                 # before it keeps its tokens.
@@ -296,8 +292,7 @@ class ContextFile:
         for n, turn in enumerate(self._turns, start=1):
             if turn.pinned and n not in kept:
                 return [], f"pinned turn {n} (a user request) was removed"
-        out, new = _repair_tool_pairs(out, new)
-        return [*protected, *_merge_new(out, new)], None
+        return [*protected, *_repair_tool_pairs(out)], None
 
     # ---------------------------------------------------------------- readout
     def readout(self, tokens: int) -> str:
@@ -309,9 +304,8 @@ class ContextFile:
         return f"\n[context: ~{tokens}/{self.strict_target} tokens{over}]"
 
     def evaluate(self, messages: list[dict]) -> tuple[str, str | None]:
-        """The paper's pre-call budget check. Returns ``(action, notice)``: action is
-        ``continue`` (with an optional nudge), ``rollback``, ``final_turn`` (with the
-        final-turn notice) or ``stop``."""
+        """The paper's pre-call budget check. Returns ``(action, notice)``: ``rollback``,
+        ``stop``, or ``continue`` with an optional nudge or final-turn notice."""
         if not self.budget:
             return "continue", None
         tokens = self.count(messages)
@@ -363,22 +357,15 @@ class ContextFile:
         self.rolled_back_messages += len(dropped)
         for message in reversed(dropped):
             for call in message.get("tool_calls") or []:
-                try:
-                    args = json.loads(call["function"]["arguments"])
-                    command = args.get("code") or args.get("command") or ""
-                except (ValueError, AttributeError, KeyError):
-                    command = ""
-                command = " ".join(str(command).split())[:70]
+                command = " ".join(_command(call).split())[:70]
                 if command and command not in self._rolled_back_commands:
                     self._rolled_back_commands.append(command)
         del self._rolled_back_commands[:-5]
-        had_ledger = self.protected(kept) > PROTECTED
-        ledger, _ = runtime_event(
+        rest = kept[self.protected(kept) :]
+        self._ledger, _ = runtime_event(
             "context", self._rollback_message(len(dropped), self.count(kept))
         )
-        self._ledger = ledger
-        rest = kept[PROTECTED + 1 :] if had_ledger else kept[PROTECTED:]
-        return [*kept[:PROTECTED], ledger, *rest]
+        return [*kept[:PROTECTED], self._ledger, *rest]
 
     def _rollback_message(self, n_dropped: int, tokens_after: int) -> str:
         body = (
@@ -444,14 +431,13 @@ class ContextFile:
         return f"CONTEXT BUDGET NUDGE: {body} {self._hint()}"
 
     def _adaptive_headroom(self, messages: list[dict]) -> int:
-        tools = [
-            m for m in messages[self.protected(messages) :] if m.get("role") == "tool"
-        ]
-        obs = max((self.count([m]) for m in tools[-ADAPTIVE_OBS_WINDOW:]), default=0)
+        """Headroom under which the urgent nudge fires: twice the largest of the last
+        three tool outputs, at least 10% and at most 50% of the limit."""
+        start = self.protected(messages)
+        tools = [m for m in messages[start:] if m.get("role") == "tool"][-3:]
+        largest = max((self.count([m]) for m in tools), default=0)
         limit = self.strict_target
-        by_ratio = int(ADAPTIVE_MIN_BAND * limit)
-        by_obs = int(ADAPTIVE_OBS_MULT * obs)
-        return min(max(by_ratio, by_obs), int((1.0 - ADAPTIVE_FLOOR) * limit))
+        return min(max(limit // 10, 2 * largest), limit // 2)
 
     def _hint(self) -> str:
         return (
@@ -460,6 +446,14 @@ class ContextFile:
             "them with summaries — do not retype the text you remove. Compact settled spans; "
             "keep anything you have not finished using."
         )
+
+
+def _command(call: dict) -> str:
+    try:
+        args = json.loads(call["function"]["arguments"])
+    except ValueError:  # the engine records calls with malformed arguments too
+        return ""
+    return str(args.get("code") or args.get("command") or "")
 
 
 def _escape_headers(text: str) -> str:
@@ -471,55 +465,27 @@ def _chars(messages: list[dict]) -> int:
     return len(json.dumps(messages, ensure_ascii=False, default=str))
 
 
-def _repair_tool_pairs(
-    messages: list[dict], new: set[int]
-) -> tuple[list[dict], set[int]]:
+def _repair_tool_pairs(messages: list[dict]) -> list[dict]:
     """Keep a tool-call turn structured only while all its results directly follow it;
     otherwise both sides become plain text, as for any edited turn."""
     out = list(messages)
-    converted: set[int] = set()
-    claimed: set[int] = set()
+    answered: set[int] = set()
     for i, message in enumerate(out):
         calls = (
             message.get("tool_calls") if message.get("role") == "assistant" else None
         )
         if not calls:
             continue
-        ids = {call.get("id") for call in calls}
-        j = i + 1
-        while j < len(out) and out[j].get("role") == "tool":
-            j += 1
-        if {
-            out[k].get("tool_call_id") for k in range(i + 1, j)
-        } == ids and j - i - 1 == len(ids):
-            claimed.update(range(i + 1, j))
+        results = range(i + 1, i + 1 + len(calls))
+        if [out[k].get("tool_call_id") for k in results if k < len(out)] == [
+            call.get("id") for call in calls
+        ]:
+            answered.update(results)
         else:
             out[i] = {"role": "assistant", "content": rendered_text(message)}
-            converted.add(i)
-    for i, message in enumerate(out):
-        if message.get("role") == "tool" and i not in claimed:
-            out[i] = {"role": "user", "content": message.get("content") or ""}
-            converted.add(i)
-    return out, new | converted
-
-
-def _merge_new(messages: list[dict], new: set[int]) -> list[dict]:
-    """Merge consecutive same-role turns that are both new; untouched turns stay as-is."""
-    merged: list[dict] = []
-    previous_new = False
-    for i, message in enumerate(messages):
-        is_new = i in new
-        if (
-            is_new
-            and previous_new
-            and message["role"] in ("user", "assistant")
-            and merged[-1]["role"] == message["role"]
-        ):
-            merged[-1] = {
-                "role": message["role"],
-                "content": f"{merged[-1]['content']}\n\n{message['content']}".strip(),
-            }
-        else:
-            merged.append(message)
-        previous_new = is_new
-    return merged
+    return [
+        {"role": "user", "content": m.get("content") or ""}
+        if m.get("role") == "tool" and i not in answered
+        else m
+        for i, m in enumerate(out)
+    ]
