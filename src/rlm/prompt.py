@@ -52,6 +52,11 @@ KERNEL_PACKAGES_PROMPT = (
     "Install extra packages with `!uv pip install <pkg>` in a code cell — that "
     "targets the kernel venv (a uv-managed venv with no pip module)."
 )
+VISION_PROMPT = (
+    "To look at an image file (PNG, JPEG, WebP or GIF, at most 2 MB), call `attach(path)` "
+    "in ipython; `display(...)` of an image works too. Up to 4 images per call are shown "
+    "to you right after the call's output."
+)
 BASH_SKILL_PROMPT = (
     "For short, blocking shell work, use `out = await bash('''command here''')` — always "
     "triple-quote the command so shell quotes and multi-line scripts never "
@@ -373,6 +378,7 @@ def build_system_prompt(
     allow_recursion: bool,
     delegation_prompt: bool = False,
     allow_git: bool,
+    vision: bool = False,
     active_tools: list[BuiltinTool],
     shell_skills: list[str] | None = None,
     skill_docs: list["SkillDoc"] | None = None,
@@ -445,6 +451,8 @@ def build_system_prompt(
                 KERNEL_PACKAGES_PROMPT,
             ]
         )
+        if vision:
+            parts.append(VISION_PROMPT)
         if can_delegate:
             parts.append(AGENT_PROMPT)
         else:
