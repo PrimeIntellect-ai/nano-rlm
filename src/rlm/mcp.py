@@ -18,10 +18,11 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
-from mcp.types import Tool
+from mcp.types import ImageContent, Tool
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from rlm.broker import json_annotation
+from rlm.images import IMAGE_MIMES
 
 MAX_MCP_SKILL_NAME_CHARS = 96
 MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
@@ -262,7 +263,9 @@ class MCPRegistry:
         except KeyError as exc:
             raise PermissionError("unknown MCP tool capability") from exc
 
-    async def call(self, capability: str, arguments: dict[str, Any]) -> str:
+    async def call(
+        self, capability: str, arguments: dict[str, Any]
+    ) -> str | dict[str, Any]:
         descriptor = self.descriptor(capability)
         entry = self._tools[descriptor.name]
         try:
@@ -356,17 +359,23 @@ async def call_tool(
     name: str,
     arguments: dict[str, Any],
     cwd: str | None = None,
-) -> str:
-    """Call an MCP tool and return its text content."""
+) -> str | dict[str, Any]:
+    """Call an MCP tool and return its text, or ``{"text", "images"}`` when it returns
+    image blocks (``images`` holds ``{"mime", "data"}`` with base64 data)."""
     async with _client_session(server, cwd) as session:
         await session.initialize()
         result = await session.call_tool(name, arguments or {})
-    text = "\n".join(
-        getattr(block, "text", "") or str(block) for block in result.content
-    )
+    texts: list[str] = []
+    images: list[dict[str, str]] = []
+    for block in result.content:
+        if isinstance(block, ImageContent) and block.mimeType in IMAGE_MIMES:
+            images.append({"mime": block.mimeType, "data": block.data})
+        else:
+            texts.append(getattr(block, "text", "") or str(block))
+    text = "\n".join(texts)
     if result.isError:
         raise MCPToolError(text or f"MCP tool {name!r} failed")
-    return text
+    return {"text": text, "images": images} if images else text
 
 
 def build_signature(schema: dict[str, Any]) -> inspect.Signature:

@@ -372,3 +372,42 @@ async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_pat
     assert tool_messages[-1]["content"].strip() == "reused"
     meta = json.loads((session.dir / "meta.json").read_text())
     assert meta["programmatic_tool_call_stats"]["python_total"] == 2
+
+
+async def test_mcp_image_blocks_reach_the_model_as_images(tmp_path):
+    session = Session(tmp_path / "session")
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": "tool = await rlm.tools.get('local_pixel'); print(await tool())"
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config().model_copy(
+            update={"policy": ExecutionPolicy(vision=True)}
+        ),
+        mcp_servers={"local": _stdio_server()},
+        cwd=str(tmp_path),
+    )
+
+    await engine.run("use the tool")
+    await engine.aclose()
+
+    messages = client.calls[1]["messages"]
+    assert messages[-2]["role"] == "tool"
+    assert "one pixel" in messages[-2]["content"]
+    assert "[image 1: image/png" in messages[-2]["content"]
+    assert messages[-1]["content"][1]["image_url"]["url"].startswith(
+        "data:image/png;base64,iVBORw0KGgo"
+    )
