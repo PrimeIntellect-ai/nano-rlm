@@ -7,6 +7,8 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
 
@@ -91,6 +93,12 @@ class ExecutionPolicy(_ConfigModel):
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
     allow_git: bool = False
+    context_mode: Literal["append", "clm"] = "append"
+    """``append``: the harness owns the context (append-only, compaction at the threshold).
+    ``clm``: the model edits its own context through a mirror file (Context Language
+    Models); the compaction threshold becomes its context budget. Going over it rolls
+    back the newest turns and demands a compaction (up to 50 times), then grants one
+    final turn; summary compaction only answers provider context-overflow errors."""
 
     @model_validator(mode="after")
     def _validate_concurrency(self) -> Self:

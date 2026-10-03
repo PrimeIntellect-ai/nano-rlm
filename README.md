@@ -218,6 +218,14 @@ message = child_history.windows[4].messages[2]  # If that child has reached wind
 
 Snapshots contain complete records as of the read; call `history(...)` again to observe new activity. `h.events` exposes lifecycle records, including each child's spawn prompt and rollback markers. The compacted context points to this API so the model can retrieve omitted details without putting the whole transcript back in context.
 
+### Context Language Model mode
+
+`policy.context_mode = "clm"` lets the model manage its own context, following [Context Language Models](https://arxiv.org/abs/2609.37725). Before each tool call, everything after the system prompt and the first user message is mirrored to `$RLM_SESSION_DIR/LIVE_CTX_MAIN.txt` as `[[CTX_TURN n role=...]]` blocks: an assistant block holds its reasoning, content and tool call; a tool block holds the output as it is in context. After the call the file is read back and the edit becomes a new context window (`reason="edit"`).
+
+- Unchanged blocks keep their original message (same ledger index, identical tokens), so an edit invalidates a prefix cache only from its first changed turn. A line inside a turn that looks like a header is escaped with a leading backslash. Changed or new blocks become plain assistant/user messages; an edited tool output stays a tool result while its call is kept. A call whose result was removed (or the reverse) becomes plain text, so requests stay valid.
+- Later user requests are marked `pinned`; an edit that changes or drops one is rejected. An edit that grows the context is kept only if it fits the budget.
+- The compaction threshold is the context budget. Each tool result ends with an edit receipt and `[context: ~X/Y tokens]`, where Y is the budget minus a 2048-token reserve; token counts are character counts calibrated to the last request's `prompt_tokens`. Budget nudges fire at 25/50/75% and, urgently, every turn once the headroom is smaller than recent outputs. When the context goes over Y before a model call, the newest turns are rolled back until 2048 tokens are free, and a pinned notice after the first user message demands a compaction and names the commands whose output was dropped (up to 50 times; the margin grows after 3 rollbacks in a row without an edit). After that the model gets one final turn and the run stops with `stop_reason=context_budget`. Summary compaction only answers provider context-overflow errors.
+
 ## Session Directory
 
 Every invocation writes to `$RLM_HOME/sessions/<id>/`. Nested session directories mirror the call tree.
