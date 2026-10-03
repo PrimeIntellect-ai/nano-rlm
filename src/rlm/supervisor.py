@@ -1187,7 +1187,7 @@ class SessionTreeSupervisor:
         scope_id: str,
         skill_capability: str,
         arguments: dict[str, Any],
-    ) -> asyncio.Task[str]:
+    ) -> asyncio.Task[str | dict[str, Any]]:
         async with self._lock:
             invocation_id = self._capabilities.get(capability)
             scope = self._scopes.get(scope_id)

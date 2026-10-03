@@ -17,6 +17,7 @@ from conftest import (
     tool_result,
 )
 
+from rlm.config import ExecutionPolicy
 from rlm.engine import RLMEngine
 from rlm.tools.ipython import IPythonREPL
 
@@ -364,3 +365,61 @@ async def test_tree_turn_budget_stops_engine(session):
     assert engine.stop_reason == "max_total_turns"
     assert len(client.calls) == 1
     assert result.answer == "[turn budget reached]"
+
+
+PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+
+@pytest.mark.parametrize("vision", [True, False])
+async def test_attached_image_follows_tool_result(session, vision):
+    code = (
+        "import base64; open('pixel.png', 'wb').write(base64.b64decode("
+        f"{PIXEL_PNG!r})); attach('pixel.png')"
+    )
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})]),
+            DummyMessage(content="a pixel"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        cwd=str(session.dir),
+        runtime_config=make_runtime_config(policy=ExecutionPolicy(vision=vision)),
+    )  # type: ignore
+
+    await engine.run("look")
+    await engine.aclose()
+
+    messages = client.calls[1]["messages"]
+    assert messages[-1 - vision]["role"] == "tool"
+    assert "[image 1: image/png, 1 KB]" in messages[-1 - vision]["content"]
+    if vision:
+        assert messages[-1]["role"] == "user"
+        assert messages[-1]["content"][1] == {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{PIXEL_PNG}"},
+        }
+    else:
+        assert "no image input" in messages[-1]["content"]
+
+
+def test_repl_keeps_at_most_four_images(session):
+    repl = IPythonREPL(cwd=str(session.dir), session=session)
+    repl.start()
+    try:
+        output = repl.execute(
+            "from IPython.display import display\n"
+            f"for _ in range(5): display({{'image/png': {PIXEL_PNG!r}}}, raw=True)"
+        )
+        images = repl.take_images()
+        refused = repl.execute("open('notes.txt', 'w').write('x'); attach('notes.txt')")
+    finally:
+        repl.shutdown()
+
+    assert len(images) == 4
+    assert "[image 4: image/png, 1 KB]" in output
+    assert "[image dropped: at most 4 images per call]" in output
+    assert "not a PNG, JPEG, WebP or GIF image" in refused
+    assert repl.take_images() == []

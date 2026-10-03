@@ -91,6 +91,10 @@ class ExecutionPolicy(_ConfigModel):
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
     allow_git: bool = False
+    vision: bool = False
+    """The model reads images: images shown by a tool call (``attach(path)``, image
+    display output, MCP image blocks) follow its result as one user message with image
+    parts. Off: the result keeps only a text pointer per image."""
 
     @model_validator(mode="after")
     def _validate_concurrency(self) -> Self:

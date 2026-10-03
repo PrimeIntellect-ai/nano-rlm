@@ -41,6 +41,7 @@ from rlm.compaction import (
     truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
+from rlm.images import image_part
 from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
 from rlm.prompt import build_system_prompt
@@ -220,6 +221,7 @@ class RLMEngine:
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
+        self.vision = config.policy.vision
 
         # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
@@ -707,6 +709,22 @@ class RLMEngine:
         self._quote_nesting_hints += 1
         self._supervisor.hint(self._invocation_id, "quote-nesting", text)
 
+    def _log_images(self, images: list[dict[str, str]]) -> None:
+        # Tool messages carry text only at most providers, so the images follow
+        # the tool result as a user message.
+        message, provenance = runtime_event(
+            "images",
+            f"The {len(images)} image(s) shown by the last tool call, in order.",
+        )
+        message["content"] = [
+            {"type": "text", "text": message["content"]},
+            *(image_part(image) for image in images),
+        ]
+        self.session.log(
+            {"type": "tool_images", "message": message, "provenance": provenance},
+            in_context=True,
+        )
+
     def _deliver_kernel_notices(self) -> None:
         if self._repl is None:
             return
@@ -1015,6 +1033,8 @@ class RLMEngine:
                 self._metrics.record(event)
 
             result = tool_result.content
+            if tool_result.images and not self.vision:
+                result += "\n[images are not shown: this model has no image input]"
 
             max_bytes = self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
             content = truncate_tool_output(result, max_bytes)
@@ -1036,6 +1056,8 @@ class RLMEngine:
                 call_id=tc.id,
                 context_content=content,
             )
+            if tool_result.images and self.vision:
+                self._log_images(tool_result.images)
             if tool_name == "ipython":
                 self._note_quote_nesting(result, str(tool_args.get("code") or ""))
             self._publish_agent_step(step_start)
@@ -1544,6 +1566,7 @@ class RLMEngine:
             allow_recursion=self.depth < self.max_depth,
             delegation_prompt=self.runtime_config.policy.delegation_prompt,
             allow_git=self.allow_git,
+            vision=self.vision,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
             task_instructions=Path(self.system_prompt_path).read_text()
