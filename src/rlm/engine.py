@@ -1145,6 +1145,12 @@ class RLMEngine:
         tokens = usage.total + estimated_tokens(extra_text)
         return tokens >= self.summarize_at_tokens
 
+    async def _model_attempt(self, **request: Any) -> Any:
+        if self._supervisor is None:
+            return await self.client.chat.completions.create(**request)
+        async with self._supervisor.inference_slot(self._invocation_id):
+            return await self.client.chat.completions.create(**request)
+
     async def _call_model(
         self,
         messages: list[dict],
@@ -1168,9 +1174,7 @@ class RLMEngine:
                 request["parallel_tool_calls"] = False
 
         try:
-            response = await call_with_retries(
-                self.client.chat.completions.create, **request
-            )
+            response = await call_with_retries(self._model_attempt, **request)
         except BaseException:
             self._semantic_edges.fail_request(request_id)
             raise

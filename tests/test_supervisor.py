@@ -14,7 +14,7 @@ from rlm.config import (
 )
 from rlm.engine import RLMEngine
 from rlm.session import Session
-from rlm.supervisor import SessionTreeSupervisor
+from rlm.supervisor import SessionTreeSupervisor, _InferencePool
 from rlm.types import RLMResult, TokenUsage
 
 
@@ -143,7 +143,7 @@ class _NestedEngine:
         self.session.close()
 
 
-async def test_parallel_children_respect_depth_capacity(tmp_path):
+async def test_child_lifetimes_do_not_consume_inference_slots(tmp_path):
     _FastEngine.state = _EngineState()
     session = Session(tmp_path / "root")
     supervisor = SessionTreeSupervisor(
@@ -167,7 +167,7 @@ async def test_parallel_children_respect_depth_capacity(tmp_path):
         session.close()
 
     assert [result.answer for result in results] == [f"child:{i}" for i in range(6)]
-    assert _FastEngine.state.peak == 2
+    assert _FastEngine.state.peak == 6
     assert supervisor.total_calls == 6
 
 
@@ -200,10 +200,7 @@ async def test_total_call_limit_is_atomic(tmp_path):
     assert len(results) == 2
 
 
-async def test_cancel_while_awaiting_capacity_closes_child_session(
-    tmp_path, monkeypatch
-):
-    """A child cancelled between session creation and engine start leaks nothing."""
+async def test_cancel_before_engine_start_closes_child_session(tmp_path, monkeypatch):
     from rlm import supervisor as supervisor_module
 
     created: list[Session] = []
@@ -225,16 +222,11 @@ async def test_cancel_while_awaiting_capacity_closes_child_session(
     scope = await supervisor.open_scope(supervisor.root_id)
     endpoint = supervisor.endpoint_for(supervisor.root_id)
     try:
-        semaphore = supervisor._semaphores[1]
-        await semaphore.acquire()
-        await semaphore.acquire()
         child = supervisor._spawn(
             supervisor._caller(endpoint.capability, scope), scope, "x", None, False
         )
         await supervisor._terminate(child)
         assert child.status == "cancelled"
-        semaphore.release()
-        semaphore.release()
     finally:
         await supervisor.close_scope(scope)
         await supervisor.aclose()
@@ -339,11 +331,12 @@ async def test_failed_child_returns_last_committed_request_to_parent(tmp_path):
     } in edges
 
 
-async def test_saturated_nested_calls_do_not_deadlock(tmp_path):
+@pytest.mark.parametrize("concurrency", [1, 2, 3])
+async def test_saturated_nested_calls_do_not_deadlock(tmp_path, concurrency):
     session = Session(tmp_path / "root")
     supervisor = SessionTreeSupervisor(
         root_session=session,
-        runtime_config=_config(max_depth=3, max_concurrent=3),
+        runtime_config=_config(max_depth=3, max_concurrent=concurrency),
         cwd=str(tmp_path),
         engine_factory=_NestedEngine,
     )
@@ -715,3 +708,197 @@ def test_leading_env_assignments(command, expected):
     from rlm.supervisor import _leading_env_assignments
 
     assert _leading_env_assignments(command) == expected
+
+
+async def test_admission_prioritizes_depth_then_fifo_without_preemption():
+    pool = _InferencePool(1)
+    await pool.acquire(3)
+    order = []
+
+    async def run(depth, name):
+        await pool.acquire(depth)
+        order.append(name)
+        pool.release()
+
+    tasks = []
+    for depth, name in [(3, "deep"), (1, "first"), (2, "middle"), (1, "second")]:
+        tasks.append(asyncio.create_task(run(depth, name)))
+        await asyncio.sleep(0)
+    assert order == []
+    pool.release()
+    await asyncio.gather(*tasks)
+    assert order == ["first", "second", "middle", "deep"]
+    assert pool.available == 1
+
+
+@pytest.mark.parametrize("granted", [False, True])
+async def test_cancelled_admission_returns_reserved_capacity(granted):
+    pool = _InferencePool(1)
+    await pool.acquire(1)
+    task = asyncio.create_task(pool.acquire(1))
+    await asyncio.sleep(0)
+    if granted:
+        pool.release()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    if not granted:
+        pool.release()
+    assert pool.available == 1
+    await asyncio.wait_for(pool.acquire(2), timeout=1)
+    pool.release()
+
+
+async def test_real_nested_kernels_share_one_slot(tmp_path):
+    clients = []
+
+    def factory(**kwargs):
+        if kwargs["runtime_config"].invocation.depth == 2:
+            return _FastEngine(**kwargs)
+        client = DummyClient(
+            [
+                DummyMessage(
+                    tool_calls=[
+                        DummyToolCall(
+                            "ipython",
+                            {
+                                "code": """
+a = await rlm.agent.spawn('a')
+b = await rlm.agent.spawn('b')
+results = await asyncio.gather(a.result(yield_after=10), b.result(yield_after=10))
+print([r.answer for r in results])
+"""
+                            },
+                        )
+                    ]
+                ),
+                DummyMessage(content="collected"),
+            ]
+        )
+        clients.append(client)
+        return RLMEngine(client=client, **kwargs)
+
+    session = Session(tmp_path / "root")
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=_config(max_depth=2, max_concurrent=1),
+        cwd=str(tmp_path),
+        engine_factory=factory,
+    )
+    await supervisor.start()
+    scope = await supervisor.open_scope(supervisor.root_id)
+    endpoint = supervisor.endpoint_for(supervisor.root_id)
+    try:
+        tasks = [
+            await _start_child(supervisor, endpoint.capability, scope, "parent")
+            for _ in range(2)
+        ]
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=20)
+        assert [result.answer for result in results] == ["collected", "collected"]
+        assert [tool_result(client).strip() for client in clients] == [
+            "['child:a', 'child:b']"
+        ] * 2
+        assert supervisor._inference.available == 1
+    finally:
+        await supervisor.close_scope(scope)
+        await supervisor.aclose()
+        session.close()
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
+async def test_inference_limit_includes_root_and_compaction_with_root_priority(
+    tmp_path, checkpoint
+):
+    state = _EngineState()
+    started = asyncio.Queue()
+    attempted = asyncio.Queue()
+    releases = {}
+
+    class BlockingClient(DummyClient):
+        def __init__(self, name):
+            super().__init__([DummyMessage(content="done")])
+            self.name = name
+            releases[name] = asyncio.Event()
+
+        async def create(self, **kwargs):
+            state.active += 1
+            state.peak = max(state.peak, state.active)
+            started.put_nowait(self.name)
+            try:
+                await releases[self.name].wait()
+                return await super().create(**kwargs)
+            finally:
+                state.active -= 1
+
+    class ObservedEngine(RLMEngine):
+        async def _model_attempt(self, **request):
+            attempted.put_nowait(self._invocation_id)
+            return await super()._model_attempt(**request)
+
+    def factory(**kwargs):
+        return ObservedEngine(client=BlockingClient(kwargs["invocation_id"]), **kwargs)
+
+    session = Session(tmp_path / "root")
+    config = _config(max_depth=2, max_concurrent=10).model_copy(
+        update={
+            "builtin_tools": (),
+            "policy": _config(max_concurrent=10).policy.model_copy(
+                update={"compaction": False}
+            ),
+        }
+    )
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        engine_factory=factory,
+    )
+    root = RLMEngine(
+        client=BlockingClient(supervisor.root_id),
+        session=session,
+        runtime_config=config,
+        supervisor=supervisor,
+        invocation_id=supervisor.root_id,
+    )
+    await supervisor.start()
+    scope = await supervisor.open_scope(supervisor.root_id)
+    endpoint = supervisor.endpoint_for(supervisor.root_id)
+    root_call = None
+    tasks = []
+    try:
+        tasks = [
+            await _start_child(supervisor, endpoint.capability, scope, "child")
+            for _ in range(12)
+        ]
+        for _ in range(12):
+            await asyncio.wait_for(attempted.get(), timeout=5)
+        first = [await asyncio.wait_for(started.get(), timeout=5) for _ in range(10)]
+        assert state.active == 10
+        assert started.empty()
+        root_call = asyncio.create_task(
+            root._call_model(
+                [{"role": "user", "content": "summary" if checkpoint else "task"}],
+                checkpoint=checkpoint,
+            )
+        )
+        await asyncio.sleep(0)
+        assert len(supervisor._inference._waiters) == 3
+        releases[first[0]].set()
+        assert await asyncio.wait_for(started.get(), timeout=5) == supervisor.root_id
+        for release in releases.values():
+            release.set()
+        await asyncio.wait_for(asyncio.gather(*tasks, root_call), timeout=5)
+        assert state.peak == 10
+        assert state.active == 0
+        assert supervisor._inference.available == 10
+        assert supervisor.total_turns == (12 if checkpoint else 13)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if root_call is not None and not root_call.done():
+            root_call.cancel()
+            await asyncio.gather(root_call, return_exceptions=True)
+        await supervisor.close_scope(scope)
+        await supervisor.aclose()
+        session.close()

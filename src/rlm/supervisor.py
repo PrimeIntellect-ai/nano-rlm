@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
+import itertools
 import json
 import os
 import re
@@ -12,7 +14,8 @@ import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from functools import partial
 from pathlib import Path
@@ -143,18 +146,37 @@ class _Scope:
     request_id: str | None = None
 
 
-def depth_capacities(max_depth: int, limit: int, root_depth: int = 0) -> dict[int, int]:
-    """Reserve capacity per descendant depth so nested calls cannot deadlock."""
-    levels = max_depth - root_depth
-    if levels <= 0:
-        return {}
-    if limit < levels:
-        raise ValueError("subagent concurrency must cover every recursive depth")
-    per_level, extra = divmod(limit, levels)
-    return {
-        depth: per_level + (1 if offset < extra else 0)
-        for offset, depth in enumerate(range(root_depth + 1, max_depth + 1))
-    }
+class _InferencePool:
+    """Inference permits ordered by depth then arrival; requests are not preempted."""
+
+    def __init__(self, capacity: int) -> None:
+        self.available = capacity
+        self._tickets = itertools.count()
+        self._waiters: list[tuple[int, int, asyncio.Future[None]]] = []
+
+    async def acquire(self, depth: int) -> None:
+        waiter = asyncio.get_running_loop().create_future()
+        heapq.heappush(self._waiters, (depth, next(self._tickets), waiter))
+        self._drain()
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            if not waiter.cancelled():
+                self.release()  # Admission was granted before cancellation arrived.
+            else:
+                self._drain()
+            raise
+
+    def release(self) -> None:
+        self.available += 1
+        self._drain()
+
+    def _drain(self) -> None:
+        while self._waiters and (self.available or self._waiters[0][2].cancelled()):
+            _, _, waiter = heapq.heappop(self._waiters)
+            if not waiter.cancelled():
+                self.available -= 1
+                waiter.set_result(None)
 
 
 class SessionTreeSupervisor:
@@ -243,14 +265,16 @@ class SessionTreeSupervisor:
         self._parents = {root_id: None}
         self._tool_stats: dict[str, ProgrammaticToolCallStats] = {}
         self._capabilities = {root.capability: root_id}
-        capacities = depth_capacities(
-            runtime_config.policy.max_depth,
-            runtime_config.policy.max_concurrent_subagents,
-            runtime_config.invocation.depth,
-        )
-        self._semaphores = {
-            depth: asyncio.Semaphore(capacity) for depth, capacity in capacities.items()
-        }
+        self._inference = _InferencePool(runtime_config.policy.max_concurrent_subagents)
+
+    @asynccontextmanager
+    async def inference_slot(self, invocation_id: str) -> AsyncIterator[None]:
+        agent = self._invocations[invocation_id]
+        await self._inference.acquire(agent.runtime_config.invocation.depth)
+        try:
+            yield
+        finally:
+            self._inference.release()
 
     @property
     def total_calls(self) -> int:
@@ -1195,41 +1219,40 @@ class SessionTreeSupervisor:
 
     async def _run_child(self, child: _Invocation) -> None:
         try:
-            async with self._semaphores[child.runtime_config.invocation.depth]:
-                child.status = "running"
-                factory = self._engine_factory
-                if factory is None:
-                    from rlm.engine import RLMEngine
+            child.status = "running"
+            factory = self._engine_factory
+            if factory is None:
+                from rlm.engine import RLMEngine
 
-                    factory = RLMEngine
-                if child.engine is None:
-                    child.engine = factory(
-                        cwd=child.cwd,
-                        session=child.session,
-                        mcp_servers=child.mcp_servers,
-                        runtime_config=child.runtime_config,
-                        supervisor=self,
-                        invocation_id=child.id,
-                    )
-                    child.result = await child.engine.prompt(child.task)
-                else:
-                    instructions = self.take_instructions(child.id, include_queue=True)
-                    prompt = (
-                        "\n\n".join(event["content"] for event in instructions)
-                        if instructions
-                        else "Supervisor: new inbox events are available."
-                    )
-                    child.result = await child.engine.prompt(
-                        prompt,
-                        message_type="parent_message"
-                        if instructions
-                        else "supervisor_notification",
-                        event_ids=[e["id"] for e in instructions],
-                    )
-                child.result_request_id = self.semantic_edges.last_request_id(child.id)
-                child.status = "idle" if child.persistent else "completed"
-                if child.status == "idle":
-                    child.session.write_meta(**self._info(child))
+                factory = RLMEngine
+            if child.engine is None:
+                child.engine = factory(
+                    cwd=child.cwd,
+                    session=child.session,
+                    mcp_servers=child.mcp_servers,
+                    runtime_config=child.runtime_config,
+                    supervisor=self,
+                    invocation_id=child.id,
+                )
+                child.result = await child.engine.prompt(child.task)
+            else:
+                instructions = self.take_instructions(child.id, include_queue=True)
+                prompt = (
+                    "\n\n".join(event["content"] for event in instructions)
+                    if instructions
+                    else "Supervisor: new inbox events are available."
+                )
+                child.result = await child.engine.prompt(
+                    prompt,
+                    message_type="parent_message"
+                    if instructions
+                    else "supervisor_notification",
+                    event_ids=[e["id"] for e in instructions],
+                )
+            child.result_request_id = self.semantic_edges.last_request_id(child.id)
+            child.status = "idle" if child.persistent else "completed"
+            if child.status == "idle":
+                child.session.write_meta(**self._info(child))
         except asyncio.CancelledError:
             child.status = "cancelled"
         except BaseException as exc:

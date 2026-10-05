@@ -7,8 +7,7 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from typing_extensions import Self
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
 
@@ -87,16 +86,13 @@ class ExecutionPolicy(_ConfigModel):
     max_compaction_attempts: int = Field(default=5, gt=0)
     """Summary-generation attempts within one compaction cycle."""
     max_concurrent_subagents: int = Field(default=4, gt=0)
+    """Concurrent inference calls across the tree, including root and compaction calls.
+    Queued calls prioritize shallower agents, FIFO within each depth. Tools run freely.
+    """
     max_subagent_calls: int | None = Field(default=None, gt=0)
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
     allow_git: bool = False
-
-    @model_validator(mode="after")
-    def _validate_concurrency(self) -> Self:
-        if self.max_concurrent_subagents < self.max_depth:
-            raise ValueError("max_concurrent_subagents must be at least max_depth")
-        return self
 
 
 class RuntimeConfig(_ConfigModel):
