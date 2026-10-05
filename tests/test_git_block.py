@@ -128,6 +128,10 @@ def test_refusal_message_names_restricted_option():
 # --- find_blocked_in_ipython ---
 
 
+def test_ipython_null_bytes_left_to_exec():
+    assert find_blocked_in_ipython("x = 1\x00") is None
+
+
 def test_ipython_shell_escape_git_status_allowed():
     assert find_blocked_in_ipython("!git status") is None
 
