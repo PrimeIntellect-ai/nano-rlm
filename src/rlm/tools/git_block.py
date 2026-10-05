@@ -442,13 +442,14 @@ def find_blocked_python(code: str, *, allow_git: bool | None = None) -> str | No
     else ``None``. Honors the resolved git policy. Ipython-only syntax
     (``!cmd``, ``%magic``, ``obj?``) is stripped before parsing so
     cells mixing ipython and Python still get scanned. Returns ``None``
-    on ``SyntaxError`` so the normal exec path surfaces the parse error.
+    on unparseable source (``SyntaxError``, or ``ValueError`` for null bytes
+    before Python 3.12) so the normal exec path surfaces the error.
     """
     if _git_allowed(allow_git):
         return None
     try:
         tree = ast.parse(_strip_ipython_only(code))
-    except SyntaxError:
+    except (SyntaxError, ValueError):
         return None
     finder = _GitCallFinder(allow_git)
     finder.visit(tree)
