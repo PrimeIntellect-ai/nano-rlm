@@ -16,10 +16,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from openai import APIStatusError, AsyncOpenAI
-
 from rlm.client import (
+    MODEL_STATUS_ERRORS,
+    ModelClient,
     call_with_retries,
+    create_completion,
     extract_usage,
     make_client,
     model_call_headers,
@@ -95,8 +96,13 @@ def _new_tokens(response, usage: TokenUsage) -> int:
     """One call's contribution to the tree budget: completion + uncached prompt tokens.
     The cached context prefix re-billed on every call is not new work; a provider that
     reports no cache detail counts the full prompt (conservative)."""
-    details = getattr(getattr(response, "usage", None), "prompt_tokens_details", None)
-    cached = getattr(details, "cached_tokens", 0) or 0
+    raw_usage = getattr(response, "usage", None)
+    details = getattr(raw_usage, "prompt_tokens_details", None)
+    cached = (
+        getattr(details, "cached_tokens", None)
+        or getattr(raw_usage, "cache_read_input_tokens", 0)
+        or 0
+    )
     return max(usage.prompt_tokens - cached, 0) + usage.completion_tokens
 
 
@@ -182,7 +188,7 @@ class RLMEngine:
         *,
         cwd: str | None = None,
         session: Session | None = None,
-        client: AsyncOpenAI | None = None,
+        client: ModelClient | None = None,
         mcp_servers: dict[str, MCPServer] | None = None,
         runtime_config: RuntimeConfig | None = None,
         supervisor: SessionTreeSupervisor | None = None,
@@ -1169,7 +1175,10 @@ class RLMEngine:
 
         try:
             response = await call_with_retries(
-                self.client.chat.completions.create, **request
+                create_completion,
+                client=self.client,
+                provider=self.runtime_config.provider,
+                **request,
             )
         except BaseException:
             self._semantic_edges.fail_request(request_id)
@@ -1198,7 +1207,7 @@ class RLMEngine:
         """Complete one turn, with at most one compact-and-retry cycle."""
         try:
             response, usage = await self._call_model(messages)
-        except APIStatusError as error:
+        except MODEL_STATUS_ERRORS as error:
             # Reactive compaction needs no discovered threshold: the overflow
             # itself is the signal. The checkpoint fallback chain handles a
             # summary request that is itself too large.
@@ -1236,7 +1245,7 @@ class RLMEngine:
         await self._compact_branch(messages, turn)
         try:
             return await self._call_model(self.session.messages)
-        except APIStatusError as error:
+        except MODEL_STATUS_ERRORS as error:
             # The rebuilt conversation is sized to fit, so this is out of moves.
             if is_context_overflow(error):
                 raise CompactionFailed(
@@ -1315,7 +1324,7 @@ class RLMEngine:
                         checkpoint=True,
                         compaction_id=compaction.compaction_id,
                     )
-                except APIStatusError as e:
+                except MODEL_STATUS_ERRORS as e:
                     if not is_context_overflow(e):
                         raise
                     if not last_attempt:

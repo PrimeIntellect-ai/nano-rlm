@@ -2,11 +2,14 @@
 
 import asyncio
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
+import anthropic
 import certifi
 from openai import (
     APIConnectionError,
     APIResponseValidationError,
+    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     DefaultAsyncHttpxClient,
@@ -17,6 +20,7 @@ from openai import (
 from pydantic import ValidationError
 
 from rlm.config import ProviderConfig
+from rlm.anthropic import create_anthropic_completion
 from rlm.semantic import (
     ACP_EXTENSION_HEADER_NAMES,
     MODEL_REQUEST_ID_HEADER,
@@ -25,6 +29,8 @@ from rlm.types import TokenUsage
 
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 RETRY_COUNT_HEADER = "x-stainless-retry-count"
+ModelClient = AsyncOpenAI | anthropic.AsyncAnthropic
+MODEL_STATUS_ERRORS = (APIStatusError, anthropic.APIStatusError)
 
 _RETRYABLE: tuple[type[BaseException], ...] = (
     APIConnectionError,
@@ -35,6 +41,12 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
     APIResponseValidationError,
     ValidationError,
     ConnectionResetError,
+    anthropic.APIConnectionError,
+    anthropic.APITimeoutError,
+    anthropic.InternalServerError,
+    anthropic.NotFoundError,
+    anthropic.RateLimitError,
+    anthropic.APIResponseValidationError,
 )
 
 # Widely-spaced delays (seconds) between attempts; total ~5 min wall budget.
@@ -45,8 +57,8 @@ class ModelTransportError(Exception):
     """A model connection failed after its transport retries were exhausted."""
 
 
-def make_client(provider: ProviderConfig) -> AsyncOpenAI:
-    """Create an AsyncOpenAI client from an explicit provider configuration."""
+def make_client(provider: ProviderConfig) -> ModelClient:
+    """Create a provider client from an explicit configuration."""
     reserved = sorted(
         name
         for name in provider.headers
@@ -59,6 +71,21 @@ def make_client(provider: ProviderConfig) -> AsyncOpenAI:
     )
     if reserved:
         raise ValueError(f"provider headers contain reserved names: {reserved}")
+    if provider.api_format == "anthropic" or (
+        provider.api_format == "auto"
+        and urlsplit(provider.base_url or "").hostname == "api.anthropic.com"
+    ):
+        base_url = provider.base_url or "https://api.anthropic.com"
+        # The Anthropic SDK includes /v1 in each resource path.
+        if base_url and base_url.rstrip("/").endswith("/v1"):
+            base_url = base_url.rstrip("/")[:-3]
+        return anthropic.AsyncAnthropic(
+            base_url=base_url,
+            api_key=provider.api_key,
+            max_retries=provider.max_retries,
+            default_headers=provider.headers,
+            http_client=anthropic.DefaultAsyncHttpxClient(verify=certifi.where()),
+        )
     return AsyncOpenAI(
         base_url=provider.base_url,
         api_key=provider.api_key,
@@ -75,6 +102,15 @@ def model_call_headers(request_id: str) -> dict[str, str]:
         IDEMPOTENCY_KEY_HEADER: request_id,
         MODEL_REQUEST_ID_HEADER: request_id,
     }
+
+
+async def create_completion(
+    *, client: ModelClient, provider: ProviderConfig, **request: Any
+) -> Any:
+    """Complete one model request using the engine's chat-message representation."""
+    if isinstance(client, anthropic.AsyncAnthropic):
+        return await create_anthropic_completion(client, provider=provider, **request)
+    return await client.chat.completions.create(**request)
 
 
 async def call_with_retries(
@@ -98,7 +134,14 @@ async def call_with_retries(
             return await func(**attempt_kwargs)
         except _RETRYABLE as error:
             if attempt == len(_RETRY_DELAYS):
-                if isinstance(error, (APIConnectionError, ConnectionResetError)):
+                if isinstance(
+                    error,
+                    (
+                        APIConnectionError,
+                        anthropic.APIConnectionError,
+                        ConnectionResetError,
+                    ),
+                ):
                     raise ModelTransportError(
                         f"{type(error).__name__}: {error}"
                     ) from error
