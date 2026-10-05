@@ -31,7 +31,7 @@ def runtime_event(kind: str, text: str, **attrs: object) -> tuple[dict, dict]:
     """A user-role message for a runtime event, plus its provenance record.
 
     kind: notice (inbox count and hints), recovery (kernel restart), nudge (empty or
-    plan-like reply), compaction (context summary)."""
+    plan-like reply), compaction (context summary), context (budget nudge in CLM mode)."""
     provenance = {
         "source": "runtime",
         "kind": kind,

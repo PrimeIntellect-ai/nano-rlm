@@ -40,6 +40,7 @@ from rlm.compaction import (
     truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
+from rlm.context_file import ContextFile
 from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
 from rlm.prompt import build_system_prompt
@@ -213,6 +214,8 @@ class RLMEngine:
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
+        self._context_file: ContextFile | None = None
+        self._pinned_requests: list[dict] = []
 
         # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
@@ -462,6 +465,8 @@ class RLMEngine:
                 },
                 in_context=True,
             )
+            if message_type in ("user", "parent_message"):
+                self._pinned_requests.append(message)
             self._last_good = len(self.session.messages)
             result = await self._run_loop()
         except BaseException as exc:
@@ -521,10 +526,13 @@ class RLMEngine:
         )
         self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
 
-        if self.compaction and self.summarize_at_tokens is None:
+        clm = self.runtime_config.policy.context_mode == "clm"
+        if (self.compaction or clm) and self.summarize_at_tokens is None:
             self.summarize_at_tokens = await discover_threshold(self.client, self.model)
 
         self._ensure_session()
+        if clm:
+            self._context_file = ContextFile(self.session.dir, self.summarize_at_tokens)
 
         self.session.write_meta(
             session_id=self.session.dir.name,
@@ -756,6 +764,33 @@ class RLMEngine:
             self._apply_steering()
             self._deliver_kernel_notices()
             self._deliver_supervisor_input()
+            if self._context_file is not None:
+                action, notice = self._context_file.evaluate(self.session.messages)
+                if action == "stop":
+                    self._metrics.stop_reason = "context_budget"
+                    final_text = (
+                        _last_assistant_text(self.session.messages[salvage_from:])
+                        or "[context budget reached]"
+                    )
+                    break
+                if action == "rollback":
+                    self.session.replace_context(
+                        self._context_file.rollback(
+                            self.session.messages, self._pinned_requests
+                        ),
+                        reason="context_rollback",
+                    )
+                    self._last_good = len(self.session.messages)
+                elif notice:
+                    message, provenance = runtime_event("context", notice)
+                    self.session.log(
+                        {
+                            "type": "context_notice",
+                            "message": message,
+                            "provenance": provenance,
+                        },
+                        in_context=True,
+                    )
             messages = self.session.messages
             self._turn = turn + 1
             try:
@@ -886,6 +921,7 @@ class RLMEngine:
             tool_args = parsed_args[0]
             t0 = time.time()
             tool = get_builtin_tool(tool_name, self.builtin_tools)
+            mirrored: list[dict] | None = None
             if tool_name == "wait" and self._supervisor is not None:
                 timeout = tool_args.get("timeout", 300)
                 if (
@@ -908,6 +944,9 @@ class RLMEngine:
             elif tool is None:
                 tool_result = ToolOutcome(content=f"Error: unknown tool '{tool_name}'")
             else:
+                if self._context_file is not None:
+                    mirrored = self.session.messages
+                    self._context_file.write(mirrored[:-1], self._pinned_requests)
                 repl = self._repl
                 scope_id = None
                 if (
@@ -975,6 +1014,10 @@ class RLMEngine:
             content = truncate_tool_output(
                 result, self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
             )
+            if mirrored is not None:
+                context_notes = self._sync_context_file(mirrored, content)
+                result += context_notes
+                content += context_notes
             self.session.log_tool_result(
                 turn,
                 tool_name,
@@ -1133,7 +1176,12 @@ class RLMEngine:
     def _should_compact(
         self, messages: list[dict], usage: TokenUsage, extra_text: str = ""
     ) -> bool:
-        if self.summarize_at_tokens is None or not self._can_compact():
+        # In CLM mode the model manages its own context; overflow is a rollback.
+        if (
+            self._context_file is not None
+            or self.summarize_at_tokens is None
+            or not self._can_compact()
+        ):
             return False
         # A spent tree cap stops the session next iteration: don't burn a model
         # call summarizing a conversation that is about to end. (The reactive
@@ -1190,6 +1238,8 @@ class RLMEngine:
         if not checkpoint:
             self._last_prompt_tokens = usage.prompt_tokens
             self._last_call_id = request_id
+            if self._context_file is not None:
+                self._context_file.calibrate(usage.prompt_tokens, messages)
         return response, usage
 
     async def _complete(
@@ -1490,7 +1540,21 @@ class RLMEngine:
             agent_info=self._supervisor.agent_context(self._invocation_id)
             if self._supervisor
             else None,
+            context_prompt=self._context_file.prompt() if self._context_file else None,
         )
+
+    def _sync_context_file(self, mirrored: list[dict], content: str) -> str:
+        """Apply the model's edit of the mirror file, if any, and return the edit
+        receipt plus the context readout for the tool result."""
+        context_file = self._context_file
+        edit = context_file.sync(mirrored[:-1])
+        if edit.messages is not None:
+            self.session.replace_context([*edit.messages, mirrored[-1]], reason="edit")
+            self._last_good = len(self.session.messages)
+        tokens = context_file.count(
+            [*self.session.messages, {"role": "tool", "content": content + edit.note}]
+        )
+        return edit.note + context_file.readout(tokens)
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:
         return ToolContext(
