@@ -101,6 +101,15 @@ environment, search credential). Prompt configuration is role-aware: optional
 for sub-agents, each falling back to the next-more-general tier. Recursive children inherit the parent's configuration
 in-memory (`model_copy`); nothing is re-read from the process environment.
 
+`policy.max_concurrent_subagents` caps concurrent model calls across the entire
+tree, including the root and compaction requests. Queued calls closer to the root
+have priority; calls at the same depth are admitted FIFO. In-flight calls are not
+preempted, so continuous shallow work can delay deeper requests. Shell/tool
+execution, child waits, and outer transport retry backoff do not hold inference
+slots; SDK-internal retries remain within a slot. `policy.max_depth` independently
+limits recursion. This limit is per tree; a serving-wide cap across multiple trees
+belongs in the eval runner or inference gateway.
+
 `policy.delegation_prompt` (default off) appends the delegation guidance — when to spawn children, how to brief, watch, collect and reconcile them — for every agent that can still delegate.
 
 `system_prompt_path` supplies task instructions in place of the default task role.
