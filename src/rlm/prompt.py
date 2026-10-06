@@ -116,6 +116,11 @@ choose when to read them. Agents share a
 filesystem as trusted collaborators; handles enforce orchestration ownership, not
 filesystem isolation.
 
+Each child starts in its parent's configured working directory. Spawning does not create
+an isolated checkout or switch the child into an assigned worktree. Coordinate ownership
+of writes to avoid overwriting another agent's work. For an assigned worktree or scratch
+directory, use explicit paths or set the working directory for Python and shell operations.
+
 A kernel recovery notice means Python variables/imports/in-kernel tasks were lost.
 Reconstruct them and recover handles through the registries below. Never blindly repeat
 an interrupted cell: file writes and accepted spawn/send/job requests may already have
