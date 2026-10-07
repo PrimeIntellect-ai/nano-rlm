@@ -263,3 +263,110 @@ async def test_cancel_interrupts_pending_scope_setup(session, monkeypatch):
         repl._interrupt_requested.set()
         await pending
         await asyncio.to_thread(repl.shutdown)
+
+
+async def test_remote_execution_preserves_state_and_brokers_children(session, tmp_path):
+    import sys
+
+    config = _config(max_depth=1).model_copy(
+        update={
+            "execution_command": (sys.executable, "-m", "rlm.execution"),
+            "skills": ("bash", "edit"),
+            "builtin_tools": ("ipython",),
+            "policy": _config(max_depth=1).policy.model_copy(
+                update={"compaction": False}
+            ),
+        }
+    )
+
+    def factory(**kwargs):
+        return RLMEngine(
+            client=DummyClient(
+                [
+                    _tool(
+                        "from pathlib import Path; Path('child.txt').write_text('child'); print('CHILD')"
+                    ),
+                    DummyMessage(content="child complete"),
+                ]
+            ),
+            **kwargs,
+        )
+
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        engine_factory=factory,
+    )
+    client = DummyClient(
+        [
+            _tool("value = 41; print(await bash('pwd'))"),
+            _tool("""
+from pathlib import Path
+assert value == 41
+child = await rlm.agent.spawn('write child.txt')
+await child.wait(timeout=30)
+assert (await child.result()).answer == 'child complete'
+assert 'write child.txt' in (await child.history()).user_messages()[0]['content']
+assert Path('child.txt').read_text() == 'child'
+h = await rlm.history()
+assert h.user_messages()[0]['content'] == 'run remotely'
+try:
+    await rlm.shell.run('touch escaped')
+except RuntimeError as e:
+    assert 'split execution' in str(e)
+else:
+    raise AssertionError('host shell must be unavailable')
+print('REMOTE_OK')
+"""),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        supervisor=supervisor,
+    )
+    try:
+        await engine.prompt("run remotely")
+        logs = (session.dir / "messages.jsonl").read_text()
+        assert any(
+            record.get("type") == "tool_result"
+            and "REMOTE_OK" in record.get("content", "")
+            for record in map(json.loads, logs.splitlines())
+        )
+        assert not (tmp_path / "escaped").exists()
+    finally:
+        await engine.aclose()
+        await supervisor.aclose()
+
+
+async def test_remote_execution_interrupt_and_recovery(session, tmp_path):
+    import sys
+    from rlm.execution import RemoteREPL
+
+    repl = RemoteREPL(
+        command=(sys.executable, "-m", "rlm.execution"),
+        cwd=str(tmp_path),
+        session=session,
+    )
+    try:
+        await repl.run_in_thread(repl.start)
+        task = asyncio.create_task(
+            repl.run_in_thread(repl.execute, "import time; time.sleep(60)", 120)
+        )
+        await asyncio.sleep(1)
+        await asyncio.to_thread(repl.interrupt)
+        await asyncio.wait_for(task, 10)
+        repl.finish_interrupt()
+        result = await repl.run_in_thread(repl.execute, "print('STILL_ALIVE')", 10)
+        assert "STILL_ALIVE" in result
+        await repl.run_in_thread(repl.execute, "import os; os._exit(7)", 10)
+        assert repl.take_recovery_notices()
+        assert "RECOVERED" in await repl.run_in_thread(
+            repl.execute, "print('RECOVERED')", 10
+        )
+    finally:
+        await asyncio.to_thread(repl.shutdown)

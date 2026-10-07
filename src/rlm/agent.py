@@ -48,7 +48,10 @@ class AgentHandle:
 
     async def history(self) -> History:
         """Read a fresh snapshot of this agent's local conversation history."""
-        return await history(session_dir=self.session_dir)
+        if not broker.is_active():
+            return await history(session_dir=self.session_dir)
+        payload = await broker.agent_request("agent.history", agent_id=self.id)
+        return History.from_events(self.session_dir, payload)
 
     async def result(self, *, yield_after: float = 300) -> AgentResult:
         """Wait up to yield_after seconds for the child to finish, then return its latest state.
