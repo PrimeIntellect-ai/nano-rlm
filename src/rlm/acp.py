@@ -75,6 +75,8 @@ class _RuntimeMetadata(_ContractModel):
     leaf_append_to_system_prompt: str | None = None
     skills: list[Annotated[str, Field(min_length=1)]]
     builtin_tools: list[Annotated[str, Field(min_length=1)]] | None = None
+    execution_cwd: str | None = None
+    execution_command: list[Annotated[str, Field(min_length=1)]] | None = None
     kernel_env: dict[str, str]
     search_api_key: str | None
 
@@ -215,6 +217,10 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
                 else None
             ),
             kernel_env=tuple(payload.kernel_env.items()),
+            execution_cwd=payload.execution_cwd,
+            execution_command=tuple(payload.execution_command)
+            if payload.execution_command is not None
+            else None,
             search_api_key=payload.search_api_key,
         ),
         payload.session_id,

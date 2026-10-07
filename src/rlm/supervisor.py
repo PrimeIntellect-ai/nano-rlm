@@ -1120,6 +1120,10 @@ class SessionTreeSupervisor:
                     ancestor = self._parents[ancestor]
             return agents
         child = self._child(parent, request.get("name_or_id", request.get("agent_id")))
+        if op == "agent.history":
+            from rlm.history import read_records
+
+            return list(read_records(child.session.dir / "messages.jsonl"))
         if op in {"agent.send", "agent.steer"}:
             if child.status in {"completed", "failed", "cancelled"}:
                 raise RuntimeError("agent is no longer active")

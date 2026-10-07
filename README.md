@@ -516,3 +516,28 @@ stops with a failure event when the inbox event limit is reached. There are no
 model-authored callbacks, event selectors, or output predicates.
 
 Activity subscriptions become `completed` after their target permanently terminates, flushing pending activity and releasing their active slot. Watches of idle persistent agents remain active. Watching an already-finished target returns a completed subscription.
+
+### Separate tool execution
+
+The ACP runtime metadata accepts `execution_command` (a trusted argv launching
+`python -m rlm.execution`) and `execution_cwd` (the task workspace). For example,
+an orchestrator can start the worker with `docker exec -i <task-container>
+/path/to/python -m rlm.execution`. Both processes must have the same nano-rlm
+version installed. The orchestrator owns container provisioning and teardown.
+
+The engine, model credentials, supervisor, and authoritative conversation logs
+remain in the harness process. Persistent IPython kernels and builtin skills run
+in the worker environment. Recursive agents inherit the execution destination,
+keep separate kernels, and share the task workspace. Communication and recursive
+callbacks use worker stdio, so a task container can have networking disabled.
+The command itself defines the isolation boundary; launching a local Python
+worker alone provides process separation, not filesystem isolation.
+
+Split execution supports the `ipython` builtin and its skills. Native bash/edit/fetch
+tools are rejected; use their builtin skills instead. Supervisor shell jobs
+(`rlm.shell`) and filesystem watchers (`rlm.watch.path`) return explicit errors in
+this mode. `await child.history()` uses the supervisor; the current agent's local
+history is a snapshot refreshed before each cell. Worker frames, including history
+snapshots and outputs, are limited to 16 MiB. Kernel recovery preserves the existing
+no-replay behavior. Worker disconnects fail the session; the orchestrator must stop
+remaining task processes when the rollout ends.
