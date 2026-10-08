@@ -30,6 +30,7 @@ from rlm.compaction import (
     RESERVE_TOKENS,
     hollow_middle,
     TOOL_OUTPUT_MAX_BYTES,
+    kept_spans,
     CompactionFailed,
     REPL_NOTE,
     SUMMARY_FRAMING,
@@ -246,6 +247,11 @@ class RLMEngine:
             parent_session_id=parent_session_id,
             spawned_by_request_id=spawned_by_request_id,
         )
+        self._cut_tool_outputs: list[dict] = (
+            supervisor.cut_tool_outputs if supervisor is not None else []
+        )
+        """Tool results cut for the model, in full, across the session tree until
+        `take_cut_tool_outputs` hands them to the ACP client."""
         self._owns_supervisor = False
         self._total_usage = TokenUsage()
         # Engine-local tree-cap accounting. No supervisor exists when nothing needs
@@ -560,6 +566,7 @@ class RLMEngine:
                     mcp_servers=self.mcp_servers,
                     root_invocation_id=self._invocation_id,
                     semantic_edges=self._semantic_edges,
+                    cut_tool_outputs=self._cut_tool_outputs,
                 )
                 self._owns_supervisor = True
             try:
@@ -1009,9 +1016,18 @@ class RLMEngine:
 
             result = tool_result.content
 
-            content = truncate_tool_output(
-                result, self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
-            )
+            max_bytes = self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
+            content = truncate_tool_output(result, max_bytes)
+            if content != result:
+                head, tail = kept_spans(result, max_bytes)
+                self._cut_tool_outputs.append(
+                    {
+                        "tool_call_id": tc.id,
+                        "content": result,
+                        "head_chars": head,
+                        "tail_chars": tail,
+                    }
+                )
             self.session.log_tool_result(
                 turn,
                 tool_name,
@@ -1459,6 +1475,13 @@ class RLMEngine:
         )
         self._branch_start_turn = turn + 1
         self._metrics.turns_since_last_compaction = 0
+
+    def take_cut_tool_outputs(self) -> list[dict]:
+        """The session tree's tool results cut for the model since the last call, in
+        full, with the characters the model saw at each end."""
+        taken = list(self._cut_tool_outputs)
+        self._cut_tool_outputs.clear()
+        return taken
 
     def execution_snapshot(self) -> dict:
         """Return a credential-free snapshot of cumulative execution state."""

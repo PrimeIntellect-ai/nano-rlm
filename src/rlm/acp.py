@@ -56,6 +56,9 @@ CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
 ACP_SEMANTIC_EDGES_METADATA_KEY = "ai.prime.acp/semantic-edges-v1"
+CUT_TOOL_OUTPUTS_METADATA_KEY = "ai.prime.rlm/cut-tool-outputs-v1"
+"""Tool results the model saw cut, in full: `[{tool_call_id, content, head_chars,
+tail_chars}]`, each once, in the first response after the cut."""
 
 
 class _ContractModel(BaseModel):
@@ -167,12 +170,15 @@ def _session_metadata(state: _SessionState) -> dict[str, Any]:
     }
     semantic_edges = _SemanticEdgeSet.model_validate(snapshot.pop("semantic_edges"))
     validated = _SessionSnapshot.model_validate(snapshot)
-    return {
+    metadata = {
         SESSION_METADATA_KEY: validated.model_dump(mode="json", exclude_none=True),
         ACP_SEMANTIC_EDGES_METADATA_KEY: semantic_edges.model_dump(
             mode="json", exclude_none=True
         ),
     }
+    if cut := state.engine.take_cut_tool_outputs():
+        metadata[CUT_TOOL_OUTPUTS_METADATA_KEY] = cut
+    return metadata
 
 
 def _validation_fields(error: ValidationError) -> list[str]:
