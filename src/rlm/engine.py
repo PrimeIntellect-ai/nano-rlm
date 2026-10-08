@@ -166,6 +166,10 @@ _PLAN_OPENER_RE = re.compile(
 )
 
 
+# Job ids a tool result shows handed back while still running.
+_JOB_STARTED_RE = re.compile(r"job ([0-9a-f]{32})(?: is still running|;)")
+
+
 def _looks_like_plan(text: str) -> bool:
     """A short reply that opens like a next step, or any reply that ends in a colon."""
     stripped = text.strip()
@@ -190,6 +194,7 @@ class RLMEngine:
         semantic_edges: SemanticEdgeTracker | None = None,
         parent_session_id: str | None = None,
         spawned_by_request_id: str | None = None,
+        seed_messages: list[dict] | None = None,
     ):
         if runtime_config is None:
             raise ValueError(
@@ -198,6 +203,7 @@ class RLMEngine:
                 "the ACP runtime contract; children inherit in-memory)."
             )
         self.runtime_config = runtime_config
+        self._seed_messages = seed_messages
         config = self.runtime_config
         self.model = config.model
         self.cwd = cwd or os.getcwd()
@@ -611,6 +617,8 @@ class RLMEngine:
                 },
                 in_context=True,
             )
+            if self._seed_messages:
+                self._resume(self._seed_messages)
             self._last_good = len(self.session.messages)
             self._started = True
         except BaseException:
@@ -621,6 +629,35 @@ class RLMEngine:
                 self._supervisor = None
                 self._owns_supervisor = False
             raise
+
+    def _resume(self, seed: list[dict]) -> None:
+        """Continue the saved conversation `seed` in this fresh process, and say what
+        did not carry over."""
+        for message in seed:
+            self.session.log({"type": "seed", "message": message}, in_context=True)
+        jobs = sorted(
+            {
+                job
+                for message in seed
+                if message.get("role") == "tool"
+                for job in _JOB_STARTED_RE.findall(str(message.get("content") or ""))
+            }
+        )
+        notice = (
+            "This session was resumed in a new process from its saved conversation "
+            "above. Kernel variables, imports and objects are gone; no shell job, "
+            "sub-agent, watch or subscription from before is running."
+        )
+        if jobs:
+            notice += (
+                " Jobs the conversation shows started (any still running then were "
+                "stopped, and their handles no longer work): " + ", ".join(jobs) + "."
+            )
+        message, provenance = runtime_event("recovery", notice)
+        self.session.log(
+            {"type": "resume", "message": message, "provenance": provenance},
+            in_context=True,
+        )
 
     def _publish_agent_step(self, start: int) -> None:
         if self._supervisor is not None:
