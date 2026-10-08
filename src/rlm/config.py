@@ -111,6 +111,11 @@ class RuntimeConfig(_ConfigModel):
     """Builtin tool set for every engine in the tree; None = the registry default
     (`ipython` alone). Validated against the registry when the engine starts."""
     kernel_env: tuple[tuple[str, str], ...] = Field(default=(), repr=False)
+    execution_cwd: str | None = None
+    execution_command: tuple[str, ...] | None = None
+    """Trusted argv launching an rlm.execution worker in the task environment.
+    None starts the kernel locally. Split execution currently supports IPython
+    and its skills; supervisor shell jobs and path watchers are unavailable."""
     search_api_key: str | None = Field(default=None, repr=False)
 
     @property
