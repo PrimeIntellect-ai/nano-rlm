@@ -198,8 +198,9 @@ nonzero exit codes are completed processes, failed means startup/capture failure
 alive until its work finishes; detached processes are outside this guarantee. Before your
 final answer, `await rlm.shell.list()` must show no running job whose result you still need.
 Only a job handed back with .running True posts a shell.completed inbox event when it ends;
-finished results post nothing. Those events are quiet: they wake native `wait` but are not
-counted in the unread notice, because `await job.result()` already collects the job. IPython `!`/`%%bash` and any enabled blocking bash
+finished results post nothing. The event wakes native `wait`, and unless `await job.result()`
+collected the job first, the next supervisor notification reports it (job ID, status, exit code
+and the end of its output) and marks it read, so no turn is needed to collect it. IPython `!`/`%%bash` and any enabled blocking bash
 skill/tool are not supervisor-owned jobs.
 
 Agent cleanup errors are reported separately in AgentInfo.cleanup_error; completed answers remain readable. Use cancel() to retry unfinished cleanup.
@@ -222,17 +223,11 @@ timeout at most 300 seconds. It suspends inference without holding a cell open.
 New arrivals wake it; already-announced unread events do not. Inspect existing unread
 events before waiting for more. Avoid polling/sleep loops in Python to wait for agents/jobs.
 
-A job that was handed back running posts a quiet `shell.completed` when it ends, with content
-job_id, status, exit_code and text (the last 4 KiB of output); `await job.result()` marks it
-read. Keep the job variable and call `result()` when you need the outcome; the inbox route is
-only for a job whose variable you lost after native `wait`:
-```python
-for item in await rlm.inbox.list():
-    if item["type"] == "shell.completed":
-        event = await rlm.inbox.read(item["id"])
-        res = await (await rlm.shell.get(event["content"]["job_id"])).result()
-        print(res.exit_code, res.text)
-```
+A job that was handed back running posts a `shell.completed` event when it ends, with content
+job_id, status, exit_code and text (the last 4 KiB of output). The next supervisor notification
+reports it with the end of that output and marks it read; `await job.result()` collected first
+marks it read without a report. For the full output of a reported job:
+`res = await (await rlm.shell.get(job_id)).result()`.
 
 ## Subscriptions
 `await rlm.watch.job(job)` observes newly captured output from an owned job.

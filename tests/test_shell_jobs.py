@@ -132,7 +132,8 @@ async def test_real_kernel_shell_handle_recovery_and_inbox(session, monkeypatch)
                 tool_calls=[DummyToolCall("wait", {"timeout": 400})]
             ),  # clamped
             tool(r"""
-events = await rlm.inbox.list()
+assert not await rlm.inbox.list(), 'the turn notice reported the finished job'
+events = await rlm.inbox.list(unread_only=False)
 assert len(events) == 1
 event = await rlm.inbox.read(events[0]['id'])
 assert event['type'] == 'shell.completed'
