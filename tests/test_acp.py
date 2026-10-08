@@ -16,6 +16,7 @@ import pytest
 
 from conftest import DummyClient, DummyMessage, DummyToolCall, make_runtime_config
 from rlm.acp import (
+    CUT_TOOL_OUTPUTS_METADATA_KEY,
     ACP_SEMANTIC_EDGES_METADATA_KEY,
     CONTRACT_METADATA_KEY,
     RUNTIME_METADATA_KEY,
@@ -106,6 +107,7 @@ class _Engine:
         self.prompt_started = asyncio.Event()
         self.closed = False
         self.stop_reason = "done"
+        self.cut_tool_outputs: list[dict] = []
         self.instances.append(self)
 
     async def prompt(self, prompt: str) -> RLMResult:
@@ -126,6 +128,10 @@ class _Engine:
 
     async def aclose(self) -> None:
         self.close()
+
+    def take_cut_tool_outputs(self) -> list[dict]:
+        taken, self.cut_tool_outputs = self.cut_tool_outputs, []
+        return taken
 
     def execution_snapshot(self) -> dict[str, Any]:
         return {
@@ -919,6 +925,25 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert closed.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY] == {"edges": []}
     assert "test-secret" not in closed.model_dump_json(by_alias=True)
     assert engine.closed is True
+
+
+async def test_acp_hands_out_cut_tool_outputs_once(monkeypatch, tmp_path):
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    await _initialize(agent)
+    created = await agent.new_session(str(tmp_path), **_runtime_metadata())
+    cut = {"tool_call_id": "c1", "content": "whole", "head_chars": 1, "tail_chars": 1}
+    _Engine.instances[0].cut_tool_outputs.append(cut)
+
+    first = await agent.prompt(created.session_id, [text_block("one")])
+    second = await agent.prompt(created.session_id, [text_block("two")])
+
+    assert first.field_meta[CUT_TOOL_OUTPUTS_METADATA_KEY] == [cut]
+    assert CUT_TOOL_OUTPUTS_METADATA_KEY not in second.field_meta
+    await agent.close_session(created.session_id)
 
 
 async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path):

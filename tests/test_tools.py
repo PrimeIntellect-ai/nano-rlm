@@ -261,6 +261,49 @@ def test_truncate_tool_output_budget_override():
     assert "bytes truncated" in tight
 
 
+def test_kept_spans_name_what_the_cut_view_keeps():
+    from rlm.compaction import kept_spans, truncate_tool_output
+
+    text = "é" + "0123456789" * 300 + "ü"
+    head, tail = kept_spans(text, max_bytes=1_001)
+    view = truncate_tool_output(text, max_bytes=1_001)
+    assert view.split("\n\n", 1)[1].startswith(text[:head] + "\n[... ")
+    assert view.endswith("...]\n" + text[-tail:])
+    assert kept_spans("short", max_bytes=1_001) == (5, 0)
+
+
+async def test_cut_tool_output_is_kept_whole_for_the_trace(session):
+    """The model sees a cut result; the whole one is handed out once with its spans."""
+    from rlm.config import ExecutionPolicy
+
+    messages = [
+        DummyMessage(tool_calls=[DummyToolCall("add", {"a": 10**60, "b": 0})]),
+        DummyMessage(content="done"),
+    ]
+    client = DummyClient(messages)
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=make_runtime_config(
+            policy=ExecutionPolicy(max_tool_output_bytes=20)
+        ),
+    )  # type: ignore
+
+    await engine.run("add big")
+
+    full = str(10**60)
+    assert "bytes truncated" in tool_result(client)
+    [cut] = engine.take_cut_tool_outputs()
+    call_id = client.calls[1]["messages"][-1]["tool_call_id"]
+    assert cut == {
+        "tool_call_id": call_id,
+        "content": full,
+        "head_chars": 10,
+        "tail_chars": 10,
+    }
+    assert engine.take_cut_tool_outputs() == []
+
+
 def test_new_tokens_excludes_cached_prompt():
     from types import SimpleNamespace
 
