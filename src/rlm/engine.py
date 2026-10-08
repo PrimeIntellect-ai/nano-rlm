@@ -1161,11 +1161,13 @@ class RLMEngine:
             "extra_headers": model_call_headers(request_id),
         }
         if self._active_tool_schemas:
+            # The summary request must render exactly like a work turn so the
+            # provider's prefix cache covers the conversation: vLLM drops the tool
+            # block from the prompt under tool_choice="none", which misses the cache
+            # after the first few hundred tokens. A summary reply that calls a tool
+            # is resampled by _compact_branch.
             request["tools"] = self._active_tool_schemas
-            if checkpoint:
-                request["tool_choice"] = "none"
-            else:
-                request["parallel_tool_calls"] = False
+            request["parallel_tool_calls"] = False
 
         try:
             response = await call_with_retries(
@@ -1281,9 +1283,10 @@ class RLMEngine:
         toward token budgets. Every committed attempt remains represented in the
         semantic graph.
 
-        Forwarding active tool schemas preserves vLLM's system-message tool block
-        and prime-rl's trajectory extension property across compaction.
-        ``tool_choice="none"`` forbids tool calls in the summary response.
+        The summary request is the live conversation plus the checkpoint prompt,
+        sent with the same tool parameters as a work turn, so it extends the cached
+        prompt prefix and keeps prime-rl's trajectory extension property. A reply
+        that calls a tool instead of summarizing is resampled.
         """
         dropped_chars = _count_messages_chars(messages[1:])
         turns_since_last = turn + 1 - self._branch_start_turn
