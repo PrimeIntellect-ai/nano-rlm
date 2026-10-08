@@ -8,6 +8,10 @@ ipython alone).
 from __future__ import annotations
 
 import os
+import selectors
+import signal
+import time
+import contextlib
 import subprocess
 from typing import Any
 
@@ -68,19 +72,59 @@ def run_bash(
     blocked = find_blocked_command(command, allow_git=allow_git)
     if blocked:
         return refusal(blocked)
-    try:
-        proc = subprocess.run(
+    limit = 1024 * 1024
+    deadline = time.monotonic() + timeout
+    parts = {"stdout": bytearray(), "stderr": bytearray()}
+    reason = ""
+    with (
+        subprocess.Popen(
             ["bash", "-c", command],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=cwd or None,
-        )
-    except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s"
-    out = proc.stdout + (("\n" + proc.stderr) if proc.stderr else "")
-    if proc.returncode != 0:
+            start_new_session=True,
+        ) as proc,
+        selectors.DefaultSelector() as selector,
+    ):
+        selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    reason = f"Error: command timed out after {timeout}s"
+                    break
+                for key, _ in selector.select(min(remaining, 0.1)):
+                    data = os.read(key.fileobj.fileno(), 65536)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        continue
+                    available = limit - sum(map(len, parts.values()))
+                    parts[key.data].extend(data[:available])
+                    if len(data) >= available:
+                        reason = (
+                            "[command output exceeded 1 MiB; process group terminated]"
+                        )
+                        break
+                if reason:
+                    break
+            if not reason:
+                try:
+                    proc.wait(timeout=max(0.01, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    reason = f"Error: command timed out after {timeout}s"
+        finally:
+            if reason or proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+    stdout, stderr = (
+        parts[key].decode(errors="replace") for key in ("stdout", "stderr")
+    )
+    out = stdout + (("\n" + stderr) if stderr else "")
+    if reason:
+        out += "\n" + reason
+    elif proc.returncode != 0:
         out += f"\n[exit code {proc.returncode}]"
     return out.strip() or "(no output)"
 

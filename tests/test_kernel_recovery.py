@@ -370,3 +370,24 @@ async def test_remote_execution_interrupt_and_recovery(session, tmp_path):
         )
     finally:
         await asyncio.to_thread(repl.shutdown)
+
+
+async def test_output_flood_is_bounded_and_kernel_can_continue(session):
+    import asyncio
+    from rlm.tools.ipython import MAX_CELL_OUTPUT_BYTES
+
+    repl = IPythonREPL(session=session, cwd=str(session.dir))
+    try:
+        await repl.run_in_thread(repl.start)
+        output = await asyncio.wait_for(
+            repl.run_in_thread(
+                repl.execute, "while True: print('x' * 65536, flush=True)", 15
+            ),
+            timeout=25,
+        )
+        assert len(output.encode()) < MAX_CELL_OUTPUT_BYTES + 256
+        assert "output exceeded" in output
+        continued = await repl.run_in_thread(repl.execute, "print('STILL_ALIVE')", 10)
+        assert "STILL_ALIVE" in continued
+    finally:
+        await repl.run_in_thread(repl.shutdown)
