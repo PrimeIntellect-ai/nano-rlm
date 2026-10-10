@@ -391,10 +391,12 @@ repeatable and never consumes output. The command is a Bash string or an argv li
 exit codes are returned; startup/capture errors populate `error`. If output is truncated,
 `await job.read(cursor=..., max_bytes=...)` reads the retained output (16 MiB per job).
 Cancelling the waiting cell leaves the job running and discoverable with `shell.list()`;
-`shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a quiet
+`shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a
 `shell.completed` inbox event (job ID, status, exit code, completeness flags and the last
-4 KiB of output); quiet means it wakes the native `wait` tool but is not counted in the unread
-notice, and `result()` marks it read. `await rlm.shell.setenv(NAME='value')` sets variables
+4 KiB of output). It wakes the native `wait` tool and is not counted in the unread notice; unless
+`result()` collected the job first (which marks it read), the next turn's supervisor notification
+reports the job ID, status, exit code and the end of its output, and marks it read, so the model
+needs no turn to collect it. `await rlm.shell.setenv(NAME='value')` sets variables
 for every later `run()` of the agent (`getenv()` reads the overlay; per-call `env=` wins).
 The kernel and Bash jobs inherit the launching process's environment (in a sandbox, the
 image's ENV) minus a blocklist: credential-looking names, values with URL-embedded

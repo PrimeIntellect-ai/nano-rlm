@@ -56,6 +56,8 @@ MAX_LONG_RUN_NOTES = 3
 MAX_WAIT_HELD_JOB_HINTS = 2
 # shell.completed events carry this much of the end of the output.
 COMPLETED_TAIL_BYTES = 4 * 1024
+# The next turn's notice of a finished job shows this much of that tail.
+COMPLETED_NOTICE_CHARS = 1500
 # Hint once per variable after this many command prefixes.
 ENV_PREFIX_HINT_AFTER = 3
 _ENV_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
@@ -697,6 +699,20 @@ class SessionTreeSupervisor:
         count = sum(not event["read"] for event in loud)
         notices: list[str] = []
         hints: list[str] = []
+        # A job handed back while running reports its end here, so no turn is spent
+        # collecting it.
+        for event in agent.inbox:
+            if event["type"] != "shell.completed" or event["read"]:
+                continue
+            job = event["content"]
+            tail = job["text"][-COMPLETED_NOTICE_CHARS:]
+            notices.append(
+                f"Job {job['job_id']} finished ({job['status']}, exit code "
+                f"{job['exit_code']}); `{self._collect_expr_id(job['job_id'])}` "
+                f"returns its full output. Output tail:\n{tail}"
+            )
+            self._record_event(agent, {"type": "read", "event_id": event["id"]})
+            event["read"] = True
         if agent.notes:
             for tag, text in agent.notes:
                 if tag not in agent.muted_hints:
@@ -870,7 +886,11 @@ class SessionTreeSupervisor:
     def _collect_expr(job: JobRecord) -> str:
         """The exact expression that collects a job by id; markers and hints quote it
         verbatim rather than naming a variable the caller may not have."""
-        return f'await (await rlm.shell.get("{job.info.id}")).result()'
+        return SessionTreeSupervisor._collect_expr_id(job.info.id)
+
+    @staticmethod
+    def _collect_expr_id(job_id: str) -> str:
+        return f'await (await rlm.shell.get("{job_id}")).result()'
 
     def _finished_payload(self, job: JobRecord) -> dict:
         output = self._shell_jobs.run_text(job)
