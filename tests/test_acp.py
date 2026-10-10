@@ -96,6 +96,7 @@ class _Engine:
         mcp_servers: dict[str, Any],
         runtime_config=None,
         invocation_id: str,
+        seed_messages=None,
     ) -> None:
         self.cwd = cwd
         self.session = session
@@ -1268,3 +1269,53 @@ async def test_steering_unconsumed_at_budget_boundary(session, monkeypatch):
         turn.cancel()
         await asyncio.gather(turn, return_exceptions=True)
         await engine.aclose()
+
+
+async def test_seed_messages_resume_a_saved_conversation(session, tmp_path):
+    seed = [
+        {"role": "user", "content": "build the thing"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "ipython", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "[started: job " + "a" * 32 + "; ...]",
+        },
+    ]
+    client = DummyClient([DummyMessage(content="back at it")])
+    engine = RLMEngine(
+        cwd=str(tmp_path),
+        session=session,
+        client=client,
+        runtime_config=make_runtime_config(),
+        seed_messages=seed,
+    )
+    try:
+        result = await engine.prompt("your box was replaced")
+    finally:
+        await engine.aclose()
+
+    assert result.answer == "back at it"
+    sent = client.calls[0]["messages"]
+    assert sent[0]["role"] == "system"
+    assert sent[1:4] == seed
+    assert 'kind="recovery"' in sent[4]["content"]
+    assert "a" * 32 in sent[4]["content"]
+    assert sent[5] == {"role": "user", "content": "your box was replaced"}
+
+
+async def test_seed_messages_reject_a_system_message(tmp_path):
+    agent = RLMACPAgent()
+    await _initialize(agent)
+    meta = _runtime_metadata(seed_messages=[{"role": "system", "content": "x"}])
+    with pytest.raises(RequestError):
+        await agent.new_session(str(tmp_path), **meta)
