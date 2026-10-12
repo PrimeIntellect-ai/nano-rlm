@@ -229,7 +229,7 @@ class SessionTreeSupervisor:
                 capability=capability,
                 name="search",
                 description=(
-                    "Run a web search via Serper and return formatted title, URL, "
+                    "Run a web search and return formatted title, URL, "
                     "and snippet results."
                 ),
                 input_schema={

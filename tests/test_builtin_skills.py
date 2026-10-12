@@ -158,6 +158,55 @@ print('SERPER_API_KEY=' not in child_env)
     assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"search": 1}
 
 
+async def test_search_youcom_backend(monkeypatch):
+    """``RLM_SEARCH_ENGINE=youcom`` routes to the you.com API and parses its shape."""
+    import httpx
+
+    from rlm.skills.search import run_with_api_key
+
+    requests = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "results": {
+                    "web": [
+                        {
+                            "title": "You result",
+                            "url": "https://example.org",
+                            "description": "you.com snippet",
+                        }
+                    ]
+                }
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            requests.append((url, kwargs))
+            return Response()
+
+    monkeypatch.setattr("rlm.skills.search.httpx.AsyncClient", FakeClient)
+    monkeypatch.setenv("RLM_SEARCH_ENGINE", "youcom")
+    monkeypatch.setenv("YOU_API_KEY", "youcom-secret")
+    out = await run_with_api_key("serper-key-ignored", "needle")
+    url, kwargs = requests[0]
+    assert "ydc-index.io" in url
+    assert kwargs["headers"]["X-API-Key"] == "youcom-secret"
+    assert kwargs["json"] == {"query": "needle", "count": 3}
+    assert "Result 1: You result" in out
+    assert "URL: https://example.org" in out
+    assert "- you.com snippet" in out
+
+
 async def test_bash_returns_output():
     assert await bash("echo hello") == "hello"
 
