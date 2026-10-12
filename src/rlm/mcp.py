@@ -153,7 +153,7 @@ class MCPRegistry:
         except KeyError as exc:
             raise PermissionError("unknown MCP tool capability") from exc
 
-    async def call(self, capability: str, arguments: dict[str, Any]) -> str:
+    async def call(self, capability: str, arguments: dict[str, Any]) -> Any:
         descriptor = self.descriptor(capability)
         entry = self._tools[capability]
         try:
@@ -242,8 +242,9 @@ async def call_tool(
     name: str,
     arguments: dict[str, Any],
     cwd: str | None = None,
-) -> str:
-    """Call an MCP tool and return its text content."""
+) -> Any:
+    """Call an MCP tool and return its content: the parsed value when the content is
+    a JSON object or array, otherwise its text."""
     async with _client_session(server, cwd) as session:
         await session.initialize()
         result = await session.call_tool(name, arguments or {})
@@ -252,6 +253,11 @@ async def call_tool(
     )
     if result.isError:
         raise MCPToolError(text or f"MCP tool {name!r} failed")
+    if text.lstrip().startswith(("{", "[")):
+        try:
+            return json.loads(text)
+        except ValueError:
+            pass
     return text
 
 
