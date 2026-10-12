@@ -390,8 +390,8 @@ the finished snapshot, again with `running=True` if the job is still not done; i
 repeatable and never consumes output. The command is a Bash string or an argv list. Nonzero
 exit codes are returned; startup/capture errors populate `error`. If output is truncated,
 `await job.read(cursor=..., max_bytes=...)` reads the retained output (16 MiB per job).
-Cancelling the waiting cell leaves the job running and discoverable with `shell.list()`;
-`shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a quiet
+Cancelling the waiting cell leaves the job running and discoverable with `shell.list()`, which
+lists running jobs (`shell.list(finished=True)` adds finished ones); `shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a quiet
 `shell.completed` inbox event (job ID, status, exit code, completeness flags and the last
 4 KiB of output); quiet means it wakes the native `wait` tool but is not counted in the unread
 notice, and `result()` marks it read. `await rlm.shell.setenv(NAME='value')` sets variables

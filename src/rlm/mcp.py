@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import keyword
 import re
 import secrets
+import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -21,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 MAX_MCP_TOOLS = 128
 MAX_MCP_SKILL_NAME_CHARS = 96
 MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
+MCP_DISCOVERY_SECONDS = 45.0
 
 _JSON_TO_PY = {
     "string": str,
@@ -103,14 +106,7 @@ class MCPRegistry:
         names: set[str] = set()
         descriptor_bytes = 0
         for server_name, server in self._servers.items():
-            try:
-                async with _client_session(server, self._cwd) as session:
-                    await session.initialize()
-                    tools = (await session.list_tools()).tools
-            except Exception:
-                raise RuntimeError(
-                    f"MCP server {server_name!r} discovery failed"
-                ) from None
+            tools = await _list_tools(server_name, server, self._cwd)
             for tool in tools:
                 if len(registered) >= MAX_MCP_TOOLS:
                     raise ValueError(f"MCP tool count exceeds {MAX_MCP_TOOLS}")
@@ -218,6 +214,27 @@ async def _client_session(
         ClientSession(read, write) as session,
     ):
         yield session
+
+
+async def _list_tools(server_name: str, server: MCPServer, cwd: str | None) -> list:
+    """List a server's tools, retrying for up to MCP_DISCOVERY_SECONDS: an endpoint
+    behind a proxy or tunnel can fail for a few seconds while it comes up."""
+    deadline = time.monotonic() + MCP_DISCOVERY_SECONDS
+    delay = 0.5
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            async with _client_session(server, cwd) as session:
+                await session.initialize()
+                return (await session.list_tools()).tools
+        except Exception as exc:
+            if time.monotonic() + delay > deadline:
+                raise RuntimeError(
+                    f"MCP server {server_name!r} discovery failed after {attempts} attempts"
+                ) from exc
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 8.0)
 
 
 async def call_tool(
