@@ -247,6 +247,11 @@ async def get(job_id: str) -> ShellJob:
     )
 
 
-async def list() -> builtins.list[JobInfo]:
-    """List this agent's jobs, including completed jobs."""
-    return [JobInfo(**item) for item in await broker.agent_request("shell.list")]
+async def list(finished: bool = False) -> builtins.list[JobInfo]:
+    """List this agent's starting and running jobs; finished=True also lists the
+    finished ones."""
+    return [
+        JobInfo(**item)
+        for item in await broker.agent_request("shell.list")
+        if finished or item["status"] in ("starting", "running")
+    ]

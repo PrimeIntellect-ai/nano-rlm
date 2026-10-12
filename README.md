@@ -331,7 +331,7 @@ help(tools_add_event)  # signature (typed from the schema) + the tool's descript
 await tools_add_event(day="monday", title="standup")
 ```
 
-Each call connects using the configured transport, invokes the tool, and returns its text content (a tool-reported error is raised as `RuntimeError`). Discovery and invocation run in the session supervisor. The generated modules contain only the public tool schema and an opaque capability; server URLs, headers, commands, and environment variables are not copied into the kernel environment or session artifacts. The kernel imports these proxy modules from the session directory and reaches the supervisor over the session-local broker. Unlike installed skills, MCP skills are IPython-only — they're not exposed as shell commands.
+Each call connects using the configured transport, invokes the tool, and returns its content: the parsed value when the content is a JSON object or array, otherwise its text. A failed call raises `rlm.broker.SkillError` (a `RuntimeError`), and the kernel shows it as one line with the server's message. Discovery and invocation run in the session supervisor. The generated modules contain only the public tool schema and an opaque capability; server URLs, headers, commands, and environment variables are not copied into the kernel environment or session artifacts. The kernel imports these proxy modules from the session directory and reaches the supervisor over the session-local broker. Unlike installed skills, MCP skills are IPython-only — they're not exposed as shell commands.
 
 ## Kernel
 
@@ -390,8 +390,8 @@ the finished snapshot, again with `running=True` if the job is still not done; i
 repeatable and never consumes output. The command is a Bash string or an argv list. Nonzero
 exit codes are returned; startup/capture errors populate `error`. If output is truncated,
 `await job.read(cursor=..., max_bytes=...)` reads the retained output (16 MiB per job).
-Cancelling the waiting cell leaves the job running and discoverable with `shell.list()`;
-`shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a quiet
+Cancelling the waiting cell leaves the job running and discoverable with `shell.list()`, which
+lists running jobs (`shell.list(finished=True)` adds finished ones); `shell.get(job_id)` recovers it. Only a job handed back with `running=True` publishes a quiet
 `shell.completed` inbox event (job ID, status, exit code, completeness flags and the last
 4 KiB of output); quiet means it wakes the native `wait` tool but is not counted in the unread
 notice, and `result()` marks it read. `await rlm.shell.setenv(NAME='value')` sets variables

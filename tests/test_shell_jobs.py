@@ -180,7 +180,7 @@ failed = await rlm.shell.run('true', cwd='missing-directory')
 assert failed.exit_code is None and failed.error
 assert not [e for e in await rlm.inbox.list() if e['type'] == 'shell.completed'], 'run() must not post inbox events'
 import asyncio
-listed = await rlm.shell.list()
+listed = await rlm.shell.list(finished=True)
 assert not hasattr(listed[-1], 'read') and not hasattr(listed[-1], 'handle')
 assert (await (await rlm.shell.get(listed[-1].id)).info()).id == listed[-1].id
 snap = await rlm.shell.run('sleep 1; printf slow', yield_after=0.2)  # yielding leaves the job running
@@ -268,7 +268,8 @@ try:
 except asyncio.CancelledError:
     pass
 jobs = await rlm.shell.list()
-assert jobs[-1].status in ('starting', 'running')
+assert len(jobs) == 1 and jobs[0].status in ('starting', 'running')
+assert len(await rlm.shell.list(finished=True)) > len(jobs)
 print('SHELL_OK')
 """),
             DummyMessage(content="done"),

@@ -270,7 +270,7 @@ _REQUEST_ADAPTER = TypeAdapter(BrokerRequest)
 
 class _BrokerSuccess(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid")
-    result: dict[str, Any] | list[dict[str, Any]] | str | None
+    result: Any
 
 
 class _BrokerFailure(TypedDict):
@@ -376,7 +376,11 @@ async def agent_request(op: str, **arguments: Any) -> Any:
     return response["result"]
 
 
-async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
+class SkillError(RuntimeError):
+    """A brokered skill call failed; the kernel shows only its message."""
+
+
+async def call_skill(capability: str, arguments: dict[str, Any]) -> Any:
     """Invoke a supervisor-owned skill through its opaque capability."""
     if _endpoint is None or _scope_id is None:
         raise RuntimeError("brokered calls are unavailable outside an active cell")
@@ -387,12 +391,10 @@ async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
             "scope_id": _scope_id,
             "skill_capability": capability,
             "arguments": arguments,
-        }
+        },
+        SkillError,
     )
-    result = response.get("result")
-    if not isinstance(result, str):
-        raise RuntimeError("invalid skill response from RLM supervisor")
-    return result
+    return response["result"]
 
 
 def make_skill(descriptor: dict[str, Any]):
@@ -420,7 +422,7 @@ def make_skill(descriptor: dict[str, Any]):
     signature = inspect.Signature(parameters)
     names = [parameter.name for parameter in parameters]
 
-    async def run(*args: Any, **kwargs: Any) -> str:
+    async def run(*args: Any, **kwargs: Any) -> Any:
         if len(args) > len(names):
             raise TypeError(f"{name}{signature} takes {len(names)} arguments")
         for field, value in zip(names, args):
@@ -435,7 +437,9 @@ def make_skill(descriptor: dict[str, Any]):
     return run
 
 
-async def _request(payload: BrokerRequest) -> BrokerResponse:
+async def _request(
+    payload: BrokerRequest, error: type[RuntimeError] = RuntimeError
+) -> BrokerResponse:
     if _endpoint is None:
         raise RuntimeError("brokered calls are unavailable outside an active cell")
     reader, writer = await asyncio.open_unix_connection(_endpoint.socket_path)
@@ -454,5 +458,5 @@ async def _request(payload: BrokerRequest) -> BrokerResponse:
     except ValidationError:
         raise RuntimeError("invalid response from RLM supervisor") from None
     if "error" in response:
-        raise RuntimeError(response["error"])
+        raise error(response["error"])
     return response

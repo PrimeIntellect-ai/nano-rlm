@@ -13,5 +13,15 @@ def echo(text: str) -> str:
     return f"{os.environ['TEST_PREFIX']}:{inherited}:{os.getcwd()}:{text}"
 
 
+@server.tool()
+def record(text: str) -> dict:
+    return {"text": text, "tags": ["a", "b"]}
+
+
+@server.tool()
+def fail(text: str) -> str:
+    raise ValueError(text)
+
+
 if __name__ == "__main__":
     server.run(transport="stdio")

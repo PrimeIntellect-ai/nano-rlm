@@ -94,9 +94,15 @@ print(await local_echo(text='hello'))
 print(inspect.signature(local_echo))
 print('RLM_MCP_CONFIG' not in os.environ)
 print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
+print(await local_record(text='hi'))
 """
                         },
                     )
+                ]
+            ),
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall("ipython", {"code": "await local_fail(text='no')"})
                 ]
             ),
             DummyMessage(content="done"),
@@ -118,13 +124,19 @@ print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
         "(text: str)",
         "True",
         "True",
+        "{'text': 'hi', 'tags': ['a', 'b']}",
     ]
+    assert tool_result(client, 1).strip() == "SkillError: Error executing tool fail: no"
     source = (session.dir / "local_echo.py").read_text()
     assert "stdio-secret" not in source
     assert str(Path(__file__).parent / "fixtures" / "mcp_stdio.py") not in source
     meta = json.loads((session.dir / "meta.json").read_text())
-    assert meta["programmatic_tool_call_stats"]["python_total"] == 1
-    assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"local_echo": 1}
+    assert meta["programmatic_tool_call_stats"]["python_total"] == 3
+    assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {
+        "local_echo": 1,
+        "local_record": 1,
+        "local_fail": 1,
+    }
 
 
 async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_path):
@@ -185,3 +197,25 @@ async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_pat
     assert tool_messages[-1]["content"].strip() == "reused"
     meta = json.loads((session.dir / "meta.json").read_text())
     assert meta["programmatic_tool_call_stats"]["python_total"] == 2
+
+
+async def test_discovery_retries_until_the_server_answers(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp, "MCP_DISCOVERY_SECONDS", 10.0)
+    marker = tmp_path / "failed-once"
+    fixture = Path(__file__).parent / "fixtures" / "mcp_stdio.py"
+    flaky = {
+        "command": "/bin/sh",
+        "args": [
+            "-c",
+            f"[ -e {marker} ] || {{ touch {marker}; exit 1; }}; exec {sys.executable} {fixture}",
+        ],
+        "env": {"TEST_PREFIX": "flaky"},
+    }
+    registry = mcp.MCPRegistry({"local": flaky}, cwd=str(tmp_path))
+    assert "local_echo" in {tool.name for tool in await registry.discover()}
+
+    monkeypatch.setattr(mcp, "MCP_DISCOVERY_SECONDS", 1.0)
+    broken = mcp.MCPRegistry({"local": {"command": "/bin/false"}}, cwd=str(tmp_path))
+    with pytest.raises(RuntimeError, match="discovery failed after 2 attempts") as info:
+        await broken.discover()
+    assert info.value.__cause__ is not None

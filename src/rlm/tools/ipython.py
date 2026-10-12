@@ -423,6 +423,11 @@ if {bool(self.broker_endpoint)!r}:
         {self.broker_endpoint.capability if self.broker_endpoint else None!r},
     ))
 
+    def _show_skill_error(shell, etype, value, tb, tb_offset=None):
+        shell._showtraceback(etype, value, [f'{{etype.__name__}}: {{value}}'])
+
+    get_ipython().set_custom_exc((_rlm_broker.SkillError,), _show_skill_error)
+
 for _name in {skill_names!r}:
     _module = __import__(_name)
     _source = None if getattr(_module, '__rlm_brokered__', False) else 'python'

@@ -114,7 +114,10 @@ class ShellJobs:
     def get(self, owner_id: str, job_id: str) -> JobRecord:
         job = self.jobs.get(job_id)
         if job is None or job.info.owner_id != owner_id:
-            raise PermissionError("unknown job or job is not owned by this agent")
+            raise PermissionError(
+                f"unknown job {job_id!r} for this agent; "
+                "rlm.shell.list(finished=True) shows its full job ids"
+            )
         return job
 
     def read(self, job: JobRecord, cursor: int, max_bytes: int) -> dict:

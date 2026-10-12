@@ -195,7 +195,8 @@ Reuse Python variables and helpers across cells.
 Jobs run supervisor-owned Bash with no stdin/PTY. Default cwd is this agent's working
 directory; relative cwd resolves against it. Cancelling a cell that is awaiting run() or
 result() stops waiting but leaves the job running. Jobs survive kernel restarts:
-`await rlm.shell.list()` returns JobInfo snapshots (.id, .command, .status, .exit_code,
+`await rlm.shell.list()` returns JobInfo snapshots of starting and running jobs, and
+`list(finished=True)` adds finished ones (.id, .command, .status, .exit_code,
 .timeout, .error; status is starting, running, completed, failed, cancelled, or timed_out;
 nonzero exit codes are completed processes, failed means startup/capture failure), and
 `await rlm.shell.get(job_id)` recovers the ShellJob for a lost variable.

@@ -65,7 +65,7 @@ assert (await child.history()).user_messages()
 await child.send('verify your Python state')
 await child.wait(timeout=10)
 assert (await child.result()).answer == 'resumed'
-jobs = await rlm.shell.list()
+jobs = await rlm.shell.list(finished=True)
 assert len(jobs) == 1
 job = await rlm.shell.get(jobs[0].id)
 assert (await job.read()).text == 'SURVIVED'
