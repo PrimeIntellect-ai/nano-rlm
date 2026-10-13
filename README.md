@@ -246,7 +246,7 @@ These artifacts are consumable for debugging, visualization, or training-data ex
 
 ## Skills
 
-`rlm` ships a small set of built-in skills enabled per session via the runtime contract's `skills` list (`edit`, `search`, `fetch`; see [MCP tools as skills](#mcp-tools-as-skills) for the related MCP path). `edit` runs in the kernel. Credentialed `search` runs in the supervisor through the capability broker, so `SERPER_API_KEY` is unavailable to IPython and its subprocesses; it returns title/URL/snippet for a single query (`await search(query="...")`). Additional skills are supplied by the host environment: before `install.sh` runs, the environment places skill packages under `/task/rlm-skills/<name>/`, and `install.sh` installs them alongside `rlm` so they're both importable and on `$PATH`.
+`rlm` ships a small set of built-in skills enabled per session via the runtime contract's `skills` list (`edit`, `search`, `fetch`; see [MCP tools](#mcp-tools) for the related MCP path). `edit` runs in the kernel. Credentialed `search` runs in the supervisor through the capability broker, so `SERPER_API_KEY` is unavailable to IPython and its subprocesses; it returns title/URL/snippet for a single query (`await search(query="...")`). Additional skills are supplied by the host environment: before `install.sh` runs, the environment places skill packages under `/task/rlm-skills/<name>/`, and `install.sh` installs them alongside `rlm` so they're both importable and on `$PATH`.
 
 From IPython, import a skill and call its async `run(...)` entrypoint:
 
@@ -305,7 +305,7 @@ Dependencies go in the skill's own `pyproject.toml`; declare `rlm` there so the 
 
 For running `rlm` against a specific skill set outside of a sandbox-orchestrated environment, create a `/task/rlm-skills/` directory (or bind-mount one) and place skill packages there before running `install.sh`. The rlm repo ships no skills by default; look at the `rlm-swe` or `rlm-deepdive` environments for working skill packages to copy.
 
-### MCP tools as skills
+### MCP tools
 
 A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) tool servers to `rlm` through the ACP session (a standard `mcpServers` config shape). Streamable HTTP and stdio transports are supported:
 
@@ -324,14 +324,38 @@ A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) too
 
 Programmatically, pass `mcp_servers={"tools": "http://127.0.0.1:8000/mcp"}` to `RLMEngine`. An HTTP server may instead be `{"url": "...", "headers": {"Authorization": "..."}}` when it needs request headers; stdio servers use the same `command` / `args` / `env` shape shown above.
 
-At startup `rlm` connects to each server, lists its tools, and generates one skill per tool (named `<server>_<tool>`, e.g. `tools_add_event`). These join the installed skills — pre-imported into the IPython namespace as async functions the agent calls programmatically, with a signature built from the tool's input schema:
+At startup `rlm` connects to each server and indexes all pages of its raw MCP catalog in the supervisor. MCP listing includes input schemas; these stay in the supervisor's catalog. Startup and search do not create Python callables, public descriptors, broker handlers, or per-tool modules. The first `get(id)` creates and registers that tool's descriptor; subsequent loads reuse it. Only requested tools are converted into async callables in IPython, regardless of catalog size.
+
+The discovery guide appears in the system prompt only when IPython is active and at least one MCP tool was discovered. Server summaries include available descriptions from MCP initialization. From IPython, search by keywords, load a selected callable, and inspect its full JSON input schema before calling it:
 
 ```python
-help(tools_add_event)  # signature (typed from the schema) + the tool's description
-await tools_add_event(day="monday", title="standup")
+await rlm.tools.servers()  # server names, tool counts and available descriptions
+page = await rlm.tools.search("calendar events", limit=5, server="tools")
+tool = await rlm.tools.get(page["matches"][0]["id"])
+print(tool.schema)  # includes nested fields, enums and constraints
+help(tool)         # Python signature and description
+result = await tool(day="monday", title="standup")  # returns str
 ```
 
-Each call connects using the configured transport, invokes the tool, and returns its text content (a tool-reported error is raised as `RuntimeError`). Discovery and invocation run in the session supervisor. The generated modules contain only the public tool schema and an opaque capability; server URLs, headers, commands, and environment variables are not copied into the kernel environment or session artifacts. The kernel imports these proxy modules from the session directory and reaches the supervisor over the session-local broker. Unlike installed skills, MCP skills are IPython-only — they're not exposed as shell commands.
+Search returns `matches` (at most 20 summaries per page: id, server and description, without schemas) and `next_cursor`. Retrieve another page using the same query and server filter; `next_cursor=None` means there are no more matches:
+
+```python
+if page["next_cursor"] is not None:
+    page = await rlm.tools.search(
+        "calendar events", limit=5, server="tools", cursor=page["next_cursor"]
+    )
+```
+
+Save loaded callables in variables to reuse them. Search uses keyword matching; try other keywords when no result fits. Cursors belong to the current session's catalog and query/server filter. Raw catalog metadata, including listing cursors, is limited to 64 MiB, with at most 1 MiB per tool; bounds are checked while pages are indexed. Discovery allows at most 4,096 pages per server. Individual tool names are omitted from the system prompt.
+
+Loaded tools are async functions called with `await tool(...)`. Calls return text strings; when a tool returns JSON text, decode it before accessing fields. Prose and CSV remain text:
+
+```python
+raw = await tool(...)
+data = json.loads(raw)  # only for tools that return JSON text
+```
+
+Each call connects using the configured transport, invokes the tool, and returns its text content (a tool-reported error is raised as `RuntimeError`). Discovery and invocation run in the session supervisor through the session-local capability broker. The kernel receives only a selected tool's public schema, description, name, and opaque capability; server URLs, headers, commands, and environment variables stay in the supervisor. MCP tools are IPython-only.
 
 ## Kernel
 

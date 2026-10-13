@@ -211,6 +211,7 @@ class SessionTreeSupervisor:
         self._connection_writers: set[asyncio.StreamWriter] = set()
         self._scopes: dict[str, _Scope] = {}
         self._mcp_registry = MCPRegistry(mcp_servers, cwd) if mcp_servers else None
+        self._mcp_capabilities: set[str] = set()
         self._brokered_skills: dict[
             str,
             tuple[
@@ -315,11 +316,7 @@ class SessionTreeSupervisor:
         if self._closed:
             raise RuntimeError("session supervisor is closed")
         if self._mcp_registry is not None:
-            for descriptor in await self._mcp_registry.discover():
-                self._brokered_skills[descriptor.capability] = (
-                    descriptor,
-                    partial(self._mcp_registry.call, descriptor.capability),
-                )
+            await self._mcp_registry.discover()
         self._broker_dir = Path(tempfile.mkdtemp(prefix="rlm-brk-"))
         os.chmod(self._broker_dir, 0o700)
         self._socket_path = str(self._broker_dir / "b.sock")
@@ -331,8 +328,15 @@ class SessionTreeSupervisor:
     def write_brokered_skill_modules(
         self, dest_dir: Path, reserved_names: Iterable[str] = ()
     ) -> list[str]:
-        descriptors = [entry[0] for entry in self._brokered_skills.values()]
+        descriptors = [
+            entry[0]
+            for capability, entry in self._brokered_skills.items()
+            if capability not in self._mcp_capabilities
+        ]
         return write_skill_modules(descriptors, dest_dir, reserved_names)
+
+    def mcp_server_summaries(self) -> list[dict[str, Any]]:
+        return self._mcp_registry.servers() if self._mcp_registry else []
 
     async def _call_search(self, arguments: dict[str, Any]) -> str:
         return await run_search(self._root_config.search_api_key, **arguments)
@@ -1041,6 +1045,32 @@ class SessionTreeSupervisor:
     async def _agent_operation(self, request: dict) -> Any:
         parent = self._caller(request["capability"], request["scope_id"])
         op = request["op"]
+        if op.startswith("tools."):
+            if self._mcp_registry is None:
+                if op == "tools.servers":
+                    return []
+                if op == "tools.search":
+                    if request.get("cursor") is not None:
+                        raise ValueError("invalid MCP search cursor")
+                    return {"matches": [], "next_cursor": None}
+                raise ValueError("no MCP tools are configured")
+            if op == "tools.servers":
+                return self._mcp_registry.servers()
+            if op == "tools.get":
+                descriptor = self._mcp_registry.get(request["name"])
+                if descriptor.capability not in self._mcp_capabilities:
+                    self._brokered_skills[descriptor.capability] = (
+                        descriptor,
+                        partial(self._mcp_registry.call, descriptor.capability),
+                    )
+                    self._mcp_capabilities.add(descriptor.capability)
+                return descriptor.to_dict()
+            return self._mcp_registry.search(
+                request["query"],
+                request["limit"],
+                request["server"],
+                request.get("cursor"),
+            )
         if op.startswith("watch."):
             return await self._watch_operation(parent, request)
         if op.startswith("shell."):

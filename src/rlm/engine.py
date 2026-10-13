@@ -1487,6 +1487,9 @@ class RLMEngine:
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
+            mcp_servers=self._supervisor.mcp_server_summaries()
+            if self._supervisor
+            else None,
             task_instructions=Path(self.system_prompt_path).read_text()
             if self.system_prompt_path
             else None,

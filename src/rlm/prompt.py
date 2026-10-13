@@ -86,6 +86,24 @@ FETCH_SKILL_PROMPT = (
     "to open URLs from `search` results."
 )
 
+MCP_DISCOVERY_PROMPT = """## MCP tool discovery
+Use `await rlm.tools.servers()` for server names, tool counts and available descriptions. Search by keywords
+with `page = await rlm.tools.search("calendar events", limit=5, server=None)`.
+Use a non-empty keyword query and a limit from 1 to 20; an empty query cannot list tools.
+`page["matches"]` contains id, server and a short description, without argument schemas.
+Each page has at most 20 matches. If `page["next_cursor"]` is not None, retrieve more
+with the same query and server and `cursor=page["next_cursor"]`. Stop when it is None.
+If no match fits, try other keywords or filter by server. Load a selected tool with
+`tool = await rlm.tools.get(page["matches"][0]["id"])`. Inspect `tool.schema` for the full
+JSON input schema (nested fields, enums and constraints), or `help(tool)` for its
+Python signature and description, then call `await tool(...)` using that schema.
+Save callables in variables to reuse them, and use asyncio.gather for independent calls.
+MCP tools are loaded async functions: use `await tool(...)`, not guessed methods such as
+`tool.search(...)`. Tool names are not pre-imported, regardless of catalog size.
+Calls return text (str). If a tool returns JSON text, decode it with `json.loads(result)`
+before indexing fields; prose and CSV remain text.
+"""
+
 # One curated line per built-in skill, appended generically for whatever is enabled.
 BUILTIN_SKILL_PROMPTS: dict[str, str] = {
     "bash": BASH_SKILL_PROMPT,
@@ -346,6 +364,7 @@ def build_system_prompt(
     task_instructions: str | None = None,
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
+    mcp_servers: list[dict] | None = None,
 ) -> str:
     """Compose task instructions with the guide for this agent's actual runtime."""
     has_ipython = _has_tool(active_tools, "ipython")
@@ -357,6 +376,9 @@ def build_system_prompt(
     ]
     if extra_instructions:
         parts.append(extra_instructions)
+    if has_ipython and any(server["tool_count"] > 0 for server in mcp_servers or []):
+        parts.append(MCP_DISCOVERY_PROMPT)
+        parts.append("MCP servers: " + json.dumps(mcp_servers))
     if can_delegate and delegation_prompt:
         parts.append(DELEGATION_PROMPT)
     parts.append("## Agent context")
