@@ -316,12 +316,7 @@ class SessionTreeSupervisor:
         if self._closed:
             raise RuntimeError("session supervisor is closed")
         if self._mcp_registry is not None:
-            for descriptor in await self._mcp_registry.discover():
-                self._mcp_capabilities.add(descriptor.capability)
-                self._brokered_skills[descriptor.capability] = (
-                    descriptor,
-                    partial(self._mcp_registry.call, descriptor.capability),
-                )
+            await self._mcp_registry.discover()
         self._broker_dir = Path(tempfile.mkdtemp(prefix="rlm-brk-"))
         os.chmod(self._broker_dir, 0o700)
         self._socket_path = str(self._broker_dir / "b.sock")
@@ -336,9 +331,7 @@ class SessionTreeSupervisor:
         descriptors = [
             entry[0]
             for capability, entry in self._brokered_skills.items()
-            if self._mcp_registry is None
-            or self._mcp_registry.eager
-            or capability not in self._mcp_capabilities
+            if capability not in self._mcp_capabilities
         ]
         return write_skill_modules(descriptors, dest_dir, reserved_names)
 
@@ -1064,7 +1057,14 @@ class SessionTreeSupervisor:
             if op == "tools.servers":
                 return self._mcp_registry.servers()
             if op == "tools.get":
-                return self._mcp_registry.get(request["name"]).to_dict()
+                descriptor = self._mcp_registry.get(request["name"])
+                if descriptor.capability not in self._mcp_capabilities:
+                    self._brokered_skills[descriptor.capability] = (
+                        descriptor,
+                        partial(self._mcp_registry.call, descriptor.capability),
+                    )
+                    self._mcp_capabilities.add(descriptor.capability)
+                return descriptor.to_dict()
             return self._mcp_registry.search(
                 request["query"],
                 request["limit"],

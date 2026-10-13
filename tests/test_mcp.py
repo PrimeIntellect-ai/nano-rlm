@@ -90,12 +90,14 @@ async def test_real_kernel_uses_mcp_without_transport_secrets(tmp_path):
                         {
                             "code": """
 import inspect, os, subprocess
-print(await local_echo(text='hello'))
-print(inspect.signature(local_echo))
+print('local_echo' in globals())
 matches = (await rlm.tools.search('echo'))['matches']
 tool = await rlm.tools.get(matches[0]['id'])
+print(await tool(text='hello'))
+print(inspect.signature(tool))
 print(tool.schema['properties']['text']['type'])
 print(await tool('discovered'))
+print('Returns text (str)' in tool.__doc__)
 print('RLM_MCP_CONFIG' not in os.environ)
 print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
 """
@@ -118,16 +120,20 @@ print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
 
     assert result.answer == "done"
     assert tool_result(client).strip().splitlines() == [
+        "False",
         f"stdio-secret:True:{server_cwd}:hello",
-        "(text: str)",
+        "(text: str) -> str",
         "string",
         f"stdio-secret:True:{server_cwd}:discovered",
         "True",
         "True",
+        "True",
     ]
-    source = (session.dir / "local_echo.py").read_text()
-    assert "stdio-secret" not in source
-    assert str(Path(__file__).parent / "fixtures" / "mcp_stdio.py") not in source
+    assert not (session.dir / "local_echo.py").exists()
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "local_echo" not in prompt
+    assert "stdio-secret" not in prompt
+    assert str(Path(__file__).parent / "fixtures" / "mcp_stdio.py") not in prompt
     meta = json.loads((session.dir / "meta.json").read_text())
     assert meta["programmatic_tool_call_stats"]["python_total"] == 2
     assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"local_echo": 2}
@@ -159,7 +165,9 @@ print(matches)
 tool = await rlm.tools.get(matches[0]['id'])
 print(inspect.signature(tool))
 print(tool.schema['properties']['filter']['properties']['status']['enum'])
-print(await tool(filter={'status': 'confirmed'}))
+result = await tool(filter={'status': 'confirmed'})
+print(result)
+print(type(result).__name__, json.loads(result)['filter']['status'])
 page = await rlm.tools.search('operation', limit=3, server='catalog')
 print(len(page['matches']))
 ids = [match['id'] for match in page['matches']]
@@ -187,22 +195,25 @@ print(await rlm.tools.search('no_matching_word'))
     result = await engine.run("find confirmed calendar events")
     assert result.answer == "done"
     assert tool_result(client).strip().splitlines() == [
-        "[{'name': 'catalog', 'tool_count': 2000}]",
+        "[{'name': 'catalog', 'tool_count': 3000, "
+        "'description': 'Find calendar events and catalog operations.'}]",
         "False",
         "[{'id': 'catalog_calendarEvents', 'server': 'catalog', "
         "'description': 'Find calendar events by confirmation status.'}]",
-        "(filter: dict)",
+        "(filter: dict) -> str",
         "['confirmed']",
         '{"filter": {"status": "confirmed"}}',
+        "str confirmed",
         "3",
-        "1999 1999 None",
+        "2999 2999 None",
         "True",
         "{'matches': [], 'next_cursor': None}",
     ]
     assert not list(session.dir.glob("catalog_*.py"))
     prompt = client.calls[0]["messages"][0]["content"]
     assert "rlm.tools.search" in prompt
-    assert '"tool_count": 2000' in prompt
+    assert '"tool_count": 3000' in prompt
+    assert "Find calendar events and catalog operations." in prompt
     assert "catalog_calendarEvents" not in prompt
     assert "catalog_operation_" not in prompt
     meta = json.loads((session.dir / "meta.json").read_text())
@@ -211,13 +222,29 @@ print(await rlm.tools.search('no_matching_word'))
     }
 
 
-async def test_discovery_rejects_repeated_pagination_cursor():
+async def test_discovery_rejects_invalid_or_oversized_catalogs(monkeypatch):
     registry = mcp.MCPRegistry({"catalog": _catalog_server(REPEAT_CURSOR="1")})
     with pytest.raises(RuntimeError, match="discovery failed"):
         await asyncio.wait_for(registry.discover(), timeout=10)
+    monkeypatch.setattr(mcp, "MAX_MCP_CATALOG_BYTES", 1000)
+    registry = mcp.MCPRegistry({"catalog": _catalog_server()})
+    with pytest.raises(ValueError, match="catalog metadata exceeds"):
+        await registry.discover()
+    monkeypatch.setattr(mcp, "MAX_MCP_DESCRIPTOR_BYTES", 100)
+    registry = mcp.MCPRegistry({"catalog": _catalog_server()})
+    with pytest.raises(ValueError, match="public tool metadata exceeds"):
+        await registry.discover()
 
 
-async def test_search_cursor_is_bound_to_catalog_query_and_server():
+async def test_search_cursor_is_bound_to_catalog_query_and_server(monkeypatch):
+    converted = []
+    descriptor_type = mcp.MCPToolDescriptor
+
+    def convert(**fields):
+        converted.append(fields["name"])
+        return descriptor_type(**fields)
+
+    monkeypatch.setattr(mcp, "MCPToolDescriptor", convert)
     registry = mcp.MCPRegistry({"catalog": _catalog_server()})
     await registry.discover()
     first = registry.search("operation", limit=3)
@@ -242,6 +269,13 @@ async def test_search_cursor_is_bound_to_catalog_query_and_server():
     await other_catalog.discover()
     with pytest.raises(ValueError, match="invalid MCP search cursor"):
         other_catalog.search("operation", cursor=cursor)
+    assert converted == []
+    descriptor = registry.get("catalog_calendarEvents")
+    assert registry.get("catalog_calendarEvents") is descriptor
+    assert converted == ["catalog_calendarEvents"]
+    assert descriptor.input_schema["properties"]["filter"]["properties"]["status"][
+        "enum"
+    ] == ["confirmed"]
 
 
 async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_path):
@@ -263,7 +297,9 @@ async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_pat
                 tool_calls=[
                     DummyToolCall(
                         "ipython",
-                        {"code": "print(await local_echo(text='reused'))"},
+                        {
+                            "code": "tool = await rlm.tools.get('local_echo'); print(await tool(text='reused'))"
+                        },
                     )
                 ]
             ),

@@ -6,7 +6,7 @@ from rlm import broker
 
 
 async def servers() -> list[dict[str, Any]]:
-    """List MCP server names and tool counts without retrieving tool schemas."""
+    """List server names, tool counts and available descriptions, without schemas."""
     return await broker.agent_request("tools.servers")
 
 
@@ -24,6 +24,6 @@ async def search(
 
 
 async def get(name: str):
-    """Load a tool by search-result id. Use .schema or help() before calling it."""
+    """Load an async callable returning str. Inspect .schema or help() before use."""
     descriptor = await broker.agent_request("tools.get", name=name)
     return broker.make_skill(descriptor)

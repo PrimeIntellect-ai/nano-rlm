@@ -446,7 +446,7 @@ def make_skill(descriptor: dict[str, Any]):
     parameters.sort(
         key=lambda parameter: parameter.default is not inspect.Parameter.empty
     )
-    signature = inspect.Signature(parameters)
+    signature = inspect.Signature(parameters, return_annotation=str)
     names = [parameter.name for parameter in parameters]
 
     async def run(*args: Any, **kwargs: Any) -> str:
@@ -460,7 +460,11 @@ def make_skill(descriptor: dict[str, Any]):
 
     run.__name__ = run.__qualname__ = name
     run.__signature__ = signature
-    run.__doc__ = description
+    run.__doc__ = (
+        description
+        + "\n\nReturns text (str). Decode JSON text with json.loads(result); "
+        "prose and CSV remain text."
+    )
     run.schema = schema
     return run
 

@@ -87,7 +87,7 @@ FETCH_SKILL_PROMPT = (
 )
 
 MCP_DISCOVERY_PROMPT = """## MCP tool discovery
-Use `await rlm.tools.servers()` for server names and tool counts. Search by keywords
+Use `await rlm.tools.servers()` for server names, tool counts and available descriptions. Search by keywords
 with `page = await rlm.tools.search("calendar events", limit=5, server=None)`.
 `page["matches"]` contains id, server and a short description, without argument schemas.
 Each page has at most 20 matches. If `page["next_cursor"]` is not None, retrieve more
@@ -97,8 +97,10 @@ If no match fits, try other keywords or filter by server. Load a selected tool w
 JSON input schema (nested fields, enums and constraints), or `help(tool)` for its
 Python signature and description, then call `await tool(...)` using that schema.
 Save callables in variables to reuse them, and use asyncio.gather for independent calls.
-Large catalogs load selected tool callables on demand. Small catalogs also have
-pre-imported callable skills; their full input schemas are available as `<skill>.run.schema`.
+MCP tools are loaded async functions: use `await tool(...)`, not guessed methods such as
+`tool.search(...)`. Tool names are not pre-imported, regardless of catalog size.
+Calls return text (str). If a tool returns JSON text, decode it with `json.loads(result)`
+before indexing fields; prose and CSV remain text.
 """
 
 # One curated line per built-in skill, appended generically for whatever is enabled.

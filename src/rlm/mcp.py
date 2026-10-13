@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import inspect
 import hmac
+import inspect
 import json
 import keyword
 import re
@@ -18,9 +18,9 @@ from typing import Annotated, Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.types import Tool
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
-MAX_EAGER_MCP_TOOLS = 128
 MAX_MCP_SKILL_NAME_CHARS = 96
 MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
 MAX_MCP_CATALOG_BYTES = 64 * 1024 * 1024
@@ -80,11 +80,13 @@ class MCPToolDescriptor:
 
 
 @dataclass(frozen=True)
-class _RegisteredMCPTool:
-    descriptor: MCPToolDescriptor
-    server: MCPServer
-    tool_name: str
+class _CatalogMCPTool:
     server_name: str
+    tool: Tool
+
+
+class _CatalogError(ValueError):
+    """Invalid or oversized public MCP catalog metadata."""
 
 
 class MCPToolError(RuntimeError):
@@ -97,29 +99,45 @@ class MCPRegistry:
     def __init__(self, servers: dict[str, MCPServer], cwd: str | None = None) -> None:
         self._servers = validate_mcp_servers(servers)
         self._cwd = cwd
-        self._tools: dict[str, _RegisteredMCPTool] | None = None
-        self._names: dict[str, str] = {}
+        self._tools: dict[str, _CatalogMCPTool] | None = None
+        self._loaded: dict[str, MCPToolDescriptor] = {}
+        self._capabilities: dict[str, str] = {}
+        self._server_descriptions: dict[str, str] = {}
         self._index: dict[str, dict[str, int]] = {}
-        self._descriptor_bytes = 0
         self._cursor_key = secrets.token_bytes(32)
 
-    async def discover(self) -> tuple[MCPToolDescriptor, ...]:
+    async def discover(self) -> None:
         if self._tools is not None:
-            return tuple(entry.descriptor for entry in self._tools.values())
+            return
 
-        registered: dict[str, _RegisteredMCPTool] = {}
-        names: set[str] = set()
-        descriptor_bytes = 0
+        catalog: dict[str, _CatalogMCPTool] = {}
+        server_descriptions: dict[str, str] = {}
+        catalog_bytes = 0
         for server_name, server in self._servers.items():
+            catalog_error: _CatalogError | None = None
             try:
                 async with _client_session(server, self._cwd) as session:
-                    await session.initialize()
-                    tools = []
+                    info = await session.initialize()
+                    server_descriptions[server_name] = (
+                        getattr(info.serverInfo, "description", None)
+                        or info.instructions
+                        or ""
+                    )[:1000]
                     cursor = None
                     cursors: set[str] = set()
                     while True:
                         page = await session.list_tools(cursor=cursor)
-                        tools.extend(page.tools)
+                        for tool in page.tools:
+                            try:
+                                catalog_bytes = _add_catalog_tool(
+                                    catalog, server_name, tool, catalog_bytes
+                                )
+                            except _CatalogError as exc:
+                                # Close the SDK task group normally before reporting metadata errors.
+                                catalog_error = exc
+                                break
+                        if catalog_error is not None:
+                            break
                         cursor = page.nextCursor
                         if cursor is None:
                             break
@@ -130,62 +148,15 @@ class MCPRegistry:
                 raise RuntimeError(
                     f"MCP server {server_name!r} discovery failed"
                 ) from None
-            for tool in tools:
-                name = _skill_name(server_name, tool.name)
-                if not name.isidentifier() or keyword.iskeyword(name):
-                    raise ValueError(
-                        f"MCP tool name {name!r} is not a Python identifier"
-                    )
-                if len(name) > MAX_MCP_SKILL_NAME_CHARS:
-                    raise ValueError(
-                        f"MCP tool name exceeds {MAX_MCP_SKILL_NAME_CHARS} characters"
-                    )
-                if name in names:
-                    raise ValueError(f"duplicate normalized MCP tool name: {name!r}")
-                names.add(name)
-                capability = secrets.token_urlsafe(24)
-                descriptor = MCPToolDescriptor(
-                    capability=capability,
-                    name=name,
-                    description=tool.description or f"MCP tool {tool.name!r}.",
-                    input_schema=dict(tool.inputSchema),
-                )
-                size = len(
-                    json.dumps(descriptor.to_dict(), separators=(",", ":")).encode()
-                )
-                if size > MAX_MCP_DESCRIPTOR_BYTES:
-                    raise ValueError(
-                        "MCP public tool metadata exceeds "
-                        f"{MAX_MCP_DESCRIPTOR_BYTES} bytes"
-                    )
-                descriptor_bytes += size
-                if descriptor_bytes > MAX_MCP_CATALOG_BYTES:
-                    raise ValueError(
-                        f"MCP catalog metadata exceeds {MAX_MCP_CATALOG_BYTES} bytes"
-                    )
-                registered[capability] = _RegisteredMCPTool(
-                    descriptor=descriptor,
-                    server=server,
-                    tool_name=tool.name,
-                    server_name=server_name,
-                )
-        self._tools = registered
-        self._descriptor_bytes = descriptor_bytes
-        self._names = {entry.descriptor.name: cap for cap, entry in registered.items()}
-        for cap, entry in registered.items():
-            for token in _search_tokens(entry.descriptor.description):
-                self._index.setdefault(token, {})[cap] = 1
-            for token in _search_tokens(entry.descriptor.name):
-                self._index.setdefault(token, {})[cap] = 4
-        return tuple(entry.descriptor for entry in registered.values())
-
-    @property
-    def eager(self) -> bool:
-        return (
-            self._tools is not None
-            and len(self._tools) <= MAX_EAGER_MCP_TOOLS
-            and self._descriptor_bytes <= MAX_MCP_DESCRIPTOR_BYTES
-        )
+            if catalog_error is not None:
+                raise catalog_error
+        self._tools = catalog
+        self._server_descriptions = server_descriptions
+        for name, entry in catalog.items():
+            for token in _search_tokens(entry.tool.description or ""):
+                self._index.setdefault(token, {})[name] = 1
+            for token in _search_tokens(name):
+                self._index.setdefault(token, {})[name] = 4
 
     def servers(self) -> list[dict[str, Any]]:
         if self._tools is None:
@@ -193,14 +164,37 @@ class MCPRegistry:
         counts = dict.fromkeys(self._servers, 0)
         for entry in self._tools.values():
             counts[entry.server_name] += 1
-        return [{"name": name, "tool_count": count} for name, count in counts.items()]
+        return [
+            {
+                "name": name,
+                "tool_count": count,
+                **(
+                    {"description": self._server_descriptions[name]}
+                    if self._server_descriptions[name]
+                    else {}
+                ),
+            }
+            for name, count in counts.items()
+        ]
 
     def get(self, name: str) -> MCPToolDescriptor:
+        if self._tools is None:
+            raise RuntimeError("MCP tools have not been discovered")
+        if name in self._loaded:
+            return self._loaded[name]
         try:
-            capability = self._names[name]
+            entry = self._tools[name]
         except KeyError:
             raise ValueError(f"unknown MCP tool: {name!r}") from None
-        return self.descriptor(capability)
+        descriptor = MCPToolDescriptor(
+            capability=secrets.token_urlsafe(24),
+            name=name,
+            description=entry.tool.description or f"MCP tool {entry.tool.name!r}.",
+            input_schema=dict(entry.tool.inputSchema),
+        )
+        self._loaded[name] = descriptor
+        self._capabilities[descriptor.capability] = name
+        return descriptor
 
     def search(
         self,
@@ -227,19 +221,20 @@ class MCPRegistry:
         for token in sorted(_search_tokens(query)):
             matches = self._index.get(token, {})
             weight = log(1 + len(self._tools) / (1 + len(matches)))
-            for cap, boost in matches.items():
-                if server is None or self._tools[cap].server_name == server:
-                    scores[cap] = scores.get(cap, 0) + weight * boost
-        ranked = sorted(
-            scores, key=lambda cap: (-scores[cap], self._tools[cap].descriptor.name)
-        )
+            for name, boost in matches.items():
+                if server is None or self._tools[name].server_name == server:
+                    scores[name] = scores.get(name, 0) + weight * boost
+        ranked = sorted(scores, key=lambda name: (-scores[name], name))
         matches = [
             {
-                "id": self._tools[cap].descriptor.name,
-                "server": self._tools[cap].server_name,
-                "description": self._tools[cap].descriptor.description[:1000],
+                "id": name,
+                "server": self._tools[name].server_name,
+                "description": (
+                    self._tools[name].tool.description
+                    or f"MCP tool {self._tools[name].tool.name!r}."
+                )[:1000],
             }
-            for cap in ranked[offset : offset + limit]
+            for name in ranked[offset : offset + limit]
         ]
         next_offset = offset + len(matches)
         return {
@@ -258,17 +253,17 @@ class MCPRegistry:
         if self._tools is None:
             raise RuntimeError("MCP tools have not been discovered")
         try:
-            return self._tools[capability].descriptor
+            return self._loaded[self._capabilities[capability]]
         except KeyError as exc:
             raise PermissionError("unknown MCP tool capability") from exc
 
     async def call(self, capability: str, arguments: dict[str, Any]) -> str:
         descriptor = self.descriptor(capability)
-        entry = self._tools[capability]
+        entry = self._tools[descriptor.name]
         try:
             return await call_tool(
-                entry.server,
-                entry.tool_name,
+                self._servers[entry.server_name],
+                entry.tool.name,
                 arguments,
                 self._cwd,
             )
@@ -277,15 +272,34 @@ class MCPRegistry:
         except Exception:
             raise RuntimeError(f"MCP tool {descriptor.name!r} is unavailable") from None
 
-    def write_skill_modules(
-        self, dest_dir: Path, reserved_names: Iterable[str] = ()
-    ) -> list[str]:
-        if self._tools is None:
-            raise RuntimeError("MCP tools have not been discovered")
-        descriptors = (
-            [entry.descriptor for entry in self._tools.values()] if self.eager else []
+
+def _add_catalog_tool(
+    catalog: dict[str, _CatalogMCPTool],
+    server_name: str,
+    tool: Tool,
+    catalog_bytes: int,
+) -> int:
+    name = _skill_name(server_name, tool.name)
+    if not name.isidentifier() or keyword.iskeyword(name):
+        raise _CatalogError(f"MCP tool name {name!r} is not a Python identifier")
+    if len(name) > MAX_MCP_SKILL_NAME_CHARS:
+        raise _CatalogError(
+            f"MCP tool name exceeds {MAX_MCP_SKILL_NAME_CHARS} characters"
         )
-        return write_skill_modules(descriptors, dest_dir, reserved_names)
+    if name in catalog:
+        raise _CatalogError(f"duplicate normalized MCP tool name: {name!r}")
+    size = len(tool.model_dump_json(by_alias=True, exclude_none=True).encode())
+    if size > MAX_MCP_DESCRIPTOR_BYTES:
+        raise _CatalogError(
+            f"MCP public tool metadata exceeds {MAX_MCP_DESCRIPTOR_BYTES} bytes"
+        )
+    catalog_bytes += size
+    if catalog_bytes > MAX_MCP_CATALOG_BYTES:
+        raise _CatalogError(
+            f"MCP catalog metadata exceeds {MAX_MCP_CATALOG_BYTES} bytes"
+        )
+    catalog[name] = _CatalogMCPTool(server_name, tool)
+    return catalog_bytes
 
 
 def _search_tokens(text: str) -> set[str]:

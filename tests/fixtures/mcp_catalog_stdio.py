@@ -8,8 +8,10 @@ from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-server = Server("catalog-test")
-COUNT = 2000
+server = Server(
+    "catalog-test", instructions="Find calendar events and catalog operations."
+)
+COUNT = 3000
 PAGE_SIZE = 100
 SCHEMA = {
     "type": "object",
