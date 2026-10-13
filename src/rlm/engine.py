@@ -200,7 +200,7 @@ class RLMEngine:
         self.runtime_config = runtime_config
         config = self.runtime_config
         self.model = config.model
-        self.cwd = cwd or os.getcwd()
+        self.cwd = config.execution_cwd or cwd or os.getcwd()
         self.exec_timeout = config.policy.exec_timeout
         self.max_total_turns = config.policy.max_total_turns
         self.max_tool_output_bytes = config.policy.max_tool_output_bytes
@@ -519,6 +519,10 @@ class RLMEngine:
         self._active_tools = get_active_builtin_tools(
             self.exec_timeout, self.builtin_tools
         )
+        if self.runtime_config.split_execution:
+            from rlm.execution import validate_tools
+
+            validate_tools(tool.name for tool in self._active_tools)
         self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
 
         if self.compaction and self.summarize_at_tokens is None:
@@ -578,7 +582,17 @@ class RLMEngine:
                     self._owns_supervisor = False
                 raise
 
-        self._repl = IPythonREPL(
+        repl_type = IPythonREPL
+        repl_options = {}
+        if self.runtime_config.split_execution:
+            from rlm.execution import RemoteREPL
+
+            repl_type = RemoteREPL
+            repl_options["command"] = self.runtime_config.execution_command
+            repl_options["tcp"] = self.runtime_config.execution_tcp
+            repl_options["tools"] = [tool.name for tool in self._active_tools]
+        self._repl = repl_type(
+            **repl_options,
             cwd=self.cwd,
             session=self.session,
             kernel_env=self.kernel_env,
@@ -923,9 +937,14 @@ class RLMEngine:
                     if scope_id is not None:
                         repl.set_broker_scope(scope_id)
                     run = repl.run_in_thread if repl is not None else asyncio.to_thread
-                    tool_task = asyncio.create_task(
-                        run(tool.execute, tool_args, self._tool_context(messages))
-                    )
+                    if self.runtime_config.split_execution:
+                        tool_task = asyncio.create_task(
+                            run(repl.execute_tool, tool.name, tool_args)
+                        )
+                    else:
+                        tool_task = asyncio.create_task(
+                            run(tool.execute, tool_args, self._tool_context(messages))
+                        )
                     try:
                         tool_result = await asyncio.shield(tool_task)
                     except asyncio.CancelledError:
@@ -1481,7 +1500,8 @@ class RLMEngine:
             str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
             depth=self.depth,
-            session_dir=str(self.session.dir),
+            session_dir=getattr(self._repl, "session_dir", None)
+            or str(self.session.dir),
             allow_recursion=self.depth < self.max_depth,
             delegation_prompt=self.runtime_config.policy.delegation_prompt,
             allow_git=self.allow_git,
@@ -1491,6 +1511,7 @@ class RLMEngine:
             if self.system_prompt_path
             else None,
             extra_instructions=self.append_to_system_prompt,
+            split_execution=self.runtime_config.split_execution,
             agent_info=self._supervisor.agent_context(self._invocation_id)
             if self._supervisor
             else None,

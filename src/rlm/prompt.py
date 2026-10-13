@@ -346,6 +346,7 @@ def build_system_prompt(
     task_instructions: str | None = None,
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
+    split_execution: bool = False,
 ) -> str:
     """Compose task instructions with the guide for this agent's actual runtime."""
     has_ipython = _has_tool(active_tools, "ipython")
@@ -402,7 +403,17 @@ def build_system_prompt(
     if has_ipython:
         parts.extend(
             [
-                RUNTIME_PROMPT,
+                (
+                    "Execution uses a persistent IPython session in the task workspace. "
+                    "Run commands through Python subprocesses or the bash skill, and edit task files there. "
+                    "rlm.shell and rlm.watch.path are unavailable in this execution mode. "
+                    "Recursive agents and their Python kernels share the task workspace. "
+                    "Use await rlm.inbox.list() and await rlm.inbox.read(event_id) for supervisor events. "
+                    "The native wait tool waits for agent events. Your conversation ledger is a snapshot "
+                    "refreshed before each cell; await child.history() reads a child's current history."
+                    if split_execution
+                    else RUNTIME_PROMPT
+                ),
                 HISTORY_PROMPT,
                 IPYTHON_CONTROL_PROMPT,
                 KERNEL_PACKAGES_PROMPT,

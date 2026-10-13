@@ -252,6 +252,7 @@ class _KernelDied(RuntimeError):
 
 
 MAX_RECOVERY_ATTEMPTS = 3
+MAX_CELL_OUTPUT_BYTES = 1024 * 1024
 
 
 class IPythonREPL:
@@ -587,6 +588,7 @@ import rlm
         deadline = None if timeout is None else time.monotonic() + timeout
 
         outputs: list[str] = []
+        output_bytes = 0
         try:
             while True:
                 if not self._km.is_alive():
@@ -616,18 +618,30 @@ import rlm
                 msg_type = msg["msg_type"]
                 content = msg["content"]
 
+                text = ""
                 if msg_type == "stream":
-                    outputs.append(content["text"])
+                    text = content["text"]
                 elif msg_type == "execute_result":
                     text = content.get("data", {}).get("text/plain", "")
                     if text:
-                        outputs.append(text + "\n")
+                        text += "\n"
                 elif msg_type == "error":
                     tb = "\n".join(content.get("traceback", []))
                     tb = _ANSI_RE.sub("", tb)
-                    outputs.append(tb)
+                    text = tb
                 elif msg_type == "status" and content["execution_state"] == "idle":
                     break
+                if text:
+                    data = text.encode("utf-8", errors="replace")
+                    remaining = MAX_CELL_OUTPUT_BYTES - output_bytes
+                    outputs.append(data[:remaining].decode("utf-8", errors="replace"))
+                    output_bytes += min(len(data), remaining)
+                    if len(data) >= remaining:
+                        self._interrupt_and_recover(msg_id)
+                        outputs.append(
+                            "\n[cell output exceeded 1 MiB; execution interrupted]"
+                        )
+                        break
         finally:
             try:
                 timeout = 0.1 if self._interrupt_requested.is_set() else 5
