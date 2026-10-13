@@ -373,7 +373,7 @@ def build_system_prompt(
     ]
     if extra_instructions:
         parts.append(extra_instructions)
-    if has_ipython and mcp_servers:
+    if has_ipython and any(server["tool_count"] > 0 for server in mcp_servers or []):
         parts.append(MCP_DISCOVERY_PROMPT)
         parts.append("MCP servers: " + json.dumps(mcp_servers))
     if can_delegate and delegation_prompt:
