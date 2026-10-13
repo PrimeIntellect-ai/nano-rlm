@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+from threading import Event
 
 from rlm.types import BuiltinMetricEvent, RLMMetrics, TokenUsage
 
@@ -29,6 +30,8 @@ class ToolContext:
     repl: Any | None = None
     state: dict[str, Any] = field(default_factory=dict)
     cwd: str = ""
+    env: dict[str, str] | None = None
+    interrupt_event: Event | None = None
 
 
 class BuiltinTool(Protocol):

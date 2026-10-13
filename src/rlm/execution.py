@@ -1,4 +1,4 @@
-"""Persistent execution sessions over a trusted worker command's stdio.
+"""Tool-call execution sessions over orchestrator-supplied transports.
 
 The command is supplied by the orchestrator (for example docker exec -i). Only
 kernel configuration and generated skills cross into the worker; model credentials,
@@ -11,7 +11,10 @@ import concurrent.futures
 import json
 import socket
 import struct
-import subprocess
+import argparse
+import hmac
+import os
+from dataclasses import asdict
 import sys
 import tempfile
 import threading
@@ -20,7 +23,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from rlm.broker import BrokerEndpoint
-from rlm.tools.ipython import IPythonREPL
+from rlm.tools.ipython import IPythonREPL, build_kernel_env
+from rlm.tools.base import ToolContext, ToolOutcome
+from rlm.tools.registry import get_builtin_tool
+from rlm.types import IpythonExecuted, RLMMetrics, TokenUsage
+from rlm.execution_transport import ExecutionTransport, StdioTransport, TcpTransport
+
+WORKSPACE_TOOLS = ("ipython", "bash", "edit", "fetch")
+
+
+def validate_tools(names):
+    unknown = set(names) - set(WORKSPACE_TOOLS)
+    if unknown:
+        raise ValueError(f"split execution does not support tools: {sorted(unknown)}")
+
 
 MAX_FRAME = 16 * 1024 * 1024
 
@@ -138,10 +154,23 @@ class _Peer:
 class RemoteREPL(IPythonREPL):
     """The IPython execution-session interface backed by a separate worker."""
 
-    def __init__(self, *, command, **kwargs):
+    def __init__(
+        self,
+        *,
+        command=None,
+        tcp=None,
+        transport: ExecutionTransport | None = None,
+        tools=("ipython",),
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        self.command = command
-        self._process = None
+        if sum(option is not None for option in (command, tcp, transport)) != 1:
+            raise ValueError("choose one execution transport")
+        validate_tools(tools)
+        self.tools = list(tools)
+        self.transport = transport or (
+            TcpTransport(tcp) if tcp else StdioTransport(command)
+        )
         self._peer = None
         self.session_dir = None
 
@@ -166,20 +195,15 @@ class RemoteREPL(IPythonREPL):
                 return _receive(stream)
 
     def start(self):
-        self._process = subprocess.Popen(
-            self.command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            start_new_session=True,
-        )
-        self._peer = _Peer(self._process.stdout, self._process.stdin, self._broker)
+        reader, writer = self.transport.connect()
+        self._peer = _Peer(reader, writer, self._broker)
         modules = {
             path.name: path.read_text() for path in self.session.dir.glob("*.py")
         }
         self.session_dir = self._peer.call(
             "start",
             {
+                "tools": self.tools,
                 "cwd": self.cwd,
                 "kernel_env": self.kernel_env,
                 "depth": self.depth,
@@ -194,22 +218,29 @@ class RemoteREPL(IPythonREPL):
             timeout=120,
         )
 
-    def execute(self, code, timeout=None):
+    def execute_tool(self, name, args):
         result = self._peer.call(
-            "execute",
+            "tool",
             {
-                "code": code,
-                "timeout": timeout,
+                "name": name,
+                "args": args,
                 "scope_id": self._scope_id,
                 "history": (self.session.dir / "messages.jsonl").read_text(),
             },
         )
         self._recovery_notices.extend(result["notices"])
-        # Programmatic tool statistics are observational, just as with local kernels.
         (self.session.dir / "programmatic_tool_calls.jsonl").write_text(
             result["tool_log"]
         )
-        return result["output"]
+        return ToolOutcome(
+            content=result["output"],
+            metric_events=[
+                IpythonExecuted(**event) for event in result["metric_events"]
+            ],
+        )
+
+    def execute(self, code, timeout=None):
+        return self.execute_tool("ipython", {"code": code, "timeout": timeout}).content
 
     def interrupt(self):
         if self._peer is not None and not self._peer.closed.is_set():
@@ -220,26 +251,19 @@ class RemoteREPL(IPythonREPL):
             self._peer.call("finish_interrupt", timeout=5)
 
     def shutdown(self):
-        process, self._process = self._process, None
-        if process is not None:
-            try:
-                if self._peer is not None and not self._peer.closed.is_set():
-                    self._peer.call("close", timeout=30)
-            finally:
-                # EOF is also a worker shutdown request if the explicit close failed.
-                process.stdin.close()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-                process.stdout.close()
-        self._executor.shutdown(wait=False)
+        try:
+            if self._peer is not None and not self._peer.closed.is_set():
+                self._peer.call("close", timeout=30)
+        finally:
+            self.transport.close()
+            self._executor.shutdown(wait=False)
 
 
 class _Worker:
     def __init__(self):
         self.repl = None
+        self.tools = []
+        self.context = None
         self.peer = None
         self.directory = tempfile.TemporaryDirectory(prefix="rlm-execution-")
         self.session_dir = Path(self.directory.name)
@@ -273,6 +297,8 @@ class _Worker:
             if self.repl is not None:
                 raise ValueError("execution session already started")
             params = dict(params)
+            self.tools = params.pop("tools")
+            validate_tools(self.tools)
             modules = params.pop("modules")
             for name, source in modules.items():
                 if Path(name).name != name or not name.endswith(".py"):
@@ -292,20 +318,36 @@ class _Worker:
                 broker_endpoint=endpoint,
                 **params,
             )
+            self.context = ToolContext(
+                messages=[],
+                metrics=RLMMetrics(),
+                total_usage=TokenUsage(),
+                last_prompt_tokens=0,
+                exec_timeout=self.repl.exec_timeout or 300,
+                allow_git=self.repl.allow_git,
+                repl=self.repl,
+                cwd=self.repl.cwd,
+                env=build_kernel_env(self.repl.kernel_env),
+                interrupt_event=self.repl._interrupt_requested,
+            )
             # All Jupyter operations use the same dedicated thread.
             self.repl._executor.submit(self.repl.start).result()
             return str(self.session_dir)
         if self.repl is None:
             raise ValueError("execution session has not started")
-        if method == "execute":
+        if method == "tool":
 
             def execute():
                 (self.session_dir / "messages.jsonl").write_text(params["history"])
                 self.repl.set_broker_scope(params["scope_id"])
-                output = self.repl.execute(params["code"], params["timeout"])
+                tool = get_builtin_tool(params["name"], self.tools)
+                if tool is None:
+                    raise ValueError("tool is not enabled for this execution session")
+                outcome = tool.execute(params["args"], self.context)
                 log = self.session_dir / "programmatic_tool_calls.jsonl"
                 return {
-                    "output": output,
+                    "output": outcome.content,
+                    "metric_events": [asdict(event) for event in outcome.metric_events],
                     "notices": self.repl.take_recovery_notices(),
                     "tool_log": log.read_text() if log.exists() else "",
                 }
@@ -331,15 +373,57 @@ class _Worker:
         self.directory.cleanup()
 
 
-def main():
+def _serve(reader, writer):
     worker = _Worker()
-    output = sys.stdout.buffer
-    sys.stdout = sys.stderr  # dependency diagnostics must not corrupt the wire
-    worker.peer = _Peer(sys.stdin.buffer, output, worker.handle)
+    worker.peer = _Peer(reader, writer, worker.handle)
     try:
         worker.peer.closed.wait()
     finally:
         worker.close()
+
+
+def _serve_tcp(connection, token, slots):
+    try:
+        with connection, connection.makefile("rwb", buffering=0) as stream:
+            connection.settimeout(10)
+            supplied = _receive(stream).get("token")
+            if not isinstance(supplied, str) or not hmac.compare_digest(
+                supplied, token
+            ):
+                _send(stream, {"authenticated": False})
+                return
+            _send(stream, {"authenticated": True})
+            connection.settimeout(None)
+            _serve(stream, stream)
+    except (OSError, EOFError, ValueError):
+        pass  # unauthenticated or disconnected clients have no remaining session
+    finally:
+        slots.release()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Tool execution worker")
+    parser.add_argument("--listen", metavar="HOST")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+    output = sys.stdout.buffer
+    sys.stdout = sys.stderr  # dependency diagnostics must not corrupt the wire
+    if args.listen is None:
+        _serve(sys.stdin.buffer, output)
+        return
+    token = os.environ.pop("RLM_EXECUTION_TOKEN", "")
+    if len(token) < 32:
+        parser.error("TCP workers require RLM_EXECUTION_TOKEN (at least 32 characters)")
+    slots = threading.BoundedSemaphore(32)
+    with socket.create_server((args.listen, args.port)) as listener:
+        while True:
+            connection, _ = listener.accept()
+            if not slots.acquire(blocking=False):
+                connection.close()
+                continue
+            threading.Thread(
+                target=_serve_tcp, args=(connection, token, slots), daemon=True
+            ).start()
 
 
 if __name__ == "__main__":

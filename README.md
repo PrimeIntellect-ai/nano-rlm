@@ -526,15 +526,28 @@ an orchestrator can start the worker with `docker exec -i <task-container>
 version installed. The orchestrator owns container provisioning and teardown.
 
 The engine, model credentials, supervisor, and authoritative conversation logs
-remain in the harness process. Persistent IPython kernels and builtin skills run
+remain in the harness process. Native tools, persistent IPython kernels, and builtin skills run
 in the worker environment. Recursive agents inherit the execution destination,
 keep separate kernels, and share the task workspace. Communication and recursive
 callbacks use worker stdio, so a task container can have networking disabled.
 The command itself defines the isolation boundary; launching a local Python
 worker alone provides process separation, not filesystem isolation.
 
-Split execution supports the `ipython` builtin and its skills. Native bash/edit/fetch
-tools are rejected; use their builtin skills instead. Supervisor shell jobs
+ACP initialization advertises `ai.prime.rlm/execution-v1` with the supported
+transports (`stdio`, `tcp`) and tools (`ipython`, `bash`, `edit`, `fetch`). Tool
+calls cross the boundary as a name and arguments; filesystem operations happen
+inside the worker. `ExecutionTransport` supplies `connect()` (reader and writer)
+and `close()` independently of tool dispatch.
+
+For a trusted private TCP network, launch `python -m rlm.execution --listen
+0.0.0.0 --port 8765` with a random `RLM_EXECUTION_TOKEN` of at least 32 characters.
+Set `execution_tcp` to `{"host": "worker-address", "port": 8765, "token": "..."}`
+instead of `execution_command`. Each connection owns a separate execution session.
+The token authenticates connections; this transport does not encrypt traffic, so
+use a private network or an encrypted tunnel. The worker removes its token from
+the environment before starting tools. The orchestrator owns listener teardown.
+
+Supervisor shell jobs
 (`rlm.shell`) and filesystem watchers (`rlm.watch.path`) return explicit errors in
 this mode. `await child.history()` uses the supervisor; the current agent's local
 history is a snapshot refreshed before each cell. Worker frames, including history
