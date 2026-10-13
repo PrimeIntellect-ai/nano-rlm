@@ -17,7 +17,7 @@ async def search(
     server: str | None = None,
     cursor: str | None = None,
 ) -> dict[str, Any]:
-    """Return matches and next_cursor. Continue with the same query and server."""
+    """Search non-empty keywords (limit 1..20). Page with the same query and server."""
     return await broker.agent_request(
         "tools.search", query=query, limit=limit, server=server, cursor=cursor
     )

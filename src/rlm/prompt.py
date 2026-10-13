@@ -89,6 +89,7 @@ FETCH_SKILL_PROMPT = (
 MCP_DISCOVERY_PROMPT = """## MCP tool discovery
 Use `await rlm.tools.servers()` for server names, tool counts and available descriptions. Search by keywords
 with `page = await rlm.tools.search("calendar events", limit=5, server=None)`.
+Use a non-empty keyword query and a limit from 1 to 20; an empty query cannot list tools.
 `page["matches"]` contains id, server and a short description, without argument schemas.
 Each page has at most 20 matches. If `page["next_cursor"]` is not None, retrieve more
 with the same query and server and `cursor=page["next_cursor"]`. Stop when it is None.
