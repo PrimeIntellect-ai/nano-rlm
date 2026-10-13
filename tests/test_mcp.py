@@ -92,6 +92,10 @@ async def test_real_kernel_uses_mcp_without_transport_secrets(tmp_path):
 import inspect, os, subprocess
 print(await local_echo(text='hello'))
 print(inspect.signature(local_echo))
+matches = await rlm.tools.search('echo')
+tool = await rlm.tools.get(matches[0]['id'])
+print(tool.schema['properties']['text']['type'])
+print(await tool('discovered'))
 print('RLM_MCP_CONFIG' not in os.environ)
 print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
 """
@@ -116,6 +120,8 @@ print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
     assert tool_result(client).strip().splitlines() == [
         f"stdio-secret:True:{server_cwd}:hello",
         "(text: str)",
+        "string",
+        f"stdio-secret:True:{server_cwd}:discovered",
         "True",
         "True",
     ]
@@ -123,8 +129,83 @@ print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
     assert "stdio-secret" not in source
     assert str(Path(__file__).parent / "fixtures" / "mcp_stdio.py") not in source
     meta = json.loads((session.dir / "meta.json").read_text())
-    assert meta["programmatic_tool_call_stats"]["python_total"] == 1
-    assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"local_echo": 1}
+    assert meta["programmatic_tool_call_stats"]["python_total"] == 2
+    assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"local_echo": 2}
+
+
+def _catalog_server(**env) -> dict:
+    return {
+        "command": sys.executable,
+        "args": [str(Path(__file__).parent / "fixtures" / "mcp_catalog_stdio.py")],
+        "env": env,
+    }
+
+
+async def test_large_paginated_catalog_discovery_in_real_kernel(tmp_path):
+    session = Session(tmp_path / "session")
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": """
+import inspect
+print(await rlm.tools.servers())
+print('catalog_calendarEvents' in globals())
+matches = await rlm.tools.search('calendar events', server='catalog')
+print(matches)
+tool = await rlm.tools.get(matches[0]['id'])
+print(inspect.signature(tool))
+print(tool.schema['properties']['filter']['properties']['status']['enum'])
+print(await tool(filter={'status': 'confirmed'}))
+print(len(await rlm.tools.search('operation', limit=3)))
+print(await rlm.tools.search('no_matching_word'))
+"""
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(),
+        mcp_servers={"catalog": _catalog_server()},
+        cwd=str(tmp_path),
+    )
+    result = await engine.run("find confirmed calendar events")
+    assert result.answer == "done"
+    assert tool_result(client).strip().splitlines() == [
+        "[{'name': 'catalog', 'tool_count': 2000}]",
+        "False",
+        "[{'id': 'catalog_calendarEvents', 'server': 'catalog', "
+        "'description': 'Find calendar events by confirmation status.'}]",
+        "(filter: dict)",
+        "['confirmed']",
+        '{"filter": {"status": "confirmed"}}',
+        "3",
+        "[]",
+    ]
+    assert not list(session.dir.glob("catalog_*.py"))
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "rlm.tools.search" in prompt
+    assert '"tool_count": 2000' in prompt
+    assert "catalog_calendarEvents" not in prompt
+    assert "catalog_operation_" not in prompt
+    meta = json.loads((session.dir / "meta.json").read_text())
+    assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {
+        "catalog_calendarEvents": 1
+    }
+
+
+async def test_discovery_rejects_repeated_pagination_cursor():
+    registry = mcp.MCPRegistry({"catalog": _catalog_server(REPEAT_CURSOR="1")})
+    with pytest.raises(RuntimeError, match="discovery failed"):
+        await asyncio.wait_for(registry.discover(), timeout=10)
 
 
 async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_path):
@@ -136,7 +217,9 @@ async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_pat
                 tool_calls=[
                     DummyToolCall(
                         "ipython",
-                        {"code": f"await local_wait(marker={str(marker)!r})"},
+                        {
+                            "code": f"tool = await rlm.tools.get('local_wait'); await tool(marker={str(marker)!r})"
+                        },
                     )
                 ]
             ),

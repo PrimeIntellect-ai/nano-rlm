@@ -10,6 +10,7 @@ import secrets
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from math import log
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -18,9 +19,10 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
-MAX_MCP_TOOLS = 128
+MAX_EAGER_MCP_TOOLS = 128
 MAX_MCP_SKILL_NAME_CHARS = 96
 MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
+MAX_MCP_CATALOG_BYTES = 64 * 1024 * 1024
 
 _JSON_TO_PY = {
     "string": str,
@@ -81,6 +83,7 @@ class _RegisteredMCPTool:
     descriptor: MCPToolDescriptor
     server: MCPServer
     tool_name: str
+    server_name: str
 
 
 class MCPToolError(RuntimeError):
@@ -94,6 +97,9 @@ class MCPRegistry:
         self._servers = validate_mcp_servers(servers)
         self._cwd = cwd
         self._tools: dict[str, _RegisteredMCPTool] | None = None
+        self._names: dict[str, str] = {}
+        self._index: dict[str, dict[str, int]] = {}
+        self._descriptor_bytes = 0
 
     async def discover(self) -> tuple[MCPToolDescriptor, ...]:
         if self._tools is not None:
@@ -106,14 +112,23 @@ class MCPRegistry:
             try:
                 async with _client_session(server, self._cwd) as session:
                     await session.initialize()
-                    tools = (await session.list_tools()).tools
+                    tools = []
+                    cursor = None
+                    cursors: set[str] = set()
+                    while True:
+                        page = await session.list_tools(cursor=cursor)
+                        tools.extend(page.tools)
+                        cursor = page.nextCursor
+                        if cursor is None:
+                            break
+                        if cursor in cursors:
+                            raise ValueError("MCP pagination cursor repeated")
+                        cursors.add(cursor)
             except Exception:
                 raise RuntimeError(
                     f"MCP server {server_name!r} discovery failed"
                 ) from None
             for tool in tools:
-                if len(registered) >= MAX_MCP_TOOLS:
-                    raise ValueError(f"MCP tool count exceeds {MAX_MCP_TOOLS}")
                 name = _skill_name(server_name, tool.name)
                 if not name.isidentifier() or keyword.iskeyword(name):
                     raise ValueError(
@@ -133,21 +148,83 @@ class MCPRegistry:
                     description=tool.description or f"MCP tool {tool.name!r}.",
                     input_schema=dict(tool.inputSchema),
                 )
-                descriptor_bytes += len(
+                size = len(
                     json.dumps(descriptor.to_dict(), separators=(",", ":")).encode()
                 )
-                if descriptor_bytes > MAX_MCP_DESCRIPTOR_BYTES:
+                if size > MAX_MCP_DESCRIPTOR_BYTES:
                     raise ValueError(
                         "MCP public tool metadata exceeds "
                         f"{MAX_MCP_DESCRIPTOR_BYTES} bytes"
+                    )
+                descriptor_bytes += size
+                if descriptor_bytes > MAX_MCP_CATALOG_BYTES:
+                    raise ValueError(
+                        f"MCP catalog metadata exceeds {MAX_MCP_CATALOG_BYTES} bytes"
                     )
                 registered[capability] = _RegisteredMCPTool(
                     descriptor=descriptor,
                     server=server,
                     tool_name=tool.name,
+                    server_name=server_name,
                 )
         self._tools = registered
+        self._descriptor_bytes = descriptor_bytes
+        self._names = {entry.descriptor.name: cap for cap, entry in registered.items()}
+        for cap, entry in registered.items():
+            for token in _search_tokens(entry.descriptor.description):
+                self._index.setdefault(token, {})[cap] = 1
+            for token in _search_tokens(entry.descriptor.name):
+                self._index.setdefault(token, {})[cap] = 4
         return tuple(entry.descriptor for entry in registered.values())
+
+    @property
+    def eager(self) -> bool:
+        return (
+            self._tools is not None
+            and len(self._tools) <= MAX_EAGER_MCP_TOOLS
+            and self._descriptor_bytes <= MAX_MCP_DESCRIPTOR_BYTES
+        )
+
+    def servers(self) -> list[dict[str, Any]]:
+        if self._tools is None:
+            raise RuntimeError("MCP tools have not been discovered")
+        counts = dict.fromkeys(self._servers, 0)
+        for entry in self._tools.values():
+            counts[entry.server_name] += 1
+        return [{"name": name, "tool_count": count} for name, count in counts.items()]
+
+    def get(self, name: str) -> MCPToolDescriptor:
+        try:
+            capability = self._names[name]
+        except KeyError:
+            raise ValueError(f"unknown MCP tool: {name!r}") from None
+        return self.descriptor(capability)
+
+    def search(
+        self, query: str, limit: int = 5, server: str | None = None
+    ) -> list[dict[str, str]]:
+        if self._tools is None:
+            raise RuntimeError("MCP tools have not been discovered")
+        if server is not None and server not in self._servers:
+            raise ValueError(f"unknown MCP server: {server!r}")
+        scores: dict[str, float] = {}
+        for token in _search_tokens(query):
+            matches = self._index.get(token, {})
+            weight = log(1 + len(self._tools) / (1 + len(matches)))
+            for cap, boost in matches.items():
+                if server is None or self._tools[cap].server_name == server:
+                    scores[cap] = scores.get(cap, 0) + weight * boost
+        ranked = sorted(
+            scores, key=lambda cap: (-scores[cap], self._tools[cap].descriptor.name)
+        )
+        return [
+            {
+                "id": self._tools[cap].descriptor.name,
+                "server": self._tools[cap].server_name,
+                "description": self._tools[cap].descriptor.description[:1000],
+            }
+            for cap in ranked[:limit]
+        ]
 
     def descriptor(self, capability: str) -> MCPToolDescriptor:
         if self._tools is None:
@@ -177,8 +254,15 @@ class MCPRegistry:
     ) -> list[str]:
         if self._tools is None:
             raise RuntimeError("MCP tools have not been discovered")
-        descriptors = [entry.descriptor for entry in self._tools.values()]
+        descriptors = (
+            [entry.descriptor for entry in self._tools.values()] if self.eager else []
+        )
         return write_skill_modules(descriptors, dest_dir, reserved_names)
+
+
+def _search_tokens(text: str) -> set[str]:
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+    return set(re.findall(r"[^\W_]+", text.lower()))
 
 
 def _skill_name(server: str, tool: str) -> str:

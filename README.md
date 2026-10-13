@@ -324,10 +324,24 @@ A host harness can wire task-specific [MCP](https://modelcontextprotocol.io) too
 
 Programmatically, pass `mcp_servers={"tools": "http://127.0.0.1:8000/mcp"}` to `RLMEngine`. An HTTP server may instead be `{"url": "...", "headers": {"Authorization": "..."}}` when it needs request headers; stdio servers use the same `command` / `args` / `env` shape shown above.
 
-At startup `rlm` connects to each server, lists its tools, and generates one skill per tool (named `<server>_<tool>`, e.g. `tools_add_event`). These join the installed skills — pre-imported into the IPython namespace as async functions the agent calls programmatically, with a signature built from the tool's input schema:
+At startup `rlm` connects to each server and indexes all pages of its tool catalog in the supervisor. From IPython, discover tools by keywords in their names and descriptions, load a selected callable, and inspect its full JSON input schema before calling it:
+
+```python
+await rlm.tools.servers()  # server names and tool counts
+matches = await rlm.tools.search("calendar events", limit=5, server="tools")
+tool = await rlm.tools.get(matches[0]["id"])
+print(tool.schema)  # includes nested fields, enums and constraints
+help(tool)         # Python signature and description
+await tool(day="monday", title="standup")
+```
+
+Search returns at most 20 summaries (id, server and description), without schemas. Save loaded callables in variables to reuse them. Search uses keyword matching; try other keywords when no result fits. Catalog metadata is limited to 64 MiB, with at most 1 MiB per tool. Individual tool names are omitted from the prompt for large catalogs.
+
+Catalogs with at most 128 tools and at most 1 MiB of metadata also generate pre-imported skills named `<server>_<tool>` (e.g. `tools_add_event`), with a signature built from the tool's input schema:
 
 ```python
 help(tools_add_event)  # signature (typed from the schema) + the tool's description
+print(tools_add_event.run.schema)
 await tools_add_event(day="monday", title="standup")
 ```
 

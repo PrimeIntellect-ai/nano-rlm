@@ -230,6 +230,31 @@ class BrokerWatchHandleRequest(TypedDict):
     subscription_id: Annotated[str, Field(min_length=1)]
 
 
+class BrokerToolsSearchRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["tools.search"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    query: Annotated[str, Field(min_length=1, max_length=1024)]
+    limit: Annotated[int, Field(ge=1, le=20)]
+    server: str | None
+
+
+class BrokerToolsGetRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["tools.get"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=96)]
+
+
+class BrokerToolsServersRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["tools.servers"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+
+
 class BrokerSkillRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid")
     op: Literal["skill.call"]
@@ -247,6 +272,9 @@ BrokerRequest = Annotated[
     | BrokerAgentResultRequest
     | BrokerAgentWaitRequest
     | BrokerSkillRequest
+    | BrokerToolsSearchRequest
+    | BrokerToolsGetRequest
+    | BrokerToolsServersRequest
     | BrokerAgentMessageRequest
     | BrokerAgentReportRequest
     | BrokerInboxListRequest
@@ -432,6 +460,7 @@ def make_skill(descriptor: dict[str, Any]):
     run.__name__ = run.__qualname__ = name
     run.__signature__ = signature
     run.__doc__ = description
+    run.schema = schema
     return run
 
 
