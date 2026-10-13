@@ -13,6 +13,7 @@ import signal
 import time
 import contextlib
 import subprocess
+from threading import Event
 from typing import Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
@@ -65,6 +66,8 @@ def run_bash(
     timeout: int,
     cwd: str | None = None,
     allow_git: bool | None = None,
+    env: dict[str, str] | None = None,
+    interrupt_event: Event | None = None,
 ) -> str:
     """Guarded ``bash -c`` execution shared by the bash tool and the bash skill."""
     if not isinstance(command, str) or not command.strip():
@@ -82,6 +85,7 @@ def run_bash(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd or None,
+            env=env,
             start_new_session=True,
         ) as proc,
         selectors.DefaultSelector() as selector,
@@ -90,6 +94,9 @@ def run_bash(
         selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
         try:
             while selector.get_map():
+                if interrupt_event is not None and interrupt_event.is_set():
+                    reason = "[command interrupted; process group terminated]"
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     reason = f"Error: command timed out after {timeout}s"
@@ -144,6 +151,8 @@ class BashTool:
                 context.exec_timeout,
                 cwd=context.cwd,
                 allow_git=context.allow_git,
+                env=context.env,
+                interrupt_event=context.interrupt_event,
             )
         )
 

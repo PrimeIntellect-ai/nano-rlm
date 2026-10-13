@@ -7,7 +7,7 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rlm.network import NetworkBlocklist
 from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
@@ -96,6 +96,14 @@ class ExecutionPolicy(_ConfigModel):
     allow_git: bool = False
 
 
+class TcpExecutionConfig(_ConfigModel):
+    """Authenticated worker endpoint on a trusted private network."""
+
+    host: str = Field(min_length=1)
+    port: int = Field(gt=0, le=65535)
+    token: str = Field(min_length=32, repr=False)
+
+
 class RuntimeConfig(_ConfigModel):
     """Configuration resolved once at an RLM process boundary."""
 
@@ -114,12 +122,26 @@ class RuntimeConfig(_ConfigModel):
     kernel_env: tuple[tuple[str, str], ...] = Field(default=(), repr=False)
     execution_cwd: str | None = None
     execution_command: tuple[str, ...] | None = None
-    """Trusted argv launching an rlm.execution worker in the task environment.
-    None starts the kernel locally. Split execution currently supports IPython
-    and its skills; supervisor shell jobs and path watchers are unavailable."""
+    """Trusted argv launching an rlm.execution worker in the task environment."""
+    execution_tcp: TcpExecutionConfig | None = None
     search_api_key: str | None = Field(default=None, repr=False)
     network_block: NetworkBlocklist = ()
     """Search-result destination rules shared by every agent in the session tree."""
+
+    @model_validator(mode="after")
+    def _validate_execution(self):
+        if self.execution_command is not None:
+            if not self.execution_command or any(
+                not arg for arg in self.execution_command
+            ):
+                raise ValueError("execution_command must contain nonempty arguments")
+            if self.execution_tcp is not None:
+                raise ValueError("choose execution_command or execution_tcp")
+        return self
+
+    @property
+    def split_execution(self) -> bool:
+        return self.execution_command is not None or self.execution_tcp is not None
 
     @property
     def resolved_append_to_system_prompt(self) -> str | None:

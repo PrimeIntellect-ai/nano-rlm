@@ -520,13 +520,10 @@ class RLMEngine:
         self._active_tools = get_active_builtin_tools(
             self.exec_timeout, self.builtin_tools
         )
-        if self.runtime_config.execution_command is not None:
-            if not self.runtime_config.execution_command:
-                raise ValueError("execution_command must not be empty")
-            if any(tool.name != "ipython" for tool in self._active_tools):
-                raise ValueError(
-                    "split execution supports only the ipython builtin; use skills for bash/edit/fetch"
-                )
+        if self.runtime_config.split_execution:
+            from rlm.execution import validate_tools
+
+            validate_tools(tool.name for tool in self._active_tools)
         self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
 
         if self.compaction and self.summarize_at_tokens is None:
@@ -588,11 +585,13 @@ class RLMEngine:
 
         repl_type = IPythonREPL
         repl_options = {}
-        if self.runtime_config.execution_command is not None:
+        if self.runtime_config.split_execution:
             from rlm.execution import RemoteREPL
 
             repl_type = RemoteREPL
             repl_options["command"] = self.runtime_config.execution_command
+            repl_options["tcp"] = self.runtime_config.execution_tcp
+            repl_options["tools"] = [tool.name for tool in self._active_tools]
         self._repl = repl_type(
             **repl_options,
             cwd=self.cwd,
@@ -939,9 +938,14 @@ class RLMEngine:
                     if scope_id is not None:
                         repl.set_broker_scope(scope_id)
                     run = repl.run_in_thread if repl is not None else asyncio.to_thread
-                    tool_task = asyncio.create_task(
-                        run(tool.execute, tool_args, self._tool_context(messages))
-                    )
+                    if self.runtime_config.split_execution:
+                        tool_task = asyncio.create_task(
+                            run(repl.execute_tool, tool.name, tool_args)
+                        )
+                    else:
+                        tool_task = asyncio.create_task(
+                            run(tool.execute, tool_args, self._tool_context(messages))
+                        )
                     try:
                         tool_result = await asyncio.shield(tool_task)
                     except asyncio.CancelledError:
@@ -1511,7 +1515,7 @@ class RLMEngine:
             if self.system_prompt_path
             else None,
             extra_instructions=self.append_to_system_prompt,
-            split_execution=self.runtime_config.execution_command is not None,
+            split_execution=self.runtime_config.split_execution,
             agent_info=self._supervisor.agent_context(self._invocation_id)
             if self._supervisor
             else None,

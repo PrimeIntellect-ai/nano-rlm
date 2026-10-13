@@ -855,6 +855,10 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert initialized.field_meta == {
         CONTRACT_METADATA_KEY: True,
         "steering": {"supported": True},
+        "ai.prime.rlm/execution-v1": {
+            "transports": ["stdio", "tcp"],
+            "tools": ["ipython", "bash", "edit", "fetch"],
+        },
     }
 
     created = await agent.new_session(
@@ -1113,6 +1117,10 @@ async def test_acp_stdio_lifecycle(tmp_path):
     assert initialized.field_meta == {
         CONTRACT_METADATA_KEY: True,
         "steering": {"supported": True},
+        "ai.prime.rlm/execution-v1": {
+            "transports": ["stdio", "tcp"],
+            "tools": ["ipython", "bash", "edit", "fetch"],
+        },
     }
     assert created.field_meta is None
     assert closed.field_meta[SESSION_METADATA_KEY]["session_id"] == "wire-session"
