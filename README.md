@@ -346,7 +346,7 @@ if page["next_cursor"] is not None:
     )
 ```
 
-Save loaded callables in variables to reuse them. Search uses keyword matching; try other keywords when no result fits. Cursors belong to the current session's catalog and query/server filter. Raw catalog metadata is limited to 64 MiB, with at most 1 MiB per tool; bounds are checked while pages are indexed. Individual tool names are omitted from the system prompt.
+Save loaded callables in variables to reuse them. Search uses keyword matching; try other keywords when no result fits. Cursors belong to the current session's catalog and query/server filter. Raw catalog metadata, including listing cursors, is limited to 64 MiB, with at most 1 MiB per tool; bounds are checked while pages are indexed. Discovery allows at most 4,096 pages per server. Individual tool names are omitted from the system prompt.
 
 Loaded tools are async functions called with `await tool(...)`. Calls return text strings; when a tool returns JSON text, decode it before accessing fields. Prose and CSV remain text:
 

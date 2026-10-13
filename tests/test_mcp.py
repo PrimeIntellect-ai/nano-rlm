@@ -226,6 +226,22 @@ async def test_discovery_rejects_invalid_or_oversized_catalogs(monkeypatch):
     registry = mcp.MCPRegistry({"catalog": _catalog_server(REPEAT_CURSOR="1")})
     with pytest.raises(RuntimeError, match="discovery failed"):
         await asyncio.wait_for(registry.discover(), timeout=10)
+    with monkeypatch.context() as bounds:
+        bounds.setattr(mcp, "MAX_MCP_DISCOVERY_PAGES", 3)
+        registry = mcp.MCPRegistry(
+            {"catalog": _catalog_server(ENDLESS_EMPTY_PAGES="1")}
+        )
+        with pytest.raises(ValueError, match="tool listing exceeded 3 pages"):
+            await asyncio.wait_for(registry.discover(), timeout=10)
+        assert registry._tools is None
+    with monkeypatch.context() as bounds:
+        bounds.setattr(mcp, "MAX_MCP_CATALOG_BYTES", 100)
+        registry = mcp.MCPRegistry(
+            {"catalog": _catalog_server(ENDLESS_EMPTY_PAGES="1", CURSOR_BYTES="60")}
+        )
+        with pytest.raises(ValueError, match="pagination metadata exceeds"):
+            await asyncio.wait_for(registry.discover(), timeout=10)
+        assert registry._tools is None
     monkeypatch.setattr(mcp, "MAX_MCP_CATALOG_BYTES", 1000)
     registry = mcp.MCPRegistry({"catalog": _catalog_server()})
     with pytest.raises(ValueError, match="catalog metadata exceeds"):

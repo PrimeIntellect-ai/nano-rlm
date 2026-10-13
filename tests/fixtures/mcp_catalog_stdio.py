@@ -28,7 +28,13 @@ SCHEMA = {
 
 @server.list_tools()
 async def list_tools(request: types.ListToolsRequest) -> types.ListToolsResult:
-    start = int(request.params.cursor or 0) if request and request.params else 0
+    cursor = request.params.cursor if request and request.params else None
+    start = int((cursor or "0").partition(":")[0])
+    if os.environ.get("ENDLESS_EMPTY_PAGES"):
+        return types.ListToolsResult(
+            tools=[],
+            nextCursor=f"{start + 1}:" + "x" * int(os.environ.get("CURSOR_BYTES", "0")),
+        )
     end = min(start + PAGE_SIZE, COUNT)
     return types.ListToolsResult(
         tools=[

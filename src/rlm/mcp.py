@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 MAX_MCP_SKILL_NAME_CHARS = 96
 MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
 MAX_MCP_CATALOG_BYTES = 64 * 1024 * 1024
+MAX_MCP_DISCOVERY_PAGES = 4096
 
 _JSON_TO_PY = {
     "string": str,
@@ -125,7 +126,7 @@ class MCPRegistry:
                     )[:1000]
                     cursor = None
                     cursors: set[str] = set()
-                    while True:
+                    for _ in range(MAX_MCP_DISCOVERY_PAGES):
                         page = await session.list_tools(cursor=cursor)
                         for tool in page.tools:
                             try:
@@ -143,7 +144,18 @@ class MCPRegistry:
                             break
                         if cursor in cursors:
                             raise ValueError("MCP pagination cursor repeated")
+                        catalog_bytes += len(cursor.encode())
+                        if catalog_bytes > MAX_MCP_CATALOG_BYTES:
+                            catalog_error = _CatalogError(
+                                "MCP catalog pagination metadata exceeds "
+                                f"{MAX_MCP_CATALOG_BYTES} bytes"
+                            )
+                            break
                         cursors.add(cursor)
+                    else:
+                        catalog_error = _CatalogError(
+                            f"MCP tool listing exceeded {MAX_MCP_DISCOVERY_PAGES} pages"
+                        )
             except Exception:
                 raise RuntimeError(
                     f"MCP server {server_name!r} discovery failed"
