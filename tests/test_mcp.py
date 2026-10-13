@@ -92,7 +92,7 @@ async def test_real_kernel_uses_mcp_without_transport_secrets(tmp_path):
 import inspect, os, subprocess
 print(await local_echo(text='hello'))
 print(inspect.signature(local_echo))
-matches = await rlm.tools.search('echo')
+matches = (await rlm.tools.search('echo'))['matches']
 tool = await rlm.tools.get(matches[0]['id'])
 print(tool.schema['properties']['text']['type'])
 print(await tool('discovered'))
@@ -154,13 +154,20 @@ async def test_large_paginated_catalog_discovery_in_real_kernel(tmp_path):
 import inspect
 print(await rlm.tools.servers())
 print('catalog_calendarEvents' in globals())
-matches = await rlm.tools.search('calendar events', server='catalog')
+matches = (await rlm.tools.search('calendar events', server='catalog'))['matches']
 print(matches)
 tool = await rlm.tools.get(matches[0]['id'])
 print(inspect.signature(tool))
 print(tool.schema['properties']['filter']['properties']['status']['enum'])
 print(await tool(filter={'status': 'confirmed'}))
-print(len(await rlm.tools.search('operation', limit=3)))
+page = await rlm.tools.search('operation', limit=3, server='catalog')
+print(len(page['matches']))
+ids = [match['id'] for match in page['matches']]
+while page['next_cursor'] is not None:
+    page = await rlm.tools.search('operation', limit=20, server='catalog', cursor=page['next_cursor'])
+    ids.extend(match['id'] for match in page['matches'])
+print(len(ids), len(set(ids)), page['next_cursor'])
+print(ids == sorted(ids))
 print(await rlm.tools.search('no_matching_word'))
 """
                         },
@@ -188,7 +195,9 @@ print(await rlm.tools.search('no_matching_word'))
         "['confirmed']",
         '{"filter": {"status": "confirmed"}}',
         "3",
-        "[]",
+        "1999 1999 None",
+        "True",
+        "{'matches': [], 'next_cursor': None}",
     ]
     assert not list(session.dir.glob("catalog_*.py"))
     prompt = client.calls[0]["messages"][0]["content"]
@@ -206,6 +215,33 @@ async def test_discovery_rejects_repeated_pagination_cursor():
     registry = mcp.MCPRegistry({"catalog": _catalog_server(REPEAT_CURSOR="1")})
     with pytest.raises(RuntimeError, match="discovery failed"):
         await asyncio.wait_for(registry.discover(), timeout=10)
+
+
+async def test_search_cursor_is_bound_to_catalog_query_and_server():
+    registry = mcp.MCPRegistry({"catalog": _catalog_server()})
+    await registry.discover()
+    first = registry.search("operation", limit=3)
+    cursor = first["next_cursor"]
+    assert cursor is not None
+    second = registry.search("operation", limit=2, cursor=cursor)
+    assert len(second["matches"]) == 2
+    assert not {match["id"] for match in first["matches"]} & {
+        match["id"] for match in second["matches"]
+    }
+    assert second == registry.search("operation", limit=2, cursor=cursor)
+    for query, server, invalid_cursor in [
+        ("calendar events", None, cursor),
+        ("operation", "catalog", cursor),
+        ("operation", None, "invalid"),
+        ("operation", None, "3:tampered"),
+        ("operation", None, "3:\N{SNOWMAN}"),
+    ]:
+        with pytest.raises(ValueError, match="invalid MCP search cursor"):
+            registry.search(query, server=server, cursor=invalid_cursor)
+    other_catalog = mcp.MCPRegistry({"catalog": _catalog_server()})
+    await other_catalog.discover()
+    with pytest.raises(ValueError, match="invalid MCP search cursor"):
+        other_catalog.search("operation", cursor=cursor)
 
 
 async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_path):

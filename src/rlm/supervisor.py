@@ -1054,15 +1054,22 @@ class SessionTreeSupervisor:
         op = request["op"]
         if op.startswith("tools."):
             if self._mcp_registry is None:
-                if op in {"tools.search", "tools.servers"}:
+                if op == "tools.servers":
                     return []
+                if op == "tools.search":
+                    if request.get("cursor") is not None:
+                        raise ValueError("invalid MCP search cursor")
+                    return {"matches": [], "next_cursor": None}
                 raise ValueError("no MCP tools are configured")
             if op == "tools.servers":
                 return self._mcp_registry.servers()
             if op == "tools.get":
                 return self._mcp_registry.get(request["name"]).to_dict()
             return self._mcp_registry.search(
-                request["query"], request["limit"], request["server"]
+                request["query"],
+                request["limit"],
+                request["server"],
+                request.get("cursor"),
             )
         if op.startswith("watch."):
             return await self._watch_operation(parent, request)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import hmac
 import json
 import keyword
 import re
@@ -100,6 +101,7 @@ class MCPRegistry:
         self._names: dict[str, str] = {}
         self._index: dict[str, dict[str, int]] = {}
         self._descriptor_bytes = 0
+        self._cursor_key = secrets.token_bytes(32)
 
     async def discover(self) -> tuple[MCPToolDescriptor, ...]:
         if self._tools is not None:
@@ -201,14 +203,28 @@ class MCPRegistry:
         return self.descriptor(capability)
 
     def search(
-        self, query: str, limit: int = 5, server: str | None = None
-    ) -> list[dict[str, str]]:
+        self,
+        query: str,
+        limit: int = 5,
+        server: str | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
         if self._tools is None:
             raise RuntimeError("MCP tools have not been discovered")
         if server is not None and server not in self._servers:
             raise ValueError(f"unknown MCP server: {server!r}")
+        offset = 0
+        if cursor is not None:
+            raw_offset = cursor.partition(":")[0]
+            if not cursor.isascii() or not raw_offset.isdecimal():
+                raise ValueError("invalid MCP search cursor")
+            offset = int(raw_offset)
+            if not secrets.compare_digest(
+                cursor, self._search_cursor(query, server, offset)
+            ):
+                raise ValueError("invalid MCP search cursor for this query or server")
         scores: dict[str, float] = {}
-        for token in _search_tokens(query):
+        for token in sorted(_search_tokens(query)):
             matches = self._index.get(token, {})
             weight = log(1 + len(self._tools) / (1 + len(matches)))
             for cap, boost in matches.items():
@@ -217,14 +233,26 @@ class MCPRegistry:
         ranked = sorted(
             scores, key=lambda cap: (-scores[cap], self._tools[cap].descriptor.name)
         )
-        return [
+        matches = [
             {
                 "id": self._tools[cap].descriptor.name,
                 "server": self._tools[cap].server_name,
                 "description": self._tools[cap].descriptor.description[:1000],
             }
-            for cap in ranked[:limit]
+            for cap in ranked[offset : offset + limit]
         ]
+        next_offset = offset + len(matches)
+        return {
+            "matches": matches,
+            "next_cursor": self._search_cursor(query, server, next_offset)
+            if next_offset < len(ranked)
+            else None,
+        }
+
+    def _search_cursor(self, query: str, server: str | None, offset: int) -> str:
+        payload = json.dumps([query, server, offset], separators=(",", ":")).encode()
+        signature = hmac.digest(self._cursor_key, payload, "sha256").hex()
+        return f"{offset}:{signature}"
 
     def descriptor(self, capability: str) -> MCPToolDescriptor:
         if self._tools is None:

@@ -11,11 +11,15 @@ async def servers() -> list[dict[str, Any]]:
 
 
 async def search(
-    query: str, *, limit: int = 5, server: str | None = None
-) -> list[dict[str, str]]:
-    """Search tool names/descriptions by keywords; return at most 20 summaries."""
+    query: str,
+    *,
+    limit: int = 5,
+    server: str | None = None,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Return matches and next_cursor. Continue with the same query and server."""
     return await broker.agent_request(
-        "tools.search", query=query, limit=limit, server=server
+        "tools.search", query=query, limit=limit, server=server, cursor=cursor
     )
 
 

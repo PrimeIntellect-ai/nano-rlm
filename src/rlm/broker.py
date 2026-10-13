@@ -238,6 +238,7 @@ class BrokerToolsSearchRequest(TypedDict):
     query: Annotated[str, Field(min_length=1, max_length=1024)]
     limit: Annotated[int, Field(ge=1, le=20)]
     server: str | None
+    cursor: NotRequired[Annotated[str, Field(min_length=1, max_length=128)] | None]
 
 
 class BrokerToolsGetRequest(TypedDict):

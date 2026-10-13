@@ -328,14 +328,23 @@ At startup `rlm` connects to each server and indexes all pages of its tool catal
 
 ```python
 await rlm.tools.servers()  # server names and tool counts
-matches = await rlm.tools.search("calendar events", limit=5, server="tools")
-tool = await rlm.tools.get(matches[0]["id"])
+page = await rlm.tools.search("calendar events", limit=5, server="tools")
+tool = await rlm.tools.get(page["matches"][0]["id"])
 print(tool.schema)  # includes nested fields, enums and constraints
 help(tool)         # Python signature and description
 await tool(day="monday", title="standup")
 ```
 
-Search returns at most 20 summaries (id, server and description), without schemas. Save loaded callables in variables to reuse them. Search uses keyword matching; try other keywords when no result fits. Catalog metadata is limited to 64 MiB, with at most 1 MiB per tool. Individual tool names are omitted from the prompt for large catalogs.
+Search returns `matches` (at most 20 summaries per page: id, server and description, without schemas) and `next_cursor`. Retrieve another page using the same query and server filter; `next_cursor=None` means there are no more matches:
+
+```python
+if page["next_cursor"] is not None:
+    page = await rlm.tools.search(
+        "calendar events", limit=5, server="tools", cursor=page["next_cursor"]
+    )
+```
+
+Save loaded callables in variables to reuse them. Search uses keyword matching; try other keywords when no result fits. Cursors belong to the current session's catalog and query/server filter. Catalog metadata is limited to 64 MiB, with at most 1 MiB per tool. Individual tool names are omitted from the prompt for large catalogs.
 
 Catalogs with at most 128 tools and at most 1 MiB of metadata also generate pre-imported skills named `<server>_<tool>` (e.g. `tools_add_event`), with a signature built from the tool's input schema:
 

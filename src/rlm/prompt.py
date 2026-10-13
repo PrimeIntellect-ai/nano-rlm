@@ -88,10 +88,12 @@ FETCH_SKILL_PROMPT = (
 
 MCP_DISCOVERY_PROMPT = """## MCP tool discovery
 Use `await rlm.tools.servers()` for server names and tool counts. Search by keywords
-with `matches = await rlm.tools.search("calendar events", limit=5, server=None)`;
-results contain id, server and a short description, without argument schemas.
+with `page = await rlm.tools.search("calendar events", limit=5, server=None)`.
+`page["matches"]` contains id, server and a short description, without argument schemas.
+Each page has at most 20 matches. If `page["next_cursor"]` is not None, retrieve more
+with the same query and server and `cursor=page["next_cursor"]`. Stop when it is None.
 If no match fits, try other keywords or filter by server. Load a selected tool with
-`tool = await rlm.tools.get(matches[0]["id"])`. Inspect `tool.schema` for the full
+`tool = await rlm.tools.get(page["matches"][0]["id"])`. Inspect `tool.schema` for the full
 JSON input schema (nested fields, enums and constraints), or `help(tool)` for its
 Python signature and description, then call `await tool(...)` using that schema.
 Save callables in variables to reuse them, and use asyncio.gather for independent calls.
