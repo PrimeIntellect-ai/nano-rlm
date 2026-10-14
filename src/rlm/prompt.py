@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from rlm.tools.base import BuiltinTool
+    from rlm.tools.skills import SkillDoc
 
 
 # Importable names of the base toolkit declared in pyproject.toml.
@@ -351,7 +352,6 @@ instructions and evidence by searching/selectively printing records, not the ent
 
 def build_system_prompt(
     cwd: str,
-    skills_dir: str | None,
     installed_skills: list[str],
     *,
     depth: int = 0,
@@ -361,6 +361,7 @@ def build_system_prompt(
     allow_git: bool,
     active_tools: list[BuiltinTool],
     shell_skills: list[str] | None = None,
+    skill_docs: list["SkillDoc"] | None = None,
     task_instructions: str | None = None,
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
@@ -452,10 +453,8 @@ def build_system_prompt(
         parts.append(
             "Use the native edit tool for exact single-occurrence string replacement; its schema describes the arguments."
         )
-    if skills_dir:
-        parts.append(
-            f"Local skills live under {skills_dir}. Read their SKILL.md files when helpful."
-        )
+    if skill_docs:
+        parts.append(_skill_docs_prompt(skill_docs))
     shell_skill_set = set(shell_skills or [])
     if installed_skills and has_ipython:
         parts.append(
@@ -475,6 +474,26 @@ def build_system_prompt(
     if _should_include_git_history_guard(active_tools, allow_git):
         parts.append(GIT_HISTORY_GUARD_PROMPT)
     return "\n\n".join(parts)
+
+
+SKILLS_PROMPT = """## Skills
+A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.
+### Available skills
+{skills}
+### How to use skills
+- Trigger rules: If the user names a skill OR the task clearly matches a skill's description shown above, you must use that skill for that turn.
+- How to use a skill: read its `SKILL.md` completely before taking task actions. Resolve relative paths in it against the directory that holds it. If it ships `scripts/`, prefer running them over retyping their code.
+- Missing/blocked: If a skill's file can't be read, say so briefly and continue with the best fallback."""
+
+
+def _skill_docs_prompt(skill_docs: list["SkillDoc"]) -> str:
+    lines = "\n".join(
+        f"- {doc.name}: {doc.description} (file: {doc.location})"
+        if doc.description
+        else f"- {doc.name}: (file: {doc.location})"
+        for doc in skill_docs
+    )
+    return SKILLS_PROMPT.format(skills=lines)
 
 
 def _should_include_git_history_guard(

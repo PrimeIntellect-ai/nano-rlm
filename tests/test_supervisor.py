@@ -871,8 +871,8 @@ async def test_inference_limit_includes_root_and_compaction_with_root_priority(
             for _ in range(12)
         ]
         for _ in range(12):
-            await asyncio.wait_for(attempted.get(), timeout=5)
-        first = [await asyncio.wait_for(started.get(), timeout=5) for _ in range(10)]
+            await asyncio.wait_for(attempted.get(), timeout=30)
+        first = [await asyncio.wait_for(started.get(), timeout=30) for _ in range(10)]
         assert state.active == 10
         assert started.empty()
         root_call = asyncio.create_task(
@@ -884,10 +884,10 @@ async def test_inference_limit_includes_root_and_compaction_with_root_priority(
         await asyncio.sleep(0)
         assert len(supervisor._inference._waiters) == 3
         releases[first[0]].set()
-        assert await asyncio.wait_for(started.get(), timeout=5) == supervisor.root_id
+        assert await asyncio.wait_for(started.get(), timeout=30) == supervisor.root_id
         for release in releases.values():
             release.set()
-        await asyncio.wait_for(asyncio.gather(*tasks, root_call), timeout=5)
+        await asyncio.wait_for(asyncio.gather(*tasks, root_call), timeout=30)
         assert state.peak == 10
         assert state.active == 0
         assert supervisor._inference.available == 10

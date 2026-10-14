@@ -10,7 +10,9 @@ from rlm.tools.registry import (
 )
 from rlm.tools.skills import (
     SKILLS_DIR,
-    TASK_SKILLS_DIR,
+    SKILLS_ROOT,
+    SkillDoc,
+    discover_skill_docs,
     discover_skills,
     get_installed_skills,
 )
@@ -19,9 +21,11 @@ __all__ = [
     "BuiltinTool",
     "IPythonREPL",
     "SKILLS_DIR",
-    "TASK_SKILLS_DIR",
+    "SkillDoc",
+    "SKILLS_ROOT",
     "ToolContext",
     "ToolOutcome",
+    "discover_skill_docs",
     "discover_skills",
     "get_active_builtin_tools",
     "get_active_tools",
