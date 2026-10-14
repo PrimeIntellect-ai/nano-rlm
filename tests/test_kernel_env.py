@@ -96,3 +96,15 @@ def test_explicit_task_env_and_private_dirs_override_inherited(tmp_path):
     )
     assert env["PYTHONPATH"] == "/task" and env["PATH"] == "/bin"
     assert env["IPYTHONDIR"].startswith(str(tmp_path))
+
+
+def test_proxy_settings_pass_with_their_credentials():
+    proxy = "http://verifiers:token@127.0.0.1:3128"
+    environ = {
+        "HTTP_PROXY": proxy,
+        "HTTPS_PROXY": proxy,
+        "http_proxy": proxy,
+        "https_proxy": proxy,
+        "NO_PROXY": "localhost,127.0.0.1",
+    }
+    assert build_kernel_env(environ=environ).items() >= environ.items()
