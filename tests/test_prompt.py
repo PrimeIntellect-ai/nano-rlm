@@ -89,6 +89,7 @@ def test_edit_skill_prompt_included_only_when_edit_is_installed():
     prompt = _prompt([_Tool("ipython")], installed_skills=["edit"])
 
     assert EDIT_SKILL_PROMPT in prompt
+    assert "pre-imported async `edit` tool" in prompt
     assert 'await edit(path="pkg/file.py", old_str=..., new_str=...)' in prompt
     assert EDIT_SKILL_PROMPT not in _prompt(
         [_Tool("ipython")], installed_skills=["search_docs"]
@@ -99,6 +100,7 @@ def test_search_skill_prompt_included_only_when_search_is_installed():
     prompt = _prompt([_Tool("ipython")], installed_skills=["search"])
 
     assert SEARCH_SKILL_PROMPT in prompt
+    assert "pre-imported async `search` tool" in prompt
     assert "await search(query=" in prompt
     assert "one formatted text string" in prompt
     assert SEARCH_SKILL_PROMPT not in _prompt(
@@ -106,7 +108,7 @@ def test_search_skill_prompt_included_only_when_search_is_installed():
     )
 
 
-def test_prompt_only_advertises_actual_shell_skills():
+def test_prompt_only_advertises_actual_shell_tools():
     prompt = build_system_prompt(
         "/repo",
         ["edit", "uploaded"],
@@ -116,8 +118,11 @@ def test_prompt_only_advertises_actual_shell_skills():
         shell_skills=["uploaded"],
     )
 
-    assert "Shell-enabled installed skills: `uploaded`" in prompt
-    assert "Other listed skills are IPython-only" in prompt
+    assert "Python tools (pre-imported): `edit`, `uploaded`" in prompt
+    assert "help(tool)" in prompt
+    assert "Shell-enabled Python tools: `uploaded`" in prompt
+    assert "Other listed Python tools are IPython-only" in prompt
+    assert "## Skills" not in prompt
 
 
 def test_runtime_guidance_matches_agent_capabilities():
@@ -237,13 +242,15 @@ def test_skill_docs_are_listed_with_name_description_and_file(tmp_path):
     ]
     prompt = build_system_prompt(
         "/repo",
-        [],
+        ["edit"],
         allow_recursion=False,
         allow_git=False,
         active_tools=[_Tool("ipython")],
         skill_docs=docs,
     )
     assert "## Skills" in prompt
+    assert "Python tools (pre-imported): `edit`" in prompt
+    assert "Installed skills (pre-imported)" not in prompt
     assert (
         f"- project-codeword: Look up the project codeword. "
         f"(file: {root / 'codeword' / 'SKILL.md'})"
