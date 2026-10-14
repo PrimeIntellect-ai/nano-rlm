@@ -12,6 +12,12 @@ def test_kernel_env_passes_everything_except_the_blocklist():
         "LD_LIBRARY_PATH": "/usr/local/lib",
         "PIP_INDEX_URL": "https://pypi.org/simple",
         "RANDOM_APP_SETTING": "x",
+        "HTTP_PROXY": "http://verifiers:token@127.0.0.1:8080",
+        "HTTPS_PROXY": "http://verifiers:token@127.0.0.1:8080",
+        "ALL_PROXY": "socks5://user:password@127.0.0.1:1080",
+        "http_proxy": "http://verifiers:token@127.0.0.1:8080",
+        "https_proxy": "http://verifiers:token@127.0.0.1:8080",
+        "all_proxy": "socks5://user:password@127.0.0.1:1080",
         # blocked by name pattern
         "GOOGLE_APPLICATION_CREDENTIALS": "/secrets/gcp.json",
         "AWS_SECRET_ACCESS_KEY": "x",
@@ -56,6 +62,12 @@ def test_kernel_env_passes_everything_except_the_blocklist():
         "LD_LIBRARY_PATH",
         "PIP_INDEX_URL",
         "RANDOM_APP_SETTING",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
     ):
         assert env[key] == environ[key], key
     assert env["TASK_FLAG"] == "1"

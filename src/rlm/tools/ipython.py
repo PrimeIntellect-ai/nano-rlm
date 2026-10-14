@@ -136,6 +136,13 @@ def _passes_kernel_env(key: str, value: str) -> bool:
 
 
 _KERNEL_BASE_ENV_NAMES = {
+    # Authenticated proxies may be the only route out of a restricted runtime.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
     "CURL_CA_BUNDLE",
     "HOME",
     "LANG",

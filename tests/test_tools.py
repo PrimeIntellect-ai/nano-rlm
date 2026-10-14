@@ -136,6 +136,7 @@ def test_real_kernel_and_subprocess_receive_environment_minus_secrets(
     )  # non-secret ambient vars pass through
     monkeypatch.setenv("SERPER_API_KEY", "search-secret")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ambient-cloud-secret")
+    monkeypatch.setenv("HTTPS_PROXY", "http://verifiers:token@127.0.0.1:8080")
     repl = IPythonREPL(
         cwd=str(session.dir),
         session=session,
@@ -149,6 +150,7 @@ print(os.environ.get('TASK_VISIBLE'), os.environ.get('AMBIENT_PLAIN'))
 print(all(name not in os.environ for name in ('SERPER_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'KERNELSPEC_SENTINEL', 'RLM_API_KEY')))
 print(all(f'{{name}}=' not in child_env for name in ('SERPER_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'KERNELSPEC_SENTINEL', 'RLM_API_KEY')) and 'AMBIENT_PLAIN=inherited' in child_env)
 print(all(os.environ.get(name, '').startswith({repl._ipc_dir!r}) for name in ('IPYTHONDIR', 'JUPYTER_CONFIG_DIR', 'JUPYTER_DATA_DIR', 'JUPYTER_RUNTIME_DIR')))
+print(os.environ.get('HTTPS_PROXY') == 'http://verifiers:token@127.0.0.1:8080' and 'HTTPS_PROXY=http://verifiers:token@127.0.0.1:8080' in child_env)
 """
     try:
         first = repl.execute(code)
@@ -157,8 +159,9 @@ print(all(os.environ.get(name, '').startswith({repl._ipc_dir!r}) for name in ('I
     finally:
         repl.shutdown()
 
-    assert first.strip().splitlines() == ["yes inherited", "True", "True", "True"]
-    assert second.strip().splitlines() == ["yes inherited", "True", "True", "True"]
+    expected = ["yes inherited", "True", "True", "True", "True"]
+    assert first.strip().splitlines() == expected
+    assert second.strip().splitlines() == expected
 
 
 def _tool_ctx(**overrides):
