@@ -135,6 +135,7 @@ The process environment configures only process infrastructure:
 | Variable | Default | Description |
 | ---------- | --------- | ------------- |
 | `RLM_HOME` | `~/.rlm` | Root directory for sessions and data |
+| `RLM_SKILLS_DIR` | `$RLM_HOME/skills` | Skills root: Python skill packages installed by `install.sh`, and SKILL.md skills listed in the prompt |
 
 ## Recursion
 
@@ -246,7 +247,7 @@ These artifacts are consumable for debugging, visualization, or training-data ex
 
 ## Skills
 
-`rlm` ships a small set of built-in skills enabled per session via the runtime contract's `skills` list (`edit`, `search`, `fetch`; see [MCP tools](#mcp-tools) for the related MCP path). `edit` runs in the kernel. Credentialed `search` runs in the supervisor through the capability broker, so `SERPER_API_KEY` is unavailable to IPython and its subprocesses; it returns title/URL/snippet for a single query (`await search(query="...")`). Additional skills are supplied by the host environment: before `install.sh` runs, the environment places skill packages under `/task/rlm-skills/<name>/`, and `install.sh` installs them alongside `rlm` so they're both importable and on `$PATH`.
+`rlm` ships a small set of built-in skills enabled per session via the runtime contract's `skills` list (`edit`, `search`, `fetch`; see [MCP tools](#mcp-tools) for the related MCP path). `edit` runs in the kernel. Credentialed `search` runs in the supervisor through the capability broker, so `SERPER_API_KEY` is unavailable to IPython and its subprocesses; it returns title/URL/snippet for a single query (`await search(query="...")`). Additional skills are supplied by the host environment: before `install.sh` runs, the environment places skill packages under the skills root (`$RLM_HOME/skills/<name>/`, or `RLM_SKILLS_DIR`), and `install.sh` installs them alongside `rlm` so they're both importable and on `$PATH`.
 
 From IPython, import a skill and call its async `run(...)` entrypoint:
 
@@ -303,11 +304,11 @@ Dependencies go in the skill's own `pyproject.toml`; declare `rlm` there so the 
 
 ### SKILL.md skills
 
-A skill can also be instructions only: a folder holding a `SKILL.md` with `name` and `description` frontmatter. Every skill folder under the skills root (`RLM_SKILLS_DIR`, default `/task/rlm-skills`), instruction-only or a Python package, is listed in a `## Skills` prompt section, one `- name: description (file: path)` line each (the codex convention), and the agent reads a skill's `SKILL.md` when its task matches.
+A skill can also be instructions only: a folder holding a `SKILL.md` with `name` and `description` frontmatter. Every skill folder under the skills root (`RLM_SKILLS_DIR`, default `$RLM_HOME/skills`), instruction-only or a Python package, is listed in a `## Skills` prompt section, one `- name: description (file: path)` line each (the codex convention), and the agent reads a skill's `SKILL.md` when its task matches.
 
 ### Local development
 
-For running `rlm` against a specific skill set outside of a sandbox-orchestrated environment, create a `/task/rlm-skills/` directory (or bind-mount one, or point `RLM_SKILLS_DIR` at another) and place skill packages there before running `install.sh`. The rlm repo ships no skills by default; look at the `rlm-swe` or `rlm-deepdive` environments for working skill packages to copy.
+For running `rlm` against a specific skill set outside of a sandbox-orchestrated environment, place skill packages under `~/.rlm/skills/` (or point `RLM_SKILLS_DIR` at another directory) before running `install.sh`. The rlm repo ships no skills by default; look at the `rlm-swe` or `rlm-deepdive` environments for working skill packages to copy.
 
 ### MCP tools
 

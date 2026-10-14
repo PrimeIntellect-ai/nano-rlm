@@ -12,12 +12,15 @@ import yaml
 from rlm.mcp import list_skill_modules
 
 
-TASK_SKILLS_DIR = Path(os.environ.get("RLM_SKILLS_DIR", "/task/rlm-skills"))
+SKILLS_ROOT = Path(
+    os.environ.get("RLM_SKILLS_DIR")
+    or Path(os.environ.get("RLM_HOME") or Path.home() / ".rlm") / "skills"
+)
 
 
 def _find_skills_dir() -> Path | None:
-    """Locate the skills root (``RLM_SKILLS_DIR``, default ``/task/rlm-skills``)."""
-    return TASK_SKILLS_DIR if TASK_SKILLS_DIR.is_dir() else None
+    """Locate the skills root: ``RLM_SKILLS_DIR``, else ``$RLM_HOME/skills``."""
+    return SKILLS_ROOT if SKILLS_ROOT.is_dir() else None
 
 
 SKILLS_DIR = _find_skills_dir()
