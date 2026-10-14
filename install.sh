@@ -119,11 +119,11 @@ fi
 
 # Install rlm as an isolated CLI tool (separate venv, on PATH).
 # Skills are owned by the environment, which places them under the skills root
-# ($RLM_SKILLS_DIR, else $RLM_HOME/skills) before this script runs.  Discover and
+# ($RLM_HOME/skills) before this script runs.  Discover and
 # install any that are present so they're both importable and on PATH.
 SKILL_ARGS=""
 SKILL_TOOL_NAMES=""
-SKILLS_ROOT="${RLM_SKILLS_DIR:-${RLM_HOME:-$HOME/.rlm}/skills}"
+SKILLS_ROOT="${RLM_HOME:-$HOME/.rlm}/skills"
 if [ -d "$SKILLS_ROOT" ]; then
     for skill_dir in "$SKILLS_ROOT"/*/; do
         [ -f "$skill_dir/pyproject.toml" ] || continue
