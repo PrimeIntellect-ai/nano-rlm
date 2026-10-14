@@ -52,6 +52,7 @@ from rlm.tools import (
     IPythonREPL,
     ToolContext,
     ToolOutcome,
+    discover_skill_docs,
     discover_skills,
     get_active_builtin_tools,
     get_builtin_tool,
@@ -1487,6 +1488,12 @@ class RLMEngine:
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
+            skill_docs=discover_skill_docs(
+                [
+                    *(self.runtime_config.skill_paths if self.runtime_config else ()),
+                    *([SKILLS_DIR] if SKILLS_DIR is not None else []),
+                ]
+            ),
             mcp_servers=self._supervisor.mcp_server_summaries()
             if self._supervisor
             else None,

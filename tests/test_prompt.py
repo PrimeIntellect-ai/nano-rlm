@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from rlm.tools.skills import discover_skill_docs
 from rlm.prompt import (
     DELEGATION_PROMPT,
     EDIT_SKILL_PROMPT,
@@ -225,3 +226,41 @@ async def test_wait_registration_matches_runtime_capability(session, tool):
         assert ("wait" in registered) == (tool == "ipython")
     finally:
         await engine.aclose()
+
+
+def test_skill_docs_are_listed_with_name_description_and_location(tmp_path):
+    root = tmp_path / "skills"
+    (root / "codeword").mkdir(parents=True)
+    (root / "codeword" / "SKILL.md").write_text(
+        "---\nname: project-codeword\ndescription: Look up the\n  project codeword.\n---\n\nbody\n"
+    )
+    (root / "plain").mkdir()
+    (root / "plain" / "SKILL.md").write_text("# no frontmatter\n")
+    single = tmp_path / "single"
+    single.mkdir()
+    (single / "SKILL.md").write_text("---\nname: single\ndescription: One.\n---\n")
+
+    docs = discover_skill_docs([root, single, root / "codeword"])
+
+    assert [(d.name, d.description) for d in docs] == [
+        ("project-codeword", "Look up the project codeword."),
+        ("plain", ""),
+        ("single", "One."),
+    ]
+    prompt = build_system_prompt(
+        "/repo",
+        None,
+        [],
+        allow_recursion=False,
+        allow_git=False,
+        active_tools=[_Tool("ipython")],
+        skill_docs=docs,
+    )
+    assert "<available_skills>" in prompt
+    assert f"<location>{root / 'codeword' / 'SKILL.md'}</location>" in prompt
+    assert "<description>Look up the project codeword.</description>" in prompt
+
+
+def test_skill_path_without_a_skill_fails(tmp_path):
+    with pytest.raises(FileNotFoundError, match="holds no SKILL.md"):
+        discover_skill_docs([tmp_path / "missing"])

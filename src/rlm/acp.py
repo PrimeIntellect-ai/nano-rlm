@@ -267,9 +267,10 @@ def _prompt_text(
 class RLMACPAgent(Agent):
     """Expose persistent RLM engines as ACP sessions."""
 
-    def __init__(self) -> None:
+    def __init__(self, skill_paths: tuple[str, ...] = ()) -> None:
         self._client: Client
         self._sessions: dict[str, _SessionState] = {}
+        self._skill_paths = skill_paths
 
     def on_connect(self, conn: Client) -> None:
         self._client = conn
@@ -308,6 +309,9 @@ class RLMACPAgent(Agent):
             )
         resolved_mcp_servers = _mcp_servers(mcp_servers)
         runtime_config, external_session_id = _runtime_config(kwargs)
+        runtime_config = runtime_config.model_copy(
+            update={"skill_paths": self._skill_paths}
+        )
         session = Session()
         session_id = session.dir.name
         try:
@@ -494,9 +498,10 @@ class RLMACPAgent(Agent):
             raise error
 
 
-async def serve_acp() -> None:
-    """Serve RLM over ACP on stdin/stdout until the client disconnects."""
-    agent = RLMACPAgent()
+async def serve_acp(skill_paths: tuple[str, ...] = ()) -> None:
+    """Serve RLM over ACP on stdin/stdout until the client disconnects. Every
+    session lists the SKILL.md skills under ``skill_paths`` in its prompt."""
+    agent = RLMACPAgent(skill_paths)
     try:
         # session/close is currently part of ACP's unstable extension set.
         await run_agent(agent, use_unstable_protocol=True)

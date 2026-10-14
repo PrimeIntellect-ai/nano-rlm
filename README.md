@@ -301,9 +301,13 @@ Keyword arguments on `run(...)` and CLI flags line up automatically — `queries
 
 Dependencies go in the skill's own `pyproject.toml`; declare `rlm` there so the shared CLI entry resolves. Version conflicts between skills installed side-by-side are the user's responsibility.
 
+### SKILL.md skills
+
+A skill can also be instructions only: a folder holding a `SKILL.md` with `name` and `description` frontmatter. Pass each with `rlm --acp --skill PATH`, where `PATH` is a skill folder or a folder of skill folders. Every session lists them in its prompt as `<available_skills>` entries (name, description, location), and the agent reads a skill's `SKILL.md` when its task matches. `SKILL.md` folders under the skills root (`/task/rlm-skills`) are listed the same way.
+
 ### Local development
 
-For running `rlm` against a specific skill set outside of a sandbox-orchestrated environment, create a `/task/rlm-skills/` directory (or bind-mount one) and place skill packages there before running `install.sh`. The rlm repo ships no skills by default; look at the `rlm-swe` or `rlm-deepdive` environments for working skill packages to copy.
+For running `rlm` against a specific skill set outside of a sandbox-orchestrated environment, create a `/task/rlm-skills/` directory (or bind-mount one, or point `RLM_SKILLS_DIR` at another) and place skill packages there before running `install.sh`. The rlm repo ships no skills by default; look at the `rlm-swe` or `rlm-deepdive` environments for working skill packages to copy.
 
 ### MCP tools
 

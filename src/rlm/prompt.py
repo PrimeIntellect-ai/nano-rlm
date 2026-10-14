@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from rlm.tools.base import BuiltinTool
+    from rlm.tools.skills import SkillDoc
 
 
 # Importable names of the base toolkit declared in pyproject.toml.
@@ -361,6 +362,7 @@ def build_system_prompt(
     allow_git: bool,
     active_tools: list[BuiltinTool],
     shell_skills: list[str] | None = None,
+    skill_docs: list["SkillDoc"] | None = None,
     task_instructions: str | None = None,
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
@@ -456,6 +458,8 @@ def build_system_prompt(
         parts.append(
             f"Local skills live under {skills_dir}. Read their SKILL.md files when helpful."
         )
+    if skill_docs:
+        parts.append(_skill_docs_prompt(skill_docs))
     shell_skill_set = set(shell_skills or [])
     if installed_skills and has_ipython:
         parts.append(
@@ -475,6 +479,22 @@ def build_system_prompt(
     if _should_include_git_history_guard(active_tools, allow_git):
         parts.append(GIT_HISTORY_GUARD_PROMPT)
     return "\n\n".join(parts)
+
+
+def _skill_docs_prompt(skill_docs: list["SkillDoc"]) -> str:
+    entries = "\n".join(
+        "<skill>\n"
+        f"<name>{doc.name}</name>\n"
+        f"<description>{doc.description}</description>\n"
+        f"<location>{doc.location}</location>\n"
+        "</skill>"
+        for doc in skill_docs
+    )
+    return (
+        "Skills hold instructions for specific tasks. When a task matches a skill's "
+        "description, read the SKILL.md at its location before acting, and follow it.\n"
+        f"<available_skills>\n{entries}\n</available_skills>"
+    )
 
 
 def _should_include_git_history_guard(
