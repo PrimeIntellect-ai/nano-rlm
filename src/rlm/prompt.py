@@ -63,7 +63,7 @@ BASH_SKILL_WITH_TOOL_PROMPT = (
     "in one cell or avoiding shell quoting."
 )
 EDIT_SKILL_PROMPT = (
-    "Change existing files with the pre-imported async `edit` skill, not with "
+    "Change existing files with the pre-imported async `edit` tool, not with "
     '`str.replace` + `write_text`: `await edit(path="pkg/file.py", old_str=..., new_str=...)` '
     "replaces exactly one occurrence and raises ValueError when old_str is absent or "
     "appears more than once, so a stale or ambiguous hunk cannot be applied silently. "
@@ -75,14 +75,14 @@ EDIT_SKILL_PROMPT = (
     "Use write_text only for files you create."
 )
 SEARCH_SKILL_PROMPT = (
-    "For web search, use the pre-imported async `search` skill from IPython: "
+    "For web search, use the pre-imported async `search` tool from IPython: "
     '`await search(query="...")` returns one formatted text string containing '
     "titles, URLs, and snippets, not a list of records. Assign it to a variable "
     "and print it to read the results. To cover "
     "several angles at once, fan out with `asyncio.gather(search(...), search(...))`."
 )
 FETCH_SKILL_PROMPT = (
-    "To read a specific webpage, use the pre-imported async `fetch` skill: "
+    "To read a specific webpage, use the pre-imported async `fetch` tool: "
     '`await fetch(url="...")` returns the webpage as cleaned text. It can be used '
     "to open URLs from `search` results."
 )
@@ -224,7 +224,7 @@ final answer, `await rlm.shell.list()` must show no running job whose result you
 Only a job handed back with .running True posts a shell.completed inbox event when it ends;
 finished results post nothing. Those events are quiet: they wake native `wait` but are not
 counted in the unread notice, because `await job.result()` already collects the job. IPython `!`/`%%bash` and any enabled blocking bash
-skill/tool are not supervisor-owned jobs.
+tool are not supervisor-owned jobs.
 
 Agent cleanup errors are reported separately in AgentInfo.cleanup_error; completed answers remain readable. Use cancel() to retry unfinished cleanup.
 
@@ -458,18 +458,18 @@ def build_system_prompt(
     shell_skill_set = set(shell_skills or [])
     if installed_skills and has_ipython:
         parts.append(
-            "Installed skills (pre-imported): "
+            "Python tools (pre-imported): "
             + ", ".join(f"`{name}`" for name in installed_skills)
-            + ". Each is async; use help(skill) for its signature."
+            + ". Each is async; use help(tool) for its signature."
         )
         for name in installed_skills:
             if guidance := _builtin_skill_prompt(name, active_tools):
                 parts.append(guidance)
     if shell_skill_set and (has_ipython or _has_tool(active_tools, "bash")):
         parts.append(
-            "Shell-enabled installed skills: "
+            "Shell-enabled Python tools: "
             + ", ".join(f"`{name}`" for name in sorted(shell_skill_set))
-            + ". Discover CLI usage with `<skill> --help`. Other listed skills are IPython-only."
+            + ". Discover CLI usage with `<tool> --help`. Other listed Python tools are IPython-only."
         )
     if _should_include_git_history_guard(active_tools, allow_git):
         parts.append(GIT_HISTORY_GUARD_PROMPT)
