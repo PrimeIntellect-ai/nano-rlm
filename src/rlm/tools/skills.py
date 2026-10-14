@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -10,6 +12,10 @@ from pathlib import Path
 import yaml
 
 from rlm.mcp import list_skill_modules
+
+logger = logging.getLogger(__name__)
+
+_FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.S)
 
 
 SKILLS_ROOT = Path(os.environ.get("RLM_HOME") or Path.home() / ".rlm") / "skills"
@@ -61,12 +67,25 @@ class SkillDoc:
     location: str
 
 
+def _frontmatter(skill_md: Path, text: str) -> dict:
+    """The SKILL.md frontmatter mapping, or ``{}`` when it is absent or unreadable: one
+    malformed skill must not keep the agent from starting."""
+    match = _FRONTMATTER.match(text)
+    if match is None:
+        return {}
+    try:
+        meta = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as error:
+        logger.warning("ignoring invalid frontmatter in %s: %s", skill_md, error)
+        return {}
+    if not isinstance(meta, dict):
+        logger.warning("ignoring non-mapping frontmatter in %s", skill_md)
+        return {}
+    return meta
+
+
 def _skill_doc(skill_md: Path) -> SkillDoc:
-    text = skill_md.read_text()
-    meta: dict = {}
-    if text.startswith("---"):
-        _, front, _ = text.split("---", 2)
-        meta = yaml.safe_load(front) or {}
+    meta = _frontmatter(skill_md, skill_md.read_text())
     return SkillDoc(
         name=str(meta.get("name") or skill_md.parent.name),
         description=" ".join(str(meta.get("description") or "").split()),

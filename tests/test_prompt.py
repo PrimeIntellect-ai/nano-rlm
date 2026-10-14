@@ -249,3 +249,32 @@ def test_skill_docs_are_listed_with_name_description_and_file(tmp_path):
         f"(file: {root / 'codeword' / 'SKILL.md'})"
     ) in prompt
     assert f"- plain: (file: {root / 'plain' / 'SKILL.md'})" in prompt
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "---\nname: broken\n",
+        "---\nname: [unclosed\n---\n",
+        "---\n- a\n- b\n---\n",
+    ],
+    ids=["unclosed-fence", "invalid-yaml", "non-mapping"],
+)
+def test_malformed_frontmatter_falls_back_to_the_folder_name(tmp_path, text):
+    (tmp_path / "skill").mkdir()
+    (tmp_path / "skill" / "SKILL.md").write_text(text)
+
+    (doc,) = discover_skill_docs(tmp_path)
+
+    assert (doc.name, doc.description) == ("skill", "")
+
+
+def test_dashes_inside_frontmatter_values_are_kept(tmp_path):
+    (tmp_path / "skill").mkdir()
+    (tmp_path / "skill" / "SKILL.md").write_text(
+        "---\nname: dashes\ndescription: before --- after\n---\nbody\n"
+    )
+
+    (doc,) = discover_skill_docs(tmp_path)
+
+    assert doc.description == "before --- after"
