@@ -433,7 +433,9 @@ for every later `run()` of the agent (`getenv()` reads the overlay; per-call `en
 The kernel and Bash jobs inherit the launching process's environment (in a sandbox, the
 image's ENV) minus a blocklist: credential-looking names, values with URL-embedded
 credentials, variables that would redirect the kernel's own interpreter or venv (PYTHONHOME,
-UV_PYTHON, ...), and agent/daemon sockets.
+UV_PYTHON, ...), and agent/daemon sockets. Proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, `NO_PROXY`, and their lowercase forms) always pass, credentials included: a host
+that restricts egress to an authenticating proxy leaves no other route out.
 
 For long commands or work that should run alongside other tasks, pass `yield_after=0` and
 collect with `result()`:
