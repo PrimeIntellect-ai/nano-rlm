@@ -481,20 +481,24 @@ def build_system_prompt(
     return "\n\n".join(parts)
 
 
+SKILLS_PROMPT = """## Skills
+A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.
+### Available skills
+{skills}
+### How to use skills
+- Trigger rules: If the user names a skill OR the task clearly matches a skill's description shown above, you must use that skill for that turn.
+- How to use a skill: read its `SKILL.md` completely before taking task actions. Resolve relative paths in it against the directory that holds it. If it ships `scripts/`, prefer running them over retyping their code.
+- Missing/blocked: If a skill's file can't be read, say so briefly and continue with the best fallback."""
+
+
 def _skill_docs_prompt(skill_docs: list["SkillDoc"]) -> str:
-    entries = "\n".join(
-        "<skill>\n"
-        f"<name>{doc.name}</name>\n"
-        f"<description>{doc.description}</description>\n"
-        f"<location>{doc.location}</location>\n"
-        "</skill>"
+    lines = "\n".join(
+        f"- {doc.name}: {doc.description} (file: {doc.location})"
+        if doc.description
+        else f"- {doc.name}: (file: {doc.location})"
         for doc in skill_docs
     )
-    return (
-        "Skills hold instructions for specific tasks. When a task matches a skill's "
-        "description, read the SKILL.md at its location before acting, and follow it.\n"
-        f"<available_skills>\n{entries}\n</available_skills>"
-    )
+    return SKILLS_PROMPT.format(skills=lines)
 
 
 def _should_include_git_history_guard(

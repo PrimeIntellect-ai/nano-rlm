@@ -228,7 +228,7 @@ async def test_wait_registration_matches_runtime_capability(session, tool):
         await engine.aclose()
 
 
-def test_skill_docs_are_listed_with_name_description_and_location(tmp_path):
+def test_skill_docs_are_listed_with_name_description_and_file(tmp_path):
     root = tmp_path / "skills"
     (root / "codeword").mkdir(parents=True)
     (root / "codeword" / "SKILL.md").write_text(
@@ -256,9 +256,12 @@ def test_skill_docs_are_listed_with_name_description_and_location(tmp_path):
         active_tools=[_Tool("ipython")],
         skill_docs=docs,
     )
-    assert "<available_skills>" in prompt
-    assert f"<location>{root / 'codeword' / 'SKILL.md'}</location>" in prompt
-    assert "<description>Look up the project codeword.</description>" in prompt
+    assert "## Skills" in prompt
+    assert (
+        f"- project-codeword: Look up the project codeword. "
+        f"(file: {root / 'codeword' / 'SKILL.md'})"
+    ) in prompt
+    assert f"- plain: (file: {root / 'plain' / 'SKILL.md'})" in prompt
 
 
 def test_skill_path_without_a_skill_fails(tmp_path):

@@ -303,7 +303,7 @@ Dependencies go in the skill's own `pyproject.toml`; declare `rlm` there so the 
 
 ### SKILL.md skills
 
-A skill can also be instructions only: a folder holding a `SKILL.md` with `name` and `description` frontmatter. Pass each with `rlm --acp --skill PATH`, where `PATH` is a skill folder or a folder of skill folders. Every session lists them in its prompt as `<available_skills>` entries (name, description, location), and the agent reads a skill's `SKILL.md` when its task matches. `SKILL.md` folders under the skills root (`/task/rlm-skills`) are listed the same way.
+A skill can also be instructions only: a folder holding a `SKILL.md` with `name` and `description` frontmatter. Pass each with `rlm --acp --skill PATH`, where `PATH` is a skill folder or a folder of skill folders. Every session lists them in a `## Skills` prompt section, one `- name: description (file: path)` line each (the codex convention), and the agent reads a skill's `SKILL.md` when its task matches. `SKILL.md` folders under the skills root (`/task/rlm-skills`) are listed the same way.
 
 ### Local development
 
