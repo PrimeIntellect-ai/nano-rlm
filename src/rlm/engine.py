@@ -1479,7 +1479,6 @@ class RLMEngine:
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         return build_system_prompt(
             self.cwd,
-            str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
             depth=self.depth,
             session_dir=str(self.session.dir),
@@ -1488,12 +1487,7 @@ class RLMEngine:
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
-            skill_docs=discover_skill_docs(
-                [
-                    *(self.runtime_config.skill_paths if self.runtime_config else ()),
-                    *([SKILLS_DIR] if SKILLS_DIR is not None else []),
-                ]
-            ),
+            skill_docs=discover_skill_docs(SKILLS_DIR) if SKILLS_DIR else [],
             mcp_servers=self._supervisor.mcp_server_summaries()
             if self._supervisor
             else None,

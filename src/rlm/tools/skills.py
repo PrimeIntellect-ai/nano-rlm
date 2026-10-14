@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import os
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -12,11 +12,11 @@ import yaml
 from rlm.mcp import list_skill_modules
 
 
-TASK_SKILLS_DIR = Path("/task/rlm-skills")
+TASK_SKILLS_DIR = Path(os.environ.get("RLM_SKILLS_DIR", "/task/rlm-skills"))
 
 
 def _find_skills_dir() -> Path | None:
-    """Locate the uploaded skills directory when available."""
+    """Locate the skills root (``RLM_SKILLS_DIR``, default ``/task/rlm-skills``)."""
     return TASK_SKILLS_DIR if TASK_SKILLS_DIR.is_dir() else None
 
 
@@ -74,17 +74,7 @@ def _skill_doc(skill_md: Path) -> SkillDoc:
     )
 
 
-def discover_skill_docs(paths: Iterable[str | Path]) -> list[SkillDoc]:
-    """Return the SKILL.md skills under ``paths``: each path is one skill folder
-    (holding SKILL.md) or a folder of skill folders."""
-    found: dict[Path, SkillDoc] = {}
-    for path in map(Path, paths):
-        if (path / "SKILL.md").is_file():
-            candidates = [path / "SKILL.md"]
-        elif path.is_dir():
-            candidates = sorted(path.glob("*/SKILL.md"))
-        else:
-            raise FileNotFoundError(f"skill path {path} holds no SKILL.md")
-        for skill_md in candidates:
-            found.setdefault(skill_md.resolve(), _skill_doc(skill_md))
-    return list(found.values())
+def discover_skill_docs(skills_dir: Path) -> list[SkillDoc]:
+    """Return the skills under ``skills_dir``: every folder holding a SKILL.md,
+    instruction-only skills and Python skill packages alike."""
+    return [_skill_doc(skill_md) for skill_md in sorted(skills_dir.glob("*/SKILL.md"))]

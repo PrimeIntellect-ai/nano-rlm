@@ -32,7 +32,6 @@ def _prompt(
 ) -> str:
     return build_system_prompt(
         "/repo",
-        None,
         installed_skills or [],
         allow_recursion=False,
         allow_git=allow_git,
@@ -110,7 +109,6 @@ def test_search_skill_prompt_included_only_when_search_is_installed():
 def test_prompt_only_advertises_actual_shell_skills():
     prompt = build_system_prompt(
         "/repo",
-        None,
         ["edit", "uploaded"],
         allow_recursion=False,
         allow_git=False,
@@ -125,7 +123,6 @@ def test_prompt_only_advertises_actual_shell_skills():
 def test_runtime_guidance_matches_agent_capabilities():
     leaf = build_system_prompt(
         "/repo",
-        None,
         [],
         depth=1,
         allow_recursion=False,
@@ -147,7 +144,6 @@ def test_runtime_guidance_matches_agent_capabilities():
 
     native = build_system_prompt(
         "/repo",
-        None,
         ["search"],
         allow_recursion=True,
         allow_git=False,
@@ -163,7 +159,6 @@ def test_runtime_guidance_matches_agent_capabilities():
 
     root = build_system_prompt(
         "/repo",
-        None,
         [],
         allow_recursion=True,
         allow_git=False,
@@ -176,7 +171,6 @@ def test_runtime_guidance_matches_agent_capabilities():
 
     guided = build_system_prompt(
         "/repo",
-        None,
         [],
         allow_recursion=True,
         delegation_prompt=True,
@@ -185,7 +179,6 @@ def test_runtime_guidance_matches_agent_capabilities():
     )
     appended = build_system_prompt(
         "/repo",
-        None,
         [],
         allow_recursion=True,
         allow_git=False,
@@ -197,7 +190,6 @@ def test_runtime_guidance_matches_agent_capabilities():
     assert guided.index(DELEGATION_PROMPT) < guided.index("## Agent context")
     guided_leaf = build_system_prompt(
         "/repo",
-        None,
         [],
         depth=1,
         allow_recursion=False,
@@ -236,20 +228,15 @@ def test_skill_docs_are_listed_with_name_description_and_file(tmp_path):
     )
     (root / "plain").mkdir()
     (root / "plain" / "SKILL.md").write_text("# no frontmatter\n")
-    single = tmp_path / "single"
-    single.mkdir()
-    (single / "SKILL.md").write_text("---\nname: single\ndescription: One.\n---\n")
 
-    docs = discover_skill_docs([root, single, root / "codeword"])
+    docs = discover_skill_docs(root)
 
     assert [(d.name, d.description) for d in docs] == [
         ("project-codeword", "Look up the project codeword."),
         ("plain", ""),
-        ("single", "One."),
     ]
     prompt = build_system_prompt(
         "/repo",
-        None,
         [],
         allow_recursion=False,
         allow_git=False,
@@ -262,8 +249,3 @@ def test_skill_docs_are_listed_with_name_description_and_file(tmp_path):
         f"(file: {root / 'codeword' / 'SKILL.md'})"
     ) in prompt
     assert f"- plain: (file: {root / 'plain' / 'SKILL.md'})" in prompt
-
-
-def test_skill_path_without_a_skill_fails(tmp_path):
-    with pytest.raises(FileNotFoundError, match="holds no SKILL.md"):
-        discover_skill_docs([tmp_path / "missing"])

@@ -107,9 +107,6 @@ class RuntimeConfig(_ConfigModel):
     subagent_append_to_system_prompt: str | None = None
     leaf_append_to_system_prompt: str | None = None
     skills: tuple[str, ...] = ()
-    skill_paths: tuple[str, ...] = ()
-    """SKILL.md skills listed in every engine's prompt: each path is one skill folder
-    or a folder of skill folders."""
     builtin_tools: tuple[str, ...] | None = None
     """Builtin tool set for every engine in the tree; None = the registry default
     (`ipython` alone). Validated against the registry when the engine starts."""

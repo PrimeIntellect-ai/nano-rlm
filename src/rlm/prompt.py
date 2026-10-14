@@ -352,7 +352,6 @@ instructions and evidence by searching/selectively printing records, not the ent
 
 def build_system_prompt(
     cwd: str,
-    skills_dir: str | None,
     installed_skills: list[str],
     *,
     depth: int = 0,
@@ -453,10 +452,6 @@ def build_system_prompt(
     if _has_tool(active_tools, "edit"):
         parts.append(
             "Use the native edit tool for exact single-occurrence string replacement; its schema describes the arguments."
-        )
-    if skills_dir:
-        parts.append(
-            f"Local skills live under {skills_dir}. Read their SKILL.md files when helpful."
         )
     if skill_docs:
         parts.append(_skill_docs_prompt(skill_docs))
