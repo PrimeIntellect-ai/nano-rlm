@@ -207,6 +207,55 @@ async def test_search_youcom_backend(monkeypatch):
     assert "- you.com snippet" in out
 
 
+async def test_search_youcom_eco_backend(monkeypatch):
+    """``RLM_SEARCH_ENGINE=youcom-eco`` routes to the cheap GET eco_search endpoint."""
+    from rlm.skills.search import run_with_api_key
+
+    requests = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "results": {
+                    "web": [
+                        {
+                            "title": "Eco result",
+                            "url": "https://eco.example.com",
+                            "description": "eco snippet",
+                        }
+                    ]
+                }
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            requests.append((url, kwargs))
+            return Response()
+
+        async def post(self, url, **kwargs):
+            raise AssertionError("eco backend must not POST")
+
+    monkeypatch.setattr("rlm.skills.search.httpx.AsyncClient", FakeClient)
+    monkeypatch.setenv("RLM_SEARCH_ENGINE", "youcom-eco")
+    monkeypatch.setenv("YOU_API_KEY", "youcom-secret")
+    out = await run_with_api_key("ignored", "needle")
+    url, kwargs = requests[0]
+    assert "eco_search" in url
+    assert kwargs["headers"]["X-API-Key"] == "youcom-secret"
+    assert kwargs["params"] == {"query": "needle"}
+    assert "Result 1: Eco result" in out
+    assert "URL: https://eco.example.com" in out
+
+
 async def test_bash_returns_output():
     assert await bash("echo hello") == "hello"
 
