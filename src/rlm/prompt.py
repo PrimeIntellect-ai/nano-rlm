@@ -44,7 +44,8 @@ PROJECT_ENV_PROMPT = (
 )
 IPYTHON_CONTROL_PROMPT = (
     "Use `rlm.shell.run` for Bash; `yield_after=` is how long it waits before yielding a handle (0 = at once) and "
-    "`await job.result()` collects any job. " + PROJECT_ENV_PROMPT
+    "`await job.result()` collects any job. Use `rlm.services.start` for a server or daemon that must keep "
+    "running after you finish. " + PROJECT_ENV_PROMPT
 )
 KERNEL_PACKAGES_PROMPT = (
     "Pre-installed in the kernel venv: " + ", ".join(BASE_TOOLKIT) + ". "
@@ -55,7 +56,8 @@ BASH_SKILL_PROMPT = (
     "For short, blocking shell work, use `out = await bash('''command here''')` — always "
     "triple-quote the command so shell quotes and multi-line scripts never "
     "need escaping. It returns the output as a string, useful for further Python processing. "
-    "Use rlm.shell.run(..., yield_after=0) for supervisor-owned background work."
+    "Use rlm.shell.run(..., yield_after=0) for supervisor-owned background work, and "
+    "rlm.services.start for a server or daemon that must keep running after you finish."
 )
 BASH_SKILL_WITH_TOOL_PROMPT = (
     "Inside ipython you can also run shell with `await bash(command=...)` — "
@@ -218,15 +220,32 @@ result() stops waiting but leaves the job running. Jobs survive kernel restarts:
 .timeout, .error; status is starting, running, completed, failed, cancelled, or timed_out;
 nonzero exit codes are completed processes, failed means startup/capture failure), and
 `await rlm.shell.get(job_id)` recovers the ShellJob for a lost variable.
-`await job.cancel()` stops the process group. Owner termination cancels its jobs. Keep Bash
-alive until its work finishes; detached processes are outside this guarantee. Before your
-final answer, `await rlm.shell.list()` must show no running job whose result you still need.
+`await job.cancel()` stops the process group. Owner termination cancels its jobs. A job's
+processes, including anything it started with `&` or `nohup`, are stopped when the job ends,
+and running jobs are stopped when you finish. Keep Bash alive until its work finishes. Before
+your final answer, `await rlm.shell.list()` must show no running job whose result you still need.
 Only a job handed back with .running True posts a shell.completed inbox event when it ends;
 finished results post nothing. Those events are quiet: they wake native `wait` but are not
 counted in the unread notice, because `await job.result()` already collects the job. IPython `!`/`%%bash` and any enabled blocking bash
 tool are not supervisor-owned jobs.
 
 Agent cleanup errors are reported separately in AgentInfo.cleanup_error; completed answers remain readable. Use cancel() to retry unfinished cleanup.
+
+## Services
+A process that must keep running after you finish, such as a server or daemon you are asked
+to leave running, is a service, not a job: `svc = await rlm.services.start(name, command,
+cwd=..., env=...)` starts it in its own session with its output appended to a log file, and
+it keeps running after your session ends. It returns a Service snapshot (.name, .pid, .log,
+.running, .exit_code); `await svc.tail(50)` reads the end of its log and `await svc.stop()`
+stops it. start() returns at once, so check the service came up (tail() or connect to it)
+before relying on it. `await rlm.services.list()` and `await rlm.services.get(name)` recover
+services after kernel restarts. Starting a name that is still running raises.
+```python
+svc = await rlm.services.start("api", "python3 server.py --port 8080", cwd="/app")
+r = await rlm.shell.run("curl -sf localhost:8080/health")       # check it answers
+if not r.ok:
+    print(await svc.tail(50))
+```
 
 ## Inbox and waiting
 `await rlm.inbox.list()` returns unread event dictionaries: ["id"], ["type"],
