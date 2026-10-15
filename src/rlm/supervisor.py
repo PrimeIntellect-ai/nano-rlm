@@ -41,6 +41,7 @@ from rlm.shell_jobs import (
     JobRecord,
     ShellJobs,
 )
+from rlm.service_manager import ServiceManager
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
@@ -200,6 +201,10 @@ class SessionTreeSupervisor:
             self._publish_subscription, self._record_subscription
         )
         self._shell_jobs = ShellJobs(self._publish_job, self._publish_job_output)
+        # Services outlive this supervisor, so their records live outside the session directory.
+        self._services = ServiceManager(
+            Path(os.environ.get("RLM_SERVICES_DIR", "/tmp/rlm-services"))
+        )
         self._root_config = runtime_config
         if "search" in runtime_config.skills:
             capability = secrets.token_urlsafe(24)
@@ -1014,6 +1019,39 @@ class SessionTreeSupervisor:
             return await self._shell_jobs.cancel(job)
         return job.snapshot()
 
+    async def _services_operation(self, parent: _Invocation, request: dict) -> Any:
+        op = request["op"]
+        if op == "services.start":
+            command = request["command"]
+            if not command.strip():
+                raise ValueError("empty command")
+            blocked = find_blocked_command(
+                command, allow_git=parent.runtime_config.policy.allow_git
+            )
+            if blocked:
+                raise PermissionError(refusal(blocked))
+            cwd = Path(parent.cwd) / (request["cwd"] or ".")
+            return self._services.start(
+                name=request["name"],
+                command=command,
+                cwd=str(cwd.resolve()),
+                env={
+                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                    **parent.shell_env,
+                    **(request.get("env") or {}),
+                },
+                owner_id=parent.id,
+            )
+        if op == "services.list":
+            return self._services.list()
+        if op == "services.get":
+            return self._services.get(request["name"])
+        if op == "services.tail":
+            return self._services.tail(request["name"], request["lines"])
+        if op == "services.stop":
+            return await self._services.stop(request["name"], request["grace"])
+        raise ValueError(f"unknown services operation {op!r}")
+
     async def _agent_operation(self, request: dict) -> Any:
         parent = self._caller(request["capability"], request["scope_id"])
         op = request["op"]
@@ -1021,6 +1059,8 @@ class SessionTreeSupervisor:
             return await self._watch_operation(parent, request)
         if op.startswith("shell."):
             return await self._shell_operation(parent, request)
+        if op.startswith("services."):
+            return await self._services_operation(parent, request)
         if op.startswith("hints."):
             tags = set(request.get("tags") or [])
             if op == "hints.mute":
