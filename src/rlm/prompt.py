@@ -44,7 +44,8 @@ PROJECT_ENV_PROMPT = (
 IPYTHON_CONTROL_PROMPT = (
     "Use `rlm.shell.run` for Bash; `yield_after=` is how long it waits before yielding a handle (0 = at once) and "
     "`await job.result()` collects any job. Use `rlm.services.start` for a server or daemon that must keep "
-    "running after you finish. " + PROJECT_ENV_PROMPT
+    "running after you finish, and stop the services you no longer need before you finish. "
+    + PROJECT_ENV_PROMPT
 )
 KERNEL_PACKAGES_PROMPT = (
     "Pre-installed in the kernel venv: " + ", ".join(BASE_TOOLKIT) + ". "
@@ -56,7 +57,8 @@ BASH_SKILL_PROMPT = (
     "triple-quote the command so shell quotes and multi-line scripts never "
     "need escaping. It returns the output as a string, useful for further Python processing. "
     "Use rlm.shell.run(..., yield_after=0) for supervisor-owned background work, and "
-    "rlm.services.start for a server or daemon that must keep running after you finish."
+    "rlm.services.start for a server or daemon that must keep running after you finish; stop the "
+    "services you no longer need before you finish."
 )
 BASH_SKILL_WITH_TOOL_PROMPT = (
     "Inside ipython you can also run shell with `await bash(command=...)` — "
@@ -208,14 +210,19 @@ skill/tool are not supervisor-owned jobs.
 Agent cleanup errors are reported separately in AgentInfo.cleanup_error; completed answers remain readable. Use cancel() to retry unfinished cleanup.
 
 ## Services
-A process that must keep running after you finish, such as a server or daemon you are asked
-to leave running, is a service, not a job: `svc = await rlm.services.start(name, command,
-cwd=..., env=...)` starts it in its own session with its output appended to a log file, and
-it keeps running after your session ends. It returns a Service snapshot (.name, .pid, .log,
-.running, .exit_code); `await svc.tail(50)` reads the end of its log and `await svc.stop()`
-stops it. start() returns at once, so check the service came up (tail() or connect to it)
+A service keeps running until something stops it, including after you finish, so use one
+only for a process that must still be running when you are done, such as a server or daemon
+you are asked to leave running. For a process you need only while you work (a scratch server,
+a mock backend, a file watcher), use a Bash job instead: it stops when the job ends.
+`svc = await rlm.services.start(name, command, cwd=..., env=...)` starts a service in its own
+session with its output appended to a log file, and it keeps running after your session ends.
+It returns a Service snapshot (.name, .pid, .log, .running, .exit_code); `await svc.tail(50)`
+reads the end of its log and `await svc.stop()` stops it. start() returns at once, so check the service came up (tail() or connect to it)
 before relying on it. `await rlm.services.list()` and `await rlm.services.get(name)` recover
-services after kernel restarts. Starting a name that is still running raises.
+services after kernel restarts. Starting a name that is still running raises. Before you
+finish, stop every service you no longer want running (`await svc.stop()`;
+`await rlm.services.list()` shows what is still up): a leftover service keeps its port, files
+and memory, and whatever runs after you may need them.
 ```python
 svc = await rlm.services.start("api", "python3 server.py --port 8080", cwd="/app")
 r = await rlm.shell.run("curl -sf localhost:8080/health")       # check it answers

@@ -41,7 +41,8 @@ IPYTHON_SCHEMA = {
             "with .text, .exit_code and .running; await job.result() collects a job that is still "
             "running. Commands support multiline Bash and survive kernel restart; their processes "
             "stop when the job ends or when you finish. Use await rlm.services.start(name, command) "
-            "for a server or daemon that must keep running after you finish. "
+            "for a server or daemon that must keep running after you finish, and stop the services you "
+            "no longer need before you finish. "
             "Variables persist across cells and compaction, but are lost on kernel restart. "
             "Read recovery notices and reconstruct state before retrying interrupted work."
         ),
