@@ -192,8 +192,10 @@ class SessionTreeSupervisor:
         engine_factory: Callable[..., RLMEngine] | None = None,
         root_invocation_id: str | None = None,
         semantic_edges: SemanticEdgeTracker | None = None,
+        cut_tool_outputs: list[dict] | None = None,
     ) -> None:
         self._engine_factory = engine_factory
+        self.cut_tool_outputs = cut_tool_outputs if cut_tool_outputs is not None else []
         self._server: asyncio.AbstractServer | None = None
         self._broker_dir: Path | None = None
         self._socket_path: str | None = None
