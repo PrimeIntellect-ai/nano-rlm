@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import os
+import socket
 import sys
 from pathlib import Path
 
@@ -137,6 +138,71 @@ print('RLM_MCP_CONFIG=' not in subprocess.check_output(['env'], text=True))
     meta = json.loads((session.dir / "meta.json").read_text())
     assert meta["programmatic_tool_call_stats"]["python_total"] == 2
     assert meta["programmatic_tool_call_stats"]["by_tool_python"] == {"local_echo": 2}
+
+
+@pytest.mark.parametrize("stateless", [False, True])
+async def test_http_discovery_calls_and_tool_errors(stateless):
+    import uvicorn
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server = MCPServer("http-test", instructions="HTTP test tools.")
+
+    @server.tool()
+    def echo(text: str) -> str:
+        """Echo the supplied text."""
+        return text
+
+    @server.tool()
+    def fail() -> str:
+        raise ToolError("Choose a different value")
+
+    mcp_app = server.streamable_http_app(json_response=True, stateless_http=stateless)
+
+    async def app(scope, receive, send):
+        if scope["type"] == "http":
+            assert dict(scope["headers"])[b"authorization"] == b"Bearer test-secret"
+            assert scope["query_string"] == b"rollout=test"
+        await mcp_app(scope, receive, send)
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(128)
+        port = sock.getsockname()[1]
+        http_server = uvicorn.Server(uvicorn.Config(app, log_level="critical"))
+        serving = asyncio.create_task(http_server.serve(sockets=[sock]))
+        try:
+            for _ in range(100):
+                if serving.done():
+                    await serving
+                if http_server.started:
+                    break
+                await asyncio.sleep(0.01)
+            assert http_server.started
+            registry = mcp.MCPRegistry(
+                {
+                    "remote": {
+                        "url": f"http://127.0.0.1:{port}/mcp?rollout=test",
+                        "headers": {"Authorization": "Bearer test-secret"},
+                    }
+                }
+            )
+            await registry.discover()
+            assert registry.servers() == [
+                {"name": "remote", "tool_count": 2, "description": "HTTP test tools."}
+            ]
+            tool = registry.get("remote_echo")
+            assert tool.input_schema["properties"]["text"]["type"] == "string"
+            assert await registry.call(tool.capability, {"text": "hello"}) == "hello"
+            failed_tool = registry.get("remote_fail")
+            with pytest.raises(
+                RuntimeError,
+                match="^Error executing tool fail: Choose a different value$",
+            ):
+                await registry.call(failed_tool.capability, {})
+        finally:
+            http_server.should_exit = True
+            await asyncio.wait_for(serving, timeout=5)
 
 
 def _catalog_server(**env) -> dict:
