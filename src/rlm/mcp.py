@@ -15,9 +15,11 @@ from math import log
 from pathlib import Path
 from typing import Annotated, Any
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp import Client, StdioServerParameters
+from mcp.client.streamable_http import (
+    create_mcp_http_client,
+    streamable_http_client,
+)
 from mcp.types import Tool
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
@@ -117,17 +119,16 @@ class MCPRegistry:
         for server_name, server in self._servers.items():
             catalog_error: _CatalogError | None = None
             try:
-                async with _client_session(server, self._cwd) as session:
-                    info = await session.initialize()
+                async with _client(server, self._cwd) as client:
                     server_descriptions[server_name] = (
-                        getattr(info.serverInfo, "description", None)
-                        or info.instructions
+                        getattr(client.server_info, "description", None)
+                        or client.instructions
                         or ""
                     )[:1000]
                     cursor = None
                     cursors: set[str] = set()
                     for _ in range(MAX_MCP_DISCOVERY_PAGES):
-                        page = await session.list_tools(cursor=cursor)
+                        page = await client.list_tools(cursor=cursor)
                         for tool in page.tools:
                             try:
                                 catalog_bytes = _add_catalog_tool(
@@ -139,7 +140,7 @@ class MCPRegistry:
                                 break
                         if catalog_error is not None:
                             break
-                        cursor = page.nextCursor
+                        cursor = page.next_cursor
                         if cursor is None:
                             break
                         if cursor in cursors:
@@ -202,7 +203,7 @@ class MCPRegistry:
             capability=secrets.token_urlsafe(24),
             name=name,
             description=entry.tool.description or f"MCP tool {entry.tool.name!r}.",
-            input_schema=dict(entry.tool.inputSchema),
+            input_schema=dict(entry.tool.input_schema),
         )
         self._loaded[name] = descriptor
         self._capabilities[descriptor.capability] = name
@@ -330,19 +331,15 @@ def validate_mcp_servers(servers: dict[str, Any]) -> dict[str, MCPServer]:
 
 
 @asynccontextmanager
-async def _client_session(
-    server: MCPServer, cwd: str | None = None
-) -> AsyncIterator[ClientSession]:
+async def _client(server: MCPServer, cwd: str | None = None) -> AsyncIterator[Client]:
     if isinstance(server, MCPHTTPServer):
         async with (
-            streamablehttp_client(server.url, headers=server.headers or None) as (
-                read,
-                write,
-                _,
-            ),
-            ClientSession(read, write) as session,
+            create_mcp_http_client(headers=server.headers or None) as http_client,
+            Client(
+                streamable_http_client(server.url, http_client=http_client)
+            ) as client,
         ):
-            yield session
+            yield client
         return
 
     params = StdioServerParameters(
@@ -351,11 +348,8 @@ async def _client_session(
         env=server.env,
         cwd=cwd,
     )
-    async with (
-        stdio_client(params) as (read, write),
-        ClientSession(read, write) as session,
-    ):
-        yield session
+    async with Client(params) as client:
+        yield client
 
 
 async def call_tool(
@@ -365,13 +359,12 @@ async def call_tool(
     cwd: str | None = None,
 ) -> str:
     """Call an MCP tool and return its text content."""
-    async with _client_session(server, cwd) as session:
-        await session.initialize()
-        result = await session.call_tool(name, arguments or {})
+    async with _client(server, cwd) as client:
+        result = await client.call_tool(name, arguments or {})
     text = "\n".join(
         getattr(block, "text", "") or str(block) for block in result.content
     )
-    if result.isError:
+    if result.is_error:
         raise MCPToolError(text or f"MCP tool {name!r} failed")
     return text
 
