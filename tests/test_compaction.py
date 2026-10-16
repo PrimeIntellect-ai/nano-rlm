@@ -304,7 +304,7 @@ async def test_tool_result_overflow_compacts_and_retries(session):
 
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 1
-    assert client.calls[3]["tool_choice"] == "none"
+    assert "tool_choice" not in client.calls[3]
     retry_messages = client.calls[4]["messages"]
     assert len(retry_messages) == 2
     assert retry_messages[1]["content"].startswith(
@@ -572,7 +572,7 @@ async def test_context_full_summary_preserves_recent_exchange(session, prompt_to
         assert retry[3:5] == original[-2:]
         assert messages == original
         assert len(json.dumps(retry)) < len(json.dumps(client.calls[0]["messages"])) / 2
-        assert client.calls[1]["tool_choice"] == "none"
+        assert "tool_choice" not in client.calls[1]
     finally:
         engine.close()
 
@@ -676,3 +676,41 @@ async def test_hollowed_input_falls_back_to_last_good_snapshot(session):
         assert len(client.calls) == 3
     finally:
         engine.close()
+
+
+async def test_summary_request_extends_the_cached_turn_prefix(session):
+    """The summary request differs from a work turn only by appended messages, so the
+    provider's prefix cache covers it; a tool-calling summary reply is resampled."""
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "1"})]),
+                prompt_tokens=200,
+            ),
+            _response(
+                DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": "2"})]),
+                finish_reason="tool_calls",
+            ),
+            _response(DummyMessage(content="summary")),
+            _response(DummyMessage(content="done")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(summarize_at_tokens=100),
+    )
+    try:
+        result = await engine.run("task")
+    finally:
+        engine.close()
+
+    assert result.answer == "done"
+    assert engine._metrics.num_compactions == 1
+    turn, *summaries = client.calls[:3]
+    for summary in summaries:
+        assert summary["messages"][: len(turn["messages"])] == turn["messages"]
+        assert {
+            k: v for k, v in summary.items() if k not in ("messages", "extra_headers")
+        } == {k: v for k, v in turn.items() if k not in ("messages", "extra_headers")}
+    assert "summary" in client.calls[3]["messages"][1]["content"]
