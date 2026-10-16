@@ -77,6 +77,9 @@ class _RuntimeMetadata(_ContractModel):
     builtin_tools: list[Annotated[str, Field(min_length=1)]] | None = None
     kernel_env: dict[str, str]
     search_api_key: str | None
+    seed_messages: list[dict[str, Any]] | None = None
+    """A saved conversation (user, assistant and tool chat messages, no system
+    message) the root engine resumes from in place of an empty history."""
 
 
 class _UsageSnapshot(_ContractModel):
@@ -176,7 +179,9 @@ def _validation_fields(error: ValidationError) -> list[str]:
     return [".".join(str(part) for part in item["loc"]) for item in error.errors()]
 
 
-def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
+def _runtime_config(
+    meta_kwargs: Any,
+) -> tuple[RuntimeConfig, str, list[dict[str, Any]] | None]:
     """Extract the runtime contract from ``session/new`` metadata.
 
     The ACP router spreads the request's ``_meta`` object into the handler's
@@ -197,6 +202,13 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
                 )
             }
         ) from error
+    seed = payload.seed_messages
+    if seed is not None and any(
+        message.get("role") not in ("user", "assistant", "tool") for message in seed
+    ):
+        raise RequestError.invalid_params(
+            {"reason": "seed_messages hold user, assistant and tool messages only"}
+        )
 
     return (
         RuntimeConfig(
@@ -218,6 +230,7 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
             search_api_key=payload.search_api_key,
         ),
         payload.session_id,
+        seed,
     )
 
 
@@ -307,7 +320,7 @@ class RLMACPAgent(Agent):
                 {"reason": "RLM does not support additional session directories"}
             )
         resolved_mcp_servers = _mcp_servers(mcp_servers)
-        runtime_config, external_session_id = _runtime_config(kwargs)
+        runtime_config, external_session_id, seed_messages = _runtime_config(kwargs)
         session = Session()
         session_id = session.dir.name
         try:
@@ -317,6 +330,7 @@ class RLMACPAgent(Agent):
                 mcp_servers=resolved_mcp_servers,
                 runtime_config=runtime_config,
                 invocation_id=external_session_id,
+                seed_messages=seed_messages,
             )
         except BaseException:
             session.close()
