@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from rlm.tools.base import BuiltinTool
+    from rlm.tools.skills import SkillDoc
 
 
 # Importable names of the base toolkit declared in pyproject.toml.
@@ -62,7 +63,7 @@ BASH_SKILL_WITH_TOOL_PROMPT = (
     "in one cell or avoiding shell quoting."
 )
 EDIT_SKILL_PROMPT = (
-    "Change existing files with the pre-imported async `edit` skill, not with "
+    "Change existing files with the pre-imported async `edit` tool, not with "
     '`str.replace` + `write_text`: `await edit(path="pkg/file.py", old_str=..., new_str=...)` '
     "replaces exactly one occurrence and raises ValueError when old_str is absent or "
     "appears more than once, so a stale or ambiguous hunk cannot be applied silently. "
@@ -74,17 +75,35 @@ EDIT_SKILL_PROMPT = (
     "Use write_text only for files you create."
 )
 SEARCH_SKILL_PROMPT = (
-    "For web search, use the pre-imported async `search` skill from IPython: "
+    "For web search, use the pre-imported async `search` tool from IPython: "
     '`await search(query="...")` returns one formatted text string containing '
     "titles, URLs, and snippets, not a list of records. Assign it to a variable "
     "and print it to read the results. To cover "
     "several angles at once, fan out with `asyncio.gather(search(...), search(...))`."
 )
 FETCH_SKILL_PROMPT = (
-    "To read a specific webpage, use the pre-imported async `fetch` skill: "
+    "To read a specific webpage, use the pre-imported async `fetch` tool: "
     '`await fetch(url="...")` returns the webpage as cleaned text. It can be used '
     "to open URLs from `search` results."
 )
+
+MCP_DISCOVERY_PROMPT = """## MCP tool discovery
+Use `await rlm.tools.servers()` for server names, tool counts and available descriptions. Search by keywords
+with `page = await rlm.tools.search("calendar events", limit=5, server=None)`.
+Use a non-empty keyword query and a limit from 1 to 20; an empty query cannot list tools.
+`page["matches"]` contains id, server and a short description, without argument schemas.
+Each page has at most 20 matches. If `page["next_cursor"]` is not None, retrieve more
+with the same query and server and `cursor=page["next_cursor"]`. Stop when it is None.
+If no match fits, try other keywords or filter by server. Load a selected tool with
+`tool = await rlm.tools.get(page["matches"][0]["id"])`. Inspect `tool.schema` for the full
+JSON input schema (nested fields, enums and constraints), or `help(tool)` for its
+Python signature and description, then call `await tool(...)` using that schema.
+Save callables in variables to reuse them, and use asyncio.gather for independent calls.
+MCP tools are loaded async functions: use `await tool(...)`, not guessed methods such as
+`tool.search(...)`. Tool names are not pre-imported, regardless of catalog size.
+Calls return text (str). If a tool returns JSON text, decode it with `json.loads(result)`
+before indexing fields; prose and CSV remain text.
+"""
 
 # One curated line per built-in skill, appended generically for whatever is enabled.
 BUILTIN_SKILL_PROMPTS: dict[str, str] = {
@@ -115,6 +134,11 @@ user. Child reports and watcher events enter your inbox; lightweight notificatio
 choose when to read them. Agents share a
 filesystem as trusted collaborators; handles enforce orchestration ownership, not
 filesystem isolation.
+
+Each child starts in its parent's configured working directory. Spawning does not create
+an isolated checkout or switch the child into an assigned worktree. Coordinate ownership
+of writes to avoid overwriting another agent's work. For an assigned worktree or scratch
+directory, use explicit paths or set the working directory for Python and shell operations.
 
 A kernel recovery notice means Python variables/imports/in-kernel tasks were lost.
 Reconstruct them and recover handles through the registries below. Never blindly repeat
@@ -200,7 +224,7 @@ final answer, `await rlm.shell.list()` must show no running job whose result you
 Only a job handed back with .running True posts a shell.completed inbox event when it ends;
 finished results post nothing. Those events are quiet: they wake native `wait` but are not
 counted in the unread notice, because `await job.result()` already collects the job. IPython `!`/`%%bash` and any enabled blocking bash
-skill/tool are not supervisor-owned jobs.
+tool are not supervisor-owned jobs.
 
 Agent cleanup errors are reported separately in AgentInfo.cleanup_error; completed answers remain readable. Use cancel() to retry unfinished cleanup.
 
@@ -208,9 +232,9 @@ Agent cleanup errors are reported separately in AgentInfo.cleanup_error; complet
 `await rlm.inbox.list()` returns unread event dictionaries: ["id"], ["type"],
 ["sender_id"], ["created_at"], ["read"]; listed items carry no ["content"] and listing
 does not mark events read. `event = await rlm.inbox.read(event_id)` returns a dictionary
-with ["content"] and marks it read. For supervisor events (shell.completed, agent.completed,
-watch.*) content is a dictionary: index its keys, do not slice it; for agent.message it is
-the string a child sent. `list(unread_only=False)` includes read events; reads are repeatable.
+with ["content"] and marks it read. Content is always a dictionary: index its keys, do not
+slice it. An `agent.message` a child sent has ["agent_id"], ["name"] and ["text"].
+`list(unread_only=False)` includes read events; reads are repeatable.
 A read flag means retrieved, not completed or acted upon.
 
 Supervisor notifications show the unread count when it changes, plus occasional one-line hints about
@@ -261,19 +285,23 @@ Objects use attributes; inbox events and history messages are dictionaries.
 
 AGENT_PROMPT = """## Delegation
 `child = await rlm.agent.spawn(task, name="researcher", persistent=False)` returns
-an AgentHandle immediately. Give the child a self-contained task, relevant constraints,
+an AgentHandle (.id, .name, .session_dir) immediately. Give the child a self-contained task, relevant constraints,
 and an expected result. Names are unique among siblings and reserved for the session.
 `await rlm.agent.list()` returns AgentInfo objects with .id, .parent_id, .name, .task,
-.status, .persistent, .session_dir, and timing. `recursive=True` also lists descendants;
+.status, .persistent, .turns, .session_dir, and timing. `recursive=True` also lists descendants;
 only direct children can be controlled. Finished children remain discoverable. Recover a direct child with
 `await rlm.agent.get(name_or_id)`. Reassigning/deleting a Python handle does not stop it.
 
-`await child.info()` reads metadata. `await child.result()` returns an RLMResult
-(.answer, .usage, .turns, .session_dir), or None before its first answer. The latest answer
-remains available while a persistent child runs again; use info/wait for current activity.
-Terminal failure/cancellation raises.
-Child completion/failure posts `agent.completed` automatically;
-`event["content"]["agent_id"]` identifies the child and ["status"] gives its state. Inspect the event and recover the handle rather than assuming success.
+`await child.info()` reads metadata. `await child.result()` waits up to 300 s (or its
+yield_after=) for the child to finish and returns an AgentResult (.status, .answer, .usage,
+.turns, .session_dir, .running). If the child is still working on its first answer, .answer is
+None and .running is True: keep going and collect later, or from the `agent.completed` event.
+A persistent child's latest answer stays available while it runs again. Terminal
+failure/cancellation raises.
+Child completion/failure posts `agent.completed` automatically; its content has
+["agent_id"], ["name"], ["status"], ["turns"], ["error"] and ["answer"] (the last 4 KiB of
+the child's answer), so the event alone tells you what came back; `await child.result()`
+has the full answer. Inspect the event rather than assuming success.
 `await child.history()` returns a fresh history snapshot. `await child.cancel()` terminates
 that child and its descendants. Terminating a parent ends its whole subtree.
 
@@ -290,8 +318,20 @@ result; prefer native wait when you have no other work. Cell timeouts still appl
 `await rlm.watch.agent(child)` watches a direct child's conversation after complete
 assistant/tool steps, including final answers. Its `watch.agent` event content identifies
 the child via target and gives start:end indices for
-`(await child.history()).messages[start:end]`. It observes progress without waiting for an explicit
-report. Read history, then steer if needed; the subscription itself does not direct the child.
+`(await child.history()).messages[start:end]`. `await rlm.watch.agent(child, every_turns=10)` (and/or
+`every_tokens=50000`) instead posts a `watch.progress` event each time the child's own model
+calls or new tokens cross the next multiple, with ["turns"], ["tokens"], ["name"], ["status"]
+and the same start:end slice — the way to keep a long-running child in view: read its recent
+history, then `await child.steer("report what you have and stop")` if it should wrap up. The
+subscription itself does not direct the child.
+"""
+
+DELEGATION_PROMPT = """## Delegating work
+When a task has independent parts that benefit from separate investigation, delegate them to subagents while you work on another part. Give each child a bounded, self-contained brief, relevant context, and a clear expected result. Avoid duplicating the same investigation yourself unless independent verification is useful.
+Use persistent=False for a one-shot assignment and persistent=True when you expect follow-ups on the same context.
+For longer assignments, register await rlm.watch.agent(child, every_turns=10) to receive progress updates. Inspect the referenced slice of (await child.history()).messages when you need to assess progress. Steer a child if its scope drifts or its remaining work is unlikely to help; cancel work you no longer need.
+Collect reports with result = await child.result(). Check result.running before treating the assignment as finished; a persistent child may retain an earlier answer while working again. A native wait waking does not establish completion. Use completion-event status and error fields to distinguish success from failure.
+Reconcile the relevant reports with your own evidence before answering. Finish, collect, or cancel outstanding work according to whether you still need it.
 """
 
 HISTORY_PROMPT = """## Conversation history
@@ -312,18 +352,20 @@ instructions and evidence by searching/selectively printing records, not the ent
 
 def build_system_prompt(
     cwd: str,
-    skills_dir: str | None,
     installed_skills: list[str],
     *,
     depth: int = 0,
     session_dir: str | None = None,
     allow_recursion: bool,
+    delegation_prompt: bool = False,
     allow_git: bool,
     active_tools: list[BuiltinTool],
     shell_skills: list[str] | None = None,
+    skill_docs: list["SkillDoc"] | None = None,
     task_instructions: str | None = None,
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
+    mcp_servers: list[dict] | None = None,
 ) -> str:
     """Compose task instructions with the guide for this agent's actual runtime."""
     has_ipython = _has_tool(active_tools, "ipython")
@@ -335,6 +377,11 @@ def build_system_prompt(
     ]
     if extra_instructions:
         parts.append(extra_instructions)
+    if has_ipython and any(server["tool_count"] > 0 for server in mcp_servers or []):
+        parts.append(MCP_DISCOVERY_PROMPT)
+        parts.append("MCP servers: " + json.dumps(mcp_servers))
+    if can_delegate and delegation_prompt:
+        parts.append(DELEGATION_PROMPT)
     parts.append("## Agent context")
     if agent_info:
         parts.append(
@@ -392,7 +439,7 @@ def build_system_prompt(
             )
         if depth > 0:
             parts.append(
-                "Use `await rlm.agent.send_to_parent(message)` to put a report in your immediate parent's inbox; it returns an event ID. Your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
+                "Your final answer is your deliverable: it reaches your parent automatically as an `agent.completed` event and through `result()`. You finish by replying without calling any tool; that reply is your final answer, so put the complete report there. Do not send the final report with `await rlm.agent.send_to_parent(message)`; use it only for interim findings, blockers or questions while you are still working. It returns an event ID and your parent chooses when to read it. Parent instructions are pushed automatically: queued input at an answer/wait boundary, steering at the next model/tool boundary. You cannot steer your parent or message siblings. If you have children, their reports enter your own pull-based inbox in the same way."
             )
         else:
             parts.append(
@@ -406,29 +453,47 @@ def build_system_prompt(
         parts.append(
             "Use the native edit tool for exact single-occurrence string replacement; its schema describes the arguments."
         )
-    if skills_dir:
-        parts.append(
-            f"Local skills live under {skills_dir}. Read their SKILL.md files when helpful."
-        )
+    if skill_docs:
+        parts.append(_skill_docs_prompt(skill_docs))
     shell_skill_set = set(shell_skills or [])
     if installed_skills and has_ipython:
         parts.append(
-            "Installed skills (pre-imported): "
+            "Python tools (pre-imported): "
             + ", ".join(f"`{name}`" for name in installed_skills)
-            + ". Each is async; use help(skill) for its signature."
+            + ". Each is async; use help(tool) for its signature."
         )
         for name in installed_skills:
             if guidance := _builtin_skill_prompt(name, active_tools):
                 parts.append(guidance)
     if shell_skill_set and (has_ipython or _has_tool(active_tools, "bash")):
         parts.append(
-            "Shell-enabled installed skills: "
+            "Shell-enabled Python tools: "
             + ", ".join(f"`{name}`" for name in sorted(shell_skill_set))
-            + ". Discover CLI usage with `<skill> --help`. Other listed skills are IPython-only."
+            + ". Discover CLI usage with `<tool> --help`. Other listed Python tools are IPython-only."
         )
     if _should_include_git_history_guard(active_tools, allow_git):
         parts.append(GIT_HISTORY_GUARD_PROMPT)
     return "\n\n".join(parts)
+
+
+SKILLS_PROMPT = """## Skills
+A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.
+### Available skills
+{skills}
+### How to use skills
+- Trigger rules: If the user names a skill OR the task clearly matches a skill's description shown above, you must use that skill for that turn.
+- How to use a skill: read its `SKILL.md` completely before taking task actions. Resolve relative paths in it against the directory that holds it. If it ships `scripts/`, prefer running them over retyping their code.
+- Missing/blocked: If a skill's file can't be read, say so briefly and continue with the best fallback."""
+
+
+def _skill_docs_prompt(skill_docs: list["SkillDoc"]) -> str:
+    lines = "\n".join(
+        f"- {doc.name}: {doc.description} (file: {doc.location})"
+        if doc.description
+        else f"- {doc.name}: (file: {doc.location})"
+        for doc in skill_docs
+    )
+    return SKILLS_PROMPT.format(skills=lines)
 
 
 def _should_include_git_history_guard(

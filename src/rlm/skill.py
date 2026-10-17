@@ -1,8 +1,8 @@
-"""Shared CLI entry for skill packages.
+"""Shared CLI entry for Python tool packages.
 
-A skill is a Python package exposing an async ``run(...)``. Its bash CLI
+A tool package exposes an async ``run(...)``. Its bash CLI
 comes from ``tyro.cli(run)`` via a single shared entry point —
-``[project.scripts]`` in each skill's ``pyproject.toml`` just points at
+``[project.scripts]`` in each package's ``pyproject.toml`` just points at
 ``rlm.skill:cli``.
 """
 
@@ -32,7 +32,7 @@ def run_cli(func: Any, prog: str | None = None) -> None:
 
 
 def cli() -> None:
-    """Entry point for skill console scripts.
+    """Entry point for Python tool console scripts.
 
     Dispatches based on ``sys.argv[0]`` basename — invoked as ``say`` it
     imports the ``say`` module and runs its ``run`` via ``run_cli``.

@@ -19,6 +19,8 @@ from conftest import (
 )
 from rlm.compaction import (
     SUMMARY_FRAMING,
+    OMITTED_CONTEXT,
+    hollow_middle,
     CompactionFailed,
     is_context_overflow,
 )
@@ -167,9 +169,14 @@ async def test_compaction_attempt_limit_is_configurable(session):
     "finish_reason", ["length", "content_filter", "tool_calls", None]
 )
 @pytest.mark.parametrize("recovers", [False, True])
-async def test_compaction_requires_normal_termination(session, finish_reason, recovers):
+@pytest.mark.parametrize("threshold", [None, 8, 32])
+async def test_compaction_requires_normal_termination(
+    session, finish_reason, recovers, threshold
+):
     rejected = _response(
-        DummyMessage(content="unfinished summary"), finish_reason=finish_reason
+        DummyMessage(content="unfinished summary"),
+        finish_reason=finish_reason,
+        prompt_tokens=10,
     )
     client = _ScriptedClient(
         [
@@ -187,10 +194,13 @@ async def test_compaction_requires_normal_termination(session, finish_reason, re
     messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "task"},
+        {"role": "user", "content": "middle" * 100},
         {"role": "assistant", "content": "progress"},
     ]
     session.replace_context(messages, reason="start")
     original = deepcopy(session.messages)
+    engine._last_good = 2
+    engine.summarize_at_tokens = threshold
     try:
         if recovers:
             await engine._compact_branch(messages, turn=0)
@@ -204,7 +214,15 @@ async def test_compaction_requires_normal_termination(session, finish_reason, re
             assert session.messages == original
             assert engine._metrics.num_compactions == 0
         assert len(client.calls) == 2
-        assert client.calls[0]["messages"] == client.calls[1]["messages"]
+        if finish_reason == "length" and threshold in (None, 8):
+            assert client.calls[1]["messages"] == [
+                *original[:2],
+                {"role": "user", "content": OMITTED_CONTEXT},
+                original[-1],
+                client.calls[0]["messages"][-1],
+            ]
+        else:
+            assert client.calls[0]["messages"] == client.calls[1]["messages"]
     finally:
         engine.close()
 
@@ -495,5 +513,166 @@ async def test_checkpoint_fallback_preserves_kernel_warning_without_large_output
         assert warning in fallback[-1]["content"]
         assert all("oversized output" not in m.get("content", "") for m in fallback)
         assert engine._metrics.num_compactions == 1
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("prompt_tokens", [129229, 129614])
+async def test_context_full_summary_preserves_recent_exchange(session, prompt_tokens):
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(content="partial"),
+                finish_reason="length",
+                prompt_tokens=prompt_tokens,
+            ),
+            _response(DummyMessage(content="complete summary")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config(max_compaction_attempts=2),
+    )
+    engine._active_tool_schemas = [
+        {
+            "type": "function",
+            "function": {"name": "ipython", "parameters": {"type": "object"}},
+        }
+    ]
+    engine.summarize_at_tokens = 114688
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "original task"},
+        {"role": "user", "content": "old context " * 20000},
+        {
+            "role": "assistant",
+            "content": "latest edit",
+            "tool_calls": [
+                {
+                    "id": "edit",
+                    "type": "function",
+                    "function": {"name": "ipython", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "edit",
+            "content": "file changed successfully",
+        },
+    ]
+    session.replace_context(messages, reason="start")
+    original = deepcopy(messages)
+    try:
+        await engine._compact_branch(messages, turn=0)
+        retry = client.calls[1]["messages"]
+        assert retry[:2] == original[:2]
+        assert retry[2] == {"role": "user", "content": OMITTED_CONTEXT}
+        assert retry[3:5] == original[-2:]
+        assert messages == original
+        assert len(json.dumps(retry)) < len(json.dumps(client.calls[0]["messages"])) / 2
+        assert client.calls[1]["tool_choice"] == "none"
+    finally:
+        engine.close()
+
+
+def test_middle_hole_grows_without_orphaning_tools():
+    messages = [{"role": "system", "content": "system"}]
+    for i in range(12):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "x" * 1000,
+                    "tool_calls": [{"id": str(i)}],
+                },
+                {"role": "tool", "tool_call_id": str(i), "content": "done"},
+            ]
+        )
+    original = deepcopy(messages)
+    first = hollow_middle(messages, prompt_tokens=4000, remove_tokens=1000)
+    second = hollow_middle(first, prompt_tokens=3000, remove_tokens=1000)
+    assert len(second) < len(first) < len(messages)
+    assert second[:3] == original[:3]
+    assert second[-2:] == original[-2:]
+    assert sum(m.get("content") == OMITTED_CONTEXT for m in second) == 1
+    for i, m in enumerate(second):
+        if m["role"] == "tool":
+            assert second[i - 1]["tool_calls"][0]["id"] == m["tool_call_id"]
+    assert messages == original
+
+
+async def test_unshrinkable_summary_input_fails_fast(session):
+    """A retained beginning and end that alone overflow are not resent unchanged."""
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(content="partial"),
+                finish_reason="length",
+                prompt_tokens=200_000,
+            ),
+            _response(DummyMessage(content="never requested")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config(max_compaction_attempts=3),
+    )
+    engine.summarize_at_tokens = 114688
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "x" * 400_000},
+    ]
+    session.replace_context(messages, reason="start")
+    engine._last_good = len(messages)
+    try:
+        with pytest.raises(CompactionFailed, match="cannot be shortened"):
+            await engine._compact_branch(messages, turn=0)
+        assert len(client.calls) == 1
+    finally:
+        engine.close()
+
+
+async def test_hollowed_input_falls_back_to_last_good_snapshot(session):
+    """A longer-by-count snapshot that fit when it was live is tried before failing."""
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(content="partial"),
+                finish_reason="length",
+                prompt_tokens=200_000,
+            ),
+            _response(
+                DummyMessage(content="partial"),
+                finish_reason="length",
+                prompt_tokens=200_000,
+            ),
+            _response(DummyMessage(content="complete summary")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config(max_compaction_attempts=4),
+    )
+    engine.summarize_at_tokens = 114688
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "step one"},
+        {"role": "assistant", "content": "step two"},
+        {"role": "assistant", "content": "x" * 400_000},
+    ]
+    session.replace_context(messages, reason="start")
+    engine._last_good = 4
+    try:
+        await engine._compact_branch(messages, turn=0)
+        hollowed = client.calls[1]["messages"]
+        assert hollowed[2] == {"role": "user", "content": OMITTED_CONTEXT}
+        assert client.calls[2]["messages"][:-1] == messages[:4]
+        assert len(client.calls) == 3
     finally:
         engine.close()

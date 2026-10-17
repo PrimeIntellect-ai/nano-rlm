@@ -331,8 +331,9 @@ async def test_brokered_skill_accepts_positional_arguments(monkeypatch):
     )
     assert (
         search.__name__ == "search"
-        and str(search.__signature__) == "(query: str, num_results: int = None)"
+        and str(search.__signature__) == "(query: str, num_results: int = None) -> str"
     )
+    assert "Returns text (str)" in search.__doc__
     assert await search("fjords") == "ok" and seen[-1] == ("cap-1", {"query": "fjords"})
     assert await search(query="a", num_results=3) == "ok" and seen[-1][1] == {
         "query": "a",
@@ -344,7 +345,7 @@ async def test_brokered_skill_accepts_positional_arguments(monkeypatch):
     }
     with pytest.raises(
         TypeError,
-        match=r"search\(query: str, num_results: int = None\) takes 2 arguments",
+        match=r"search\(query: str, num_results: int = None\) -> str takes 2 arguments",
     ):
         await search("a", 2, 3)
     with pytest.raises(TypeError, match="got 'query' twice"):

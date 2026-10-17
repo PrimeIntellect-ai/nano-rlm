@@ -7,8 +7,7 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from typing_extensions import Self
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
 
@@ -52,6 +51,9 @@ class ExecutionPolicy(_ConfigModel):
     """Resource and context-management policy for one RLM engine."""
 
     max_depth: int = Field(default=1, ge=0)
+    delegation_prompt: bool = False
+    """Append the delegation guidance (when to spawn, how to brief, watch, collect and
+    reconcile children) to the system prompt of every agent that can still delegate."""
     max_total_turns: int | None = Field(default=None, gt=0)
     """Tree-total turn budget (one turn = one work-loop model call, any engine; compaction
     calls don't count). Once reached, every engine stops before its next model call
@@ -84,16 +86,13 @@ class ExecutionPolicy(_ConfigModel):
     max_compaction_attempts: int = Field(default=5, gt=0)
     """Summary-generation attempts within one compaction cycle."""
     max_concurrent_subagents: int = Field(default=4, gt=0)
+    """Concurrent inference calls across the tree, including root and compaction calls.
+    Queued calls prioritize shallower agents, FIFO within each depth. Tools run freely.
+    """
     max_subagent_calls: int | None = Field(default=None, gt=0)
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
     allow_git: bool = False
-
-    @model_validator(mode="after")
-    def _validate_concurrency(self) -> Self:
-        if self.max_concurrent_subagents < self.max_depth:
-            raise ValueError("max_concurrent_subagents must be at least max_depth")
-        return self
 
 
 class RuntimeConfig(_ConfigModel):

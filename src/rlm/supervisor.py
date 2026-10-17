@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
+import itertools
 import json
 import os
 import re
@@ -12,7 +14,8 @@ import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from functools import partial
 from pathlib import Path
@@ -22,6 +25,7 @@ from rlm.broker import (
     BrokerEndpoint,
     parse_request,
     read_frame,
+    agent_result_to_payload,
     result_to_payload,
     write_frame,
 )
@@ -45,7 +49,7 @@ from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
-from rlm.types import ProgrammaticToolCallStats, RLMResult
+from rlm.types import AgentResult, ProgrammaticToolCallStats, RLMResult, TokenUsage
 
 # Per-agent limits for runtime hints.
 MAX_LONG_RUN_NOTES = 3
@@ -129,6 +133,8 @@ class _Invocation:
     announced_loud: int = 0  # events that count toward the unread notice
     announced_quiet: int = 0
     wait_hints: int = 0  # wait-held-job hints spent
+    turns: int = 0
+    new_tokens: int = 0
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -140,18 +146,37 @@ class _Scope:
     request_id: str | None = None
 
 
-def depth_capacities(max_depth: int, limit: int, root_depth: int = 0) -> dict[int, int]:
-    """Reserve capacity per descendant depth so nested calls cannot deadlock."""
-    levels = max_depth - root_depth
-    if levels <= 0:
-        return {}
-    if limit < levels:
-        raise ValueError("subagent concurrency must cover every recursive depth")
-    per_level, extra = divmod(limit, levels)
-    return {
-        depth: per_level + (1 if offset < extra else 0)
-        for offset, depth in enumerate(range(root_depth + 1, max_depth + 1))
-    }
+class _InferencePool:
+    """Inference permits ordered by depth then arrival; requests are not preempted."""
+
+    def __init__(self, capacity: int) -> None:
+        self.available = capacity
+        self._tickets = itertools.count()
+        self._waiters: list[tuple[int, int, asyncio.Future[None]]] = []
+
+    async def acquire(self, depth: int) -> None:
+        waiter = asyncio.get_running_loop().create_future()
+        heapq.heappush(self._waiters, (depth, next(self._tickets), waiter))
+        self._drain()
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            if not waiter.cancelled():
+                self.release()  # Admission was granted before cancellation arrived.
+            else:
+                self._drain()
+            raise
+
+    def release(self) -> None:
+        self.available += 1
+        self._drain()
+
+    def _drain(self) -> None:
+        while self._waiters and (self.available or self._waiters[0][2].cancelled()):
+            _, _, waiter = heapq.heappop(self._waiters)
+            if not waiter.cancelled():
+                self.available -= 1
+                waiter.set_result(None)
 
 
 class SessionTreeSupervisor:
@@ -186,6 +211,7 @@ class SessionTreeSupervisor:
         self._connection_writers: set[asyncio.StreamWriter] = set()
         self._scopes: dict[str, _Scope] = {}
         self._mcp_registry = MCPRegistry(mcp_servers, cwd) if mcp_servers else None
+        self._mcp_capabilities: set[str] = set()
         self._brokered_skills: dict[
             str,
             tuple[
@@ -240,14 +266,16 @@ class SessionTreeSupervisor:
         self._parents = {root_id: None}
         self._tool_stats: dict[str, ProgrammaticToolCallStats] = {}
         self._capabilities = {root.capability: root_id}
-        capacities = depth_capacities(
-            runtime_config.policy.max_depth,
-            runtime_config.policy.max_concurrent_subagents,
-            runtime_config.invocation.depth,
-        )
-        self._semaphores = {
-            depth: asyncio.Semaphore(capacity) for depth, capacity in capacities.items()
-        }
+        self._inference = _InferencePool(runtime_config.policy.max_concurrent_subagents)
+
+    @asynccontextmanager
+    async def inference_slot(self, invocation_id: str) -> AsyncIterator[None]:
+        agent = self._invocations[invocation_id]
+        await self._inference.acquire(agent.runtime_config.invocation.depth)
+        try:
+            yield
+        finally:
+            self._inference.release()
 
     @property
     def total_calls(self) -> int:
@@ -263,10 +291,16 @@ class SessionTreeSupervisor:
         """Live tree-total NEW tokens (completion + uncached prompt, every engine)."""
         return self._total_tokens
 
-    def record_call(self, tokens: int) -> None:
-        """Count one work-loop model call: a tree turn plus its new tokens."""
+    def record_call(self, tokens: int, agent_id: str | None = None) -> None:
+        """Count one work-loop model call: a tree turn plus its new tokens, and with the
+        calling agent's id its own counters as well."""
         self._total_turns += 1
         self._total_tokens += tokens
+        agent = self._invocations.get(agent_id) if agent_id else None
+        if agent is None:
+            return
+        agent.turns += 1
+        agent.new_tokens += tokens
 
     def record_usage(self, tokens: int) -> None:
         """Add new tokens without a turn (compaction/checkpoint calls)."""
@@ -282,11 +316,7 @@ class SessionTreeSupervisor:
         if self._closed:
             raise RuntimeError("session supervisor is closed")
         if self._mcp_registry is not None:
-            for descriptor in await self._mcp_registry.discover():
-                self._brokered_skills[descriptor.capability] = (
-                    descriptor,
-                    partial(self._mcp_registry.call, descriptor.capability),
-                )
+            await self._mcp_registry.discover()
         self._broker_dir = Path(tempfile.mkdtemp(prefix="rlm-brk-"))
         os.chmod(self._broker_dir, 0o700)
         self._socket_path = str(self._broker_dir / "b.sock")
@@ -298,8 +328,15 @@ class SessionTreeSupervisor:
     def write_brokered_skill_modules(
         self, dest_dir: Path, reserved_names: Iterable[str] = ()
     ) -> list[str]:
-        descriptors = [entry[0] for entry in self._brokered_skills.values()]
+        descriptors = [
+            entry[0]
+            for capability, entry in self._brokered_skills.items()
+            if capability not in self._mcp_capabilities
+        ]
         return write_skill_modules(descriptors, dest_dir, reserved_names)
+
+    def mcp_server_summaries(self) -> list[dict[str, Any]]:
+        return self._mcp_registry.servers() if self._mcp_registry else []
 
     async def _call_search(self, arguments: dict[str, Any]) -> str:
         return await run_search(self._root_config.search_api_key, **arguments)
@@ -408,6 +445,7 @@ class SessionTreeSupervisor:
             - agent.started_at,
             "session_dir": str(agent.session.dir),
             "error": agent.error,
+            "turns": agent.turns,
             "cleanup_error": agent.cleanup_error,
         }
 
@@ -744,8 +782,18 @@ class SessionTreeSupervisor:
         self._publish(owner, event)
 
     def agent_step(self, agent_id: str, start: int) -> None:
-        self._subscriptions.activity(
-            "agent", agent_id, start, self._invocations[agent_id].session.message_count
+        """A child's assistant/tool step is fully logged: publish watch.agent activity and
+        check the progress thresholds a parent subscribed to
+        (watch.agent(every_turns=/every_tokens=)), so the event's slice includes the step."""
+        agent = self._invocations[agent_id]
+        end = agent.session.message_count
+        self._subscriptions.activity("agent", agent_id, start, end)
+        self._subscriptions.progress(
+            agent.id,
+            agent.turns,
+            agent.new_tokens,
+            end,
+            {"name": agent.name, "status": agent.status},
         )
 
     def _publish_job_output(self, job: JobRecord, start: int) -> None:
@@ -755,12 +803,18 @@ class SessionTreeSupervisor:
         op = request["op"]
         if op == "watch.agent":
             child = self._child(parent, request["agent_id"])
+            thresholds = {
+                key: request[key]
+                for key in ("every_turns", "every_tokens")
+                if request.get(key) is not None
+            }
             sub = self._subscriptions.register(
                 parent.id,
-                "agent",
+                "progress" if thresholds else "agent",
                 child.id,
                 cursor=child.session.message_count,
                 completed=child.status in {"completed", "failed", "cancelled"},
+                thresholds=thresholds or None,
             )
         elif op == "watch.job":
             job = self._shell_jobs.get(parent.id, request["job_id"])
@@ -991,6 +1045,32 @@ class SessionTreeSupervisor:
     async def _agent_operation(self, request: dict) -> Any:
         parent = self._caller(request["capability"], request["scope_id"])
         op = request["op"]
+        if op.startswith("tools."):
+            if self._mcp_registry is None:
+                if op == "tools.servers":
+                    return []
+                if op == "tools.search":
+                    if request.get("cursor") is not None:
+                        raise ValueError("invalid MCP search cursor")
+                    return {"matches": [], "next_cursor": None}
+                raise ValueError("no MCP tools are configured")
+            if op == "tools.servers":
+                return self._mcp_registry.servers()
+            if op == "tools.get":
+                descriptor = self._mcp_registry.get(request["name"])
+                if descriptor.capability not in self._mcp_capabilities:
+                    self._brokered_skills[descriptor.capability] = (
+                        descriptor,
+                        partial(self._mcp_registry.call, descriptor.capability),
+                    )
+                    self._mcp_capabilities.add(descriptor.capability)
+                return descriptor.to_dict()
+            return self._mcp_registry.search(
+                request["query"],
+                request["limit"],
+                request["server"],
+                request.get("cursor"),
+            )
         if op.startswith("watch."):
             return await self._watch_operation(parent, request)
         if op.startswith("shell."):
@@ -1039,7 +1119,11 @@ class SessionTreeSupervisor:
                 self._event(
                     parent,
                     "agent.message",
-                    request["message"],
+                    {
+                        "agent_id": parent.id,
+                        "name": parent.name,
+                        "text": request["message"],
+                    },
                     self._scopes[request["scope_id"]].request_id,
                 ),
             )
@@ -1093,16 +1177,40 @@ class SessionTreeSupervisor:
                     pass
         elif op == "agent.cancel":
             await self._terminate(child)
+            if child.status == "cancelled":
+                self.semantic_edges.record_subagent_cancel(
+                    self._scopes[request["scope_id"]].request_id, child.id
+                )
         elif op == "agent.result":
-            if child.status in {"failed", "cancelled"}:
-                self.semantic_edges.finish_subagent(child.id)
+            yield_after = min(request["yield_after"], RUN_BLOCK_MAX_SECONDS)
+            if not child.done.is_set() and yield_after > 0:
+                try:
+                    await asyncio.wait_for(child.done.wait(), timeout=yield_after)
+                except asyncio.TimeoutError:
+                    pass
+            if child.status == "failed":
+                self.semantic_edges.finish_subagent(
+                    child.id, edge_type="subagent_failed"
+                )
+                raise RuntimeError(child.error or "agent failed")
+            if child.status == "cancelled":
+                self.semantic_edges.record_subagent_cancel(
+                    self._scopes[request["scope_id"]].request_id, child.id
+                )
                 raise RuntimeError(child.error or "agent cancelled")
-            if child.result is None:
-                return None
-            self.semantic_edges.finish_subagent(
-                child.id, request_id=child.result_request_id
+            if child.result is not None:
+                self.semantic_edges.finish_subagent(
+                    child.id, request_id=child.result_request_id
+                )
+            return agent_result_to_payload(
+                AgentResult(
+                    status=child.status,
+                    answer=None if child.result is None else child.result.answer,
+                    session_dir=child.session.dir,
+                    usage=TokenUsage() if child.result is None else child.result.usage,
+                    turns=child.turns,
+                )
             )
-            return result_to_payload(child.result)
         return self._info(child)
 
     async def _start_skill_call(
@@ -1141,41 +1249,40 @@ class SessionTreeSupervisor:
 
     async def _run_child(self, child: _Invocation) -> None:
         try:
-            async with self._semaphores[child.runtime_config.invocation.depth]:
-                child.status = "running"
-                factory = self._engine_factory
-                if factory is None:
-                    from rlm.engine import RLMEngine
+            child.status = "running"
+            factory = self._engine_factory
+            if factory is None:
+                from rlm.engine import RLMEngine
 
-                    factory = RLMEngine
-                if child.engine is None:
-                    child.engine = factory(
-                        cwd=child.cwd,
-                        session=child.session,
-                        mcp_servers=child.mcp_servers,
-                        runtime_config=child.runtime_config,
-                        supervisor=self,
-                        invocation_id=child.id,
-                    )
-                    child.result = await child.engine.prompt(child.task)
-                else:
-                    instructions = self.take_instructions(child.id, include_queue=True)
-                    prompt = (
-                        "\n\n".join(event["content"] for event in instructions)
-                        if instructions
-                        else "Supervisor: new inbox events are available."
-                    )
-                    child.result = await child.engine.prompt(
-                        prompt,
-                        message_type="parent_message"
-                        if instructions
-                        else "supervisor_notification",
-                        event_ids=[e["id"] for e in instructions],
-                    )
-                child.result_request_id = self.semantic_edges.last_request_id(child.id)
-                child.status = "idle" if child.persistent else "completed"
-                if child.status == "idle":
-                    child.session.write_meta(**self._info(child))
+                factory = RLMEngine
+            if child.engine is None:
+                child.engine = factory(
+                    cwd=child.cwd,
+                    session=child.session,
+                    mcp_servers=child.mcp_servers,
+                    runtime_config=child.runtime_config,
+                    supervisor=self,
+                    invocation_id=child.id,
+                )
+                child.result = await child.engine.prompt(child.task)
+            else:
+                instructions = self.take_instructions(child.id, include_queue=True)
+                prompt = (
+                    "\n\n".join(event["content"] for event in instructions)
+                    if instructions
+                    else "Supervisor: new inbox events are available."
+                )
+                child.result = await child.engine.prompt(
+                    prompt,
+                    message_type="parent_message"
+                    if instructions
+                    else "supervisor_notification",
+                    event_ids=[e["id"] for e in instructions],
+                )
+            child.result_request_id = self.semantic_edges.last_request_id(child.id)
+            child.status = "idle" if child.persistent else "completed"
+            if child.status == "idle":
+                child.session.write_meta(**self._info(child))
         except asyncio.CancelledError:
             child.status = "cancelled"
         except BaseException as exc:
@@ -1200,7 +1307,22 @@ class SessionTreeSupervisor:
                         self._event(
                             child,
                             "agent.completed",
-                            {"agent_id": child.id, "status": child.status},
+                            {
+                                "agent_id": child.id,
+                                "name": child.name,
+                                "status": child.status,
+                                "answer": (
+                                    child.result.answer[-COMPLETED_TAIL_BYTES:]
+                                    if child.result is not None and child.result.answer
+                                    else None
+                                ),
+                                "turns": (
+                                    child.result.turns
+                                    if child.result is not None
+                                    else None
+                                ),
+                                "error": child.error,
+                            },
                             self.semantic_edges.last_request_id(child.id),
                         ),
                     )
@@ -1212,6 +1334,7 @@ class SessionTreeSupervisor:
     async def _close_agent_subscriptions(self, agent_id: str) -> None:
         try:
             self._subscriptions.finish("agent", agent_id)
+            self._subscriptions.finish("progress", agent_id)
         finally:
             await self._subscriptions.close(agent_id)
 

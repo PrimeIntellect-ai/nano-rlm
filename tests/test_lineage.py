@@ -281,3 +281,30 @@ async def test_concurrent_requests_receive_unique_stable_ids():
     continuations = lineage.snapshot()["edges"]
     assert len(continuations) == 63
     assert all(edge["type"] == "continuation" for edge in continuations)
+
+
+def test_record_subagent_cancel_is_a_parent_to_child_edge():
+    lineage = SemanticEdgeTracker()
+    lineage.register_session("root", parent_session_id=None)
+    parent_request = _finish(lineage, "root")
+    lineage.register_session(
+        "child", parent_session_id="root", spawned_by_request_id=parent_request
+    )
+    child_request = _finish(lineage, "child")
+    canceller = lineage.start_request(
+        "root"
+    )  # the parent request that issues the cancel
+    lineage.record_subagent_cancel(canceller, "child")
+    lineage.finish_request(canceller)
+
+    edges = lineage.snapshot()["edges"]
+    # parent -> child, mirroring subagent_call; the child does not "return"
+    assert {
+        "source_request_id": canceller,
+        "target_request_id": child_request,
+        "type": "subagent_cancel",
+    } in edges
+    assert not any(e["type"] == "subagent_cancelled" for e in edges)
+    # recorded at most once per child
+    lineage.record_subagent_cancel(canceller, "child")
+    assert sum(e["type"] == "subagent_cancel" for e in lineage.snapshot()["edges"]) == 1

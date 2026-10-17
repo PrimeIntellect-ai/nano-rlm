@@ -27,6 +27,8 @@ from rlm.client import (
 from rlm.provenance import agent_input, runtime_event
 from rlm.compaction import (
     CHECKPOINT_PROMPT,
+    RESERVE_TOKENS,
+    hollow_middle,
     TOOL_OUTPUT_MAX_BYTES,
     CompactionFailed,
     REPL_NOTE,
@@ -50,6 +52,7 @@ from rlm.tools import (
     IPythonREPL,
     ToolContext,
     ToolOutcome,
+    discover_skill_docs,
     discover_skills,
     get_active_builtin_tools,
     get_builtin_tool,
@@ -147,7 +150,7 @@ QUOTE_NESTING_HINT = (
     "That SyntaxError comes from program text nested inside a Python string literal. Pick a "
     'delimiter the text does not contain: r"""...""" for source with \'\'\' or backslashes, '
     "r'''...''' for source with \"\"\", or \"\\n\".join([...]) for both; for existing files use "
-    "the edit skill with short old_str/new_str hunks."
+    "the edit tool with short old_str/new_str hunks."
 )
 MULTILINE_COMMAND_HINT = (
     "That SyntaxError comes from a multi-line command inside a plain-quoted Python string. "
@@ -261,6 +264,11 @@ class RLMEngine:
 
         # IPython REPL (started lazily in single-agent execution)
         self._repl: IPythonREPL | None = None
+        self._steering_active = False
+        self._steering_pending: list[tuple[str, str | None, asyncio.Future]] = []
+        self._steering_ids: dict[str, tuple[str, asyncio.Future]] = {}
+        self._steering_applied: list[tuple[int, dict]] = []
+        self._steering_ready = asyncio.Event()
         self._pending_kernel_notices: list[str] = []
         self._prompt_kernel_notices: list[str] = []
 
@@ -299,7 +307,89 @@ class RLMEngine:
         finally:
             await self.aclose()
 
+    async def steer(self, text: str, message_id: str | None = None) -> dict:
+        """Insert a user message at the next model boundary without cancelling tools."""
+        if message_id is not None and message_id in self._steering_ids:
+            previous, receipt = self._steering_ids[message_id]
+            if previous != text:
+                raise ValueError("steering message ID reused with different content")
+            return await asyncio.shield(receipt)
+        if not self._steering_active:
+            return {"outcome": "promptRequired", "reason": "noRunningTurn"}
+        receipt = asyncio.get_running_loop().create_future()
+        if message_id is not None:
+            self._steering_ids[message_id] = (text, receipt)
+        self._steering_pending.append((text, message_id, receipt))
+        self._steering_ready.set()
+        return await asyncio.shield(receipt)
+
+    def _apply_steering(self) -> None:
+        while self._steering_pending:
+            text, message_id, receipt = self._steering_pending[0]
+            message = {"role": "user", "content": text}
+            index = self.session.log(
+                {
+                    "type": "user",
+                    "turn": self._turn,
+                    "content": text,
+                    "message": message,
+                    "steering_id": message_id,
+                },
+                in_context=True,
+            )
+            self._steering_applied.append((index, message))
+            self._last_good = len(self.session.messages)
+            self._steering_pending.pop(0)
+            receipt.set_result({"outcome": "injected"})
+        self._steering_ready.clear()
+
+    async def _wait_for_events(self, timeout: float) -> str:
+        events = asyncio.create_task(
+            self._supervisor.wait_for_events(self._invocation_id, timeout)
+        )
+        steering = asyncio.create_task(self._steering_ready.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (events, steering), return_when=asyncio.FIRST_COMPLETED
+            )
+            return (
+                events.result()
+                if events in done
+                else "A new user message is available."
+            )
+        finally:
+            events.cancel()
+            steering.cancel()
+            await asyncio.gather(events, steering, return_exceptions=True)
+
     async def prompt(
+        self,
+        prompt: str,
+        *,
+        message_type: str = "user",
+        event_ids: list[str] | None = None,
+    ) -> RLMResult:
+        """Run one user turn while accepting steering at model boundaries."""
+        if self._steering_active:
+            raise RuntimeError("a prompt is already running")
+        self._steering_active = True
+        self._steering_applied = []
+        try:
+            return await self._prompt(
+                prompt, message_type=message_type, event_ids=event_ids
+            )
+        finally:
+            self._steering_active = False
+            for _, message_id, receipt in self._steering_pending:
+                if message_id is not None:
+                    self._steering_ids.pop(message_id, None)
+                receipt.set_result(
+                    {"outcome": "promptRequired", "reason": "noRunningTurn"}
+                )
+            self._steering_pending.clear()
+            self._steering_ready.clear()
+
+    async def _prompt(
         self,
         prompt: str,
         *,
@@ -393,10 +483,18 @@ class RLMEngine:
                     )
                 finally:
                     self.session.replace_context(
-                        messages_before, reason="rollback", indices=context_before
+                        messages_before
+                        + [message for _, message in self._steering_applied],
+                        reason="rollback",
+                        indices=context_before
+                        + [index for index, _ in self._steering_applied],
                     )
             finally:
-                self._last_good = last_good_before
+                self._last_good = (
+                    len(self.session.messages)
+                    if self._steering_applied
+                    else last_good_before
+                )
                 self._compacted = compacted_before
                 self._branch_start_turn = branch_start_before
                 self._semantic_edges.restore(self._invocation_id, semantic_edges_before)
@@ -492,7 +590,7 @@ class RLMEngine:
             allow_git=self.allow_git,
         )
         try:
-            startup = asyncio.create_task(asyncio.to_thread(self._repl.start))
+            startup = asyncio.create_task(self._repl.run_in_thread(self._repl.start))
             cancelled = False
             while True:
                 try:
@@ -656,6 +754,7 @@ class RLMEngine:
                     )
                 )
                 break
+            self._apply_steering()
             self._deliver_kernel_notices()
             self._deliver_supervisor_input()
             messages = self.session.messages
@@ -733,6 +832,8 @@ class RLMEngine:
 
             # No tool calls → done
             if not msg.tool_calls:
+                if self._steering_pending:
+                    continue
                 if self._deliver_supervisor_input(include_queue=True, notify=False):
                     continue
                 # Give empty replies a bounded opportunity to continue.
@@ -803,10 +904,7 @@ class RLMEngine:
                         note = f"Note: wait timeout clamped from {timeout:g} to 300 seconds.\n"
                         timeout = 300
                     tool_result = ToolOutcome(
-                        content=note
-                        + await self._supervisor.wait_for_events(
-                            self._invocation_id, timeout
-                        )
+                        content=note + await self._wait_for_events(timeout)
                     )
             elif tool is None:
                 tool_result = ToolOutcome(content=f"Error: unknown tool '{tool_name}'")
@@ -825,10 +923,9 @@ class RLMEngine:
                 try:
                     if scope_id is not None:
                         repl.set_broker_scope(scope_id)
+                    run = repl.run_in_thread if repl is not None else asyncio.to_thread
                     tool_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            tool.execute, tool_args, self._tool_context(messages)
-                        )
+                        run(tool.execute, tool_args, self._tool_context(messages))
                     )
                     try:
                         tool_result = await asyncio.shield(tool_task)
@@ -1049,6 +1146,12 @@ class RLMEngine:
         tokens = usage.total + estimated_tokens(extra_text)
         return tokens >= self.summarize_at_tokens
 
+    async def _model_attempt(self, **request: Any) -> Any:
+        if self._supervisor is None:
+            return await self.client.chat.completions.create(**request)
+        async with self._supervisor.inference_slot(self._invocation_id):
+            return await self.client.chat.completions.create(**request)
+
     async def _call_model(
         self,
         messages: list[dict],
@@ -1072,9 +1175,7 @@ class RLMEngine:
                 request["parallel_tool_calls"] = False
 
         try:
-            response = await call_with_retries(
-                self.client.chat.completions.create, **request
-            )
+            response = await call_with_retries(self._model_attempt, **request)
         except BaseException:
             self._semantic_edges.fail_request(request_id)
             raise
@@ -1090,7 +1191,7 @@ class RLMEngine:
             if checkpoint:
                 self._supervisor.record_usage(new_tokens)
             else:
-                self._supervisor.record_call(new_tokens)
+                self._supervisor.record_call(new_tokens, self._invocation_id)
         if not checkpoint:
             self._last_prompt_tokens = usage.prompt_tokens
             self._last_call_id = request_id
@@ -1148,6 +1249,29 @@ class RLMEngine:
                 ) from error
             raise
 
+    @staticmethod
+    def _shorter_summary_input(
+        base: list[dict],
+        snapshot: list[dict] | None,
+        *,
+        prompt_tokens: int | None,
+        remove_tokens: int,
+    ) -> tuple[list[dict], list[dict] | None]:
+        """Hollow the summary input further. When hollowing cannot shrink it, try the last
+        good snapshot once (it fit the window when it was live, whatever its message count);
+        fail rather than resend an input unchanged."""
+        shorter = hollow_middle(
+            base, prompt_tokens=prompt_tokens, remove_tokens=remove_tokens
+        )
+        if shorter != base:
+            return shorter, snapshot
+        if snapshot is not None and snapshot != base:
+            return snapshot, None
+        raise CompactionFailed(
+            "summary input cannot be shortened further: the retained context alone "
+            "exceeds the model's window"
+        )
+
     async def _compact_branch(
         self,
         messages: list[dict],
@@ -1179,12 +1303,13 @@ class RLMEngine:
             )
         compaction = self._semantic_edges.begin_compaction(self._invocation_id)
         try:
-            # A rejected checkpoint falls back to the last good snapshot (which has a
-            # full reserve of room, so it fits); an incomplete, empty, or
-            # tool-calling reply is resampled. Reasoning is never part of the summary.
+            # Only the summary request is shortened; the live context and ledger
+            # remain intact until a complete summary succeeds.
             base = messages
+            snapshot: list[dict] | None = messages[: self._last_good]
             summary_text = ""
-            for _ in range(self.max_compaction_attempts):
+            for attempt in range(self.max_compaction_attempts):
+                last_attempt = attempt + 1 == self.max_compaction_attempts
                 checkpoint = [
                     *base,
                     {"role": "user", "content": checkpoint_prompt},
@@ -1198,7 +1323,13 @@ class RLMEngine:
                 except APIStatusError as e:
                     if not is_context_overflow(e):
                         raise
-                    base = messages[: self._last_good]
+                    if not last_attempt:
+                        base, snapshot = self._shorter_summary_input(
+                            base,
+                            snapshot,
+                            prompt_tokens=None,
+                            remove_tokens=RESERVE_TOKENS,
+                        )
                     continue
                 choice = response.choices[0]
                 message = choice.message
@@ -1210,6 +1341,25 @@ class RLMEngine:
                     summary_text = text
                     break
                 self._semantic_edges.release_summary_request(compaction.compaction_id)
+                if (
+                    not last_attempt
+                    and choice.finish_reason == "length"
+                    and (
+                        self.summarize_at_tokens is None
+                        or usage.prompt_tokens >= self.summarize_at_tokens
+                    )
+                ):
+                    excess = (
+                        max(0, usage.prompt_tokens - self.summarize_at_tokens)
+                        if self.summarize_at_tokens is not None
+                        else RESERVE_TOKENS
+                    )
+                    base, snapshot = self._shorter_summary_input(
+                        base,
+                        snapshot,
+                        prompt_tokens=usage.prompt_tokens,
+                        remove_tokens=excess + 1024,
+                    )
             if not summary_text:
                 raise CompactionFailed(
                     f"no usable summary after {self.max_compaction_attempts} attempts"
@@ -1329,14 +1479,18 @@ class RLMEngine:
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         return build_system_prompt(
             self.cwd,
-            str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
             depth=self.depth,
             session_dir=str(self.session.dir),
             allow_recursion=self.depth < self.max_depth,
+            delegation_prompt=self.runtime_config.policy.delegation_prompt,
             allow_git=self.allow_git,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
+            skill_docs=discover_skill_docs(SKILLS_DIR) if SKILLS_DIR else [],
+            mcp_servers=self._supervisor.mcp_server_summaries()
+            if self._supervisor
+            else None,
             task_instructions=Path(self.system_prompt_path).read_text()
             if self.system_prompt_path
             else None,

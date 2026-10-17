@@ -19,7 +19,6 @@ from rlm.shell import JobInfo
 logger = logging.getLogger(__name__)
 
 MAX_ACTIVE_JOBS = 32
-MAX_JOBS = 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 DRAIN_SECONDS = 2.0
 RUN_TEXT_BYTES = 16 * 1024  # run() returns at most this much: head + tail of the output
@@ -72,8 +71,6 @@ class ShellJobs:
         timeout: float | None = None,
         notify: bool = True,
     ) -> dict:
-        if len(self.jobs) >= MAX_JOBS:
-            raise RuntimeError("shell job limit reached")
         if sum(job.finished is None for job in self.jobs.values()) >= MAX_ACTIVE_JOBS:
             raise RuntimeError("active shell job limit reached")
         job_id = uuid.uuid4().hex

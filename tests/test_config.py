@@ -52,9 +52,8 @@ def test_runtime_config_redacts_secrets():
     assert "test-key" not in repr(config.provider)
 
 
-def test_policy_rejects_unsafe_recursive_values_and_reserved_headers():
-    with pytest.raises(ValueError, match="at least max_depth"):
-        ExecutionPolicy(max_depth=3, max_concurrent_subagents=2)
+def test_policy_accepts_shared_pool_and_rejects_reserved_headers():
+    ExecutionPolicy(max_depth=3, max_concurrent_subagents=1)
     provider = ProviderConfig(
         base_url="http://interceptor",
         api_key="secret",

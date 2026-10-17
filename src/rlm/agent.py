@@ -9,7 +9,7 @@ from typing import Literal
 
 from rlm import broker
 from rlm.history import History, history
-from rlm.types import RLMResult
+from rlm.types import AgentResult
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,7 @@ class AgentInfo:
     elapsed_seconds: float
     session_dir: Path
     error: str | None
+    turns: int = 0
     cleanup_error: str | None = None
 
     @classmethod
@@ -37,6 +38,7 @@ class AgentInfo:
 class AgentHandle:
     id: str
     session_dir: Path
+    name: str | None = None
 
     async def info(self) -> AgentInfo:
         """Read current metadata from the supervisor."""
@@ -48,12 +50,16 @@ class AgentHandle:
         """Read a fresh snapshot of this agent's local conversation history."""
         return await history(session_dir=self.session_dir)
 
-    async def result(self) -> RLMResult | None:
-        """Return the latest answer, even while running again; None before the first answer.
+    async def result(self, *, yield_after: float = 300) -> AgentResult:
+        """Wait up to yield_after seconds for the child to finish, then return its latest state.
 
-        Terminal failure/cancellation raises. Use info/wait to inspect current activity."""
-        payload = await broker.agent_request("agent.result", agent_id=self.id)
-        return broker.result_from_payload(payload) if payload is not None else None
+        .answer is None while the child is still working on its first answer (.running
+        is True); a persistent child's latest answer stays available while it runs
+        again. Terminal failure/cancellation raises."""
+        payload = await broker.agent_request(
+            "agent.result", agent_id=self.id, yield_after=yield_after
+        )
+        return broker.result_from_payload(payload)
 
     async def wait(self, timeout: float = 30) -> AgentInfo:
         """Wait up to timeout seconds for an outcome, then return current metadata.
@@ -103,7 +109,7 @@ async def spawn(
             "agent.spawn", task=task, name=name, persistent=persistent
         )
     )
-    return AgentHandle(info.id, info.session_dir)
+    return AgentHandle(info.id, info.session_dir, info.name)
 
 
 async def get(name_or_id: str) -> AgentHandle:
@@ -111,7 +117,7 @@ async def get(name_or_id: str) -> AgentHandle:
     info = AgentInfo.from_payload(
         await broker.agent_request("agent.get", name_or_id=name_or_id)
     )
-    return AgentHandle(info.id, info.session_dir)
+    return AgentHandle(info.id, info.session_dir, info.name)
 
 
 async def send_to_parent(message: str) -> str:

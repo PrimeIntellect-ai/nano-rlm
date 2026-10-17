@@ -40,6 +40,7 @@ class _Session:
     last_request_id: str | None = None
     pending_edges: list[_PendingEdge] = field(default_factory=list)
     returned_request_id: str | None = None
+    cancel_recorded: bool = False
 
 
 @dataclass
@@ -213,8 +214,14 @@ class SemanticEdgeTracker:
             pending.append(edge)
 
     def finish_subagent(
-        self, session_id: str, *, request_id: str | None = None
+        self,
+        session_id: str,
+        *,
+        request_id: str | None = None,
+        edge_type: str = "subagent_return",
     ) -> None:
+        """A subagent hands control back to its parent (it finished, or failed): a child ->
+        parent edge, consumed by the parent's next request."""
         session = self._sessions[session_id]
         request_id = request_id or session.last_request_id
         if request_id is None or session.returned_request_id == request_id:
@@ -224,9 +231,32 @@ class SemanticEdgeTracker:
         self.deliver_message(
             session.parent_session_id,
             request_id,
-            edge_type="subagent_return",
+            edge_type=edge_type,
         )
         session.returned_request_id = request_id
+
+    def record_subagent_cancel(
+        self, canceller_request_id: str | None, child_session_id: str
+    ) -> None:
+        """A parent cancelled a child: a parent -> child edge from the cancelling request to the
+        child, mirroring subagent_call (also parent -> child, an action the parent took). At most
+        once per child. The child's cancelled state is derived from this edge, not carried on it."""
+        child = self._sessions[child_session_id]
+        target_request_id = child.last_request_id
+        if (
+            canceller_request_id is None
+            or target_request_id is None
+            or child.cancel_recorded
+        ):
+            return
+        self._edges.append(
+            {
+                "source_request_id": canceller_request_id,
+                "target_request_id": target_request_id,
+                "type": "subagent_cancel",
+            }
+        )
+        child.cancel_recorded = True
 
     def snapshot(self) -> dict[str, list[dict[str, str]]]:
         return {"edges": [edge.copy() for edge in self._edges]}

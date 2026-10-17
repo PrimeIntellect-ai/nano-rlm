@@ -8,6 +8,7 @@ license = { text = "MIT" }
 dependencies = [
     "agent-client-protocol==0.12.1",
     "openai>=1.0",
+    "certifi",
     "ipykernel",
     "jupyter_client",
     "nest_asyncio",
