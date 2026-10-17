@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from math import log
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -21,19 +21,12 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import Tool
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
+from rlm.broker import json_annotation
+
 MAX_MCP_SKILL_NAME_CHARS = 96
 MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
 MAX_MCP_CATALOG_BYTES = 64 * 1024 * 1024
 MAX_MCP_DISCOVERY_PAGES = 4096
-
-_JSON_TO_PY = {
-    "string": str,
-    "integer": int,
-    "number": float,
-    "boolean": bool,
-    "array": list,
-    "object": dict,
-}
 
 
 class _MCPConfigModel(BaseModel):
@@ -59,7 +52,7 @@ class MCPStdioServer(_MCPConfigModel):
 
 
 MCPServer = MCPHTTPServer | MCPStdioServer
-_MCP_SERVERS_ADAPTER = TypeAdapter(dict[Annotated[str, Field(min_length=1)], MCPServer])
+_MCP_SERVERS_ADAPTER = TypeAdapter(dict[str, MCPServer])
 
 
 @dataclass(frozen=True)
@@ -320,8 +313,8 @@ def _search_tokens(text: str) -> set[str]:
 
 
 def _skill_name(server: str, tool: str) -> str:
-    """Return the normalized Python name for a server tool."""
-    ident = re.sub(r"\W", "_", f"{server}_{tool}")
+    """Return the normalized Python name for a server tool; an unnamed server keeps tool names bare."""
+    ident = re.sub(r"\W", "_", f"{server}_{tool}" if server else tool)
     return f"_{ident}" if ident[:1].isdigit() else ident
 
 
@@ -384,7 +377,7 @@ def build_signature(schema: dict[str, Any]) -> inspect.Signature:
             name,
             inspect.Parameter.KEYWORD_ONLY,
             default=inspect.Parameter.empty if name in required else None,
-            annotation=_JSON_TO_PY.get(prop.get("type"), inspect.Parameter.empty),
+            annotation=json_annotation(prop.get("type")),
         )
         for name, prop in properties.items()
         if name.isidentifier() and not keyword.iskeyword(name)
