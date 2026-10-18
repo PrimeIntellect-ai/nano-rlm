@@ -304,6 +304,32 @@ async def test_skill_introspection(session):
     assert "doc match: True" in output
 
 
+def test_brokered_skill_tolerates_json_type_unions():
+    from rlm import broker
+
+    # Gym schemas declare optional fields as ["string", "null"]; a list `type` used to
+    # crash `rlm.tools.get` with "unhashable type: 'list'".
+    notify = broker.make_skill(
+        {
+            "capability": "cap-2",
+            "name": "send_notification",
+            "description": "notify",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"},
+                    "status": {"type": ["string", "null"]},
+                    "payload": {"type": ["array", "object"]},
+                },
+                "required": ["message"],
+            },
+        }
+    )
+    assert str(notify.__signature__) == (
+        "(message: str, status: str = None, payload=None) -> str"
+    )
+
+
 async def test_brokered_skill_accepts_positional_arguments(monkeypatch):
     from rlm import broker
 
