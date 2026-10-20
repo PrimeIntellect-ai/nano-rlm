@@ -149,6 +149,16 @@ _KERNEL_BASE_ENV_NAMES = {
     "TZ",
     "USER",
     "VIRTUAL_ENV",
+    # A host that restricts egress to an authenticating proxy puts its credentials in
+    # these URLs; without them, the kernel has no route out.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
 }
 
 
