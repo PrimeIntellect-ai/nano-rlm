@@ -198,6 +198,50 @@ class BrokerShellReadRequest(TypedDict):
     max_bytes: Annotated[int, Field(ge=1, le=65_536)]
 
 
+class BrokerServicesStartRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["services.start"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+    command: Annotated[str, Field(min_length=1, max_length=65_536)]
+    cwd: str | None
+    env: dict[str, str] | None
+
+
+class BrokerServicesListRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["services.list"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerServicesGetRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["services.get"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+
+
+class BrokerServicesTailRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["services.tail"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+    lines: Annotated[int, Field(ge=1)]
+
+
+class BrokerServicesStopRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["services.stop"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+    grace: Annotated[float, Field(ge=0, le=60)]
+
+
 class BrokerWatchAgentRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
     op: Literal["watch.agent"]
@@ -297,6 +341,11 @@ BrokerRequest = Annotated[
     | BrokerShellEnvRequest
     | BrokerHintsRequest
     | BrokerShellReadRequest
+    | BrokerServicesStartRequest
+    | BrokerServicesListRequest
+    | BrokerServicesGetRequest
+    | BrokerServicesTailRequest
+    | BrokerServicesStopRequest
     | BrokerWatchAgentRequest
     | BrokerWatchJobRequest
     | BrokerWatchPathRequest
