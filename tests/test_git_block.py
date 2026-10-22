@@ -290,6 +290,9 @@ def test_ipython_tool_allows_git_status(monkeypatch):
         def execute(self, code, timeout):
             return f"ran: {code}"
 
+        def take_images(self):
+            return []
+
     ctx = _ctx()
     ctx.repl = StubRepl()
     outcome = IpythonTool().execute({"code": "!git status"}, ctx)
@@ -303,6 +306,9 @@ def test_ipython_tool_passes_through_non_git():
         def execute(self, code, timeout):
             return f"ran: {code}"
 
+        def take_images(self):
+            return []
+
     ctx = _ctx()
     ctx.repl = StubRepl()
     outcome = IpythonTool().execute({"code": "print(1+1)"}, ctx)
@@ -315,6 +321,9 @@ def test_ipython_tool_uses_explicit_execution_policy(monkeypatch):
     class StubRepl:
         def execute(self, code, timeout):
             return "abcdefgh"
+
+        def take_images(self):
+            return []
 
     monkeypatch.setenv("RLM_ALLOW_GIT", "1")
     ctx = _ctx()
