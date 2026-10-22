@@ -8,9 +8,6 @@ from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-server = Server(
-    "catalog-test", instructions="Find calendar events and catalog operations."
-)
 COUNT = 3000
 PAGE_SIZE = 100
 SCHEMA = {
@@ -26,14 +23,16 @@ SCHEMA = {
 }
 
 
-@server.list_tools()
-async def list_tools(request: types.ListToolsRequest) -> types.ListToolsResult:
-    cursor = request.params.cursor if request and request.params else None
+async def list_tools(
+    context, params: types.PaginatedRequestParams | None
+) -> types.ListToolsResult:
+    cursor = params.cursor if params else None
     start = int((cursor or "0").partition(":")[0])
     if os.environ.get("ENDLESS_EMPTY_PAGES"):
         return types.ListToolsResult(
             tools=[],
-            nextCursor=f"{start + 1}:" + "x" * int(os.environ.get("CURSOR_BYTES", "0")),
+            next_cursor=f"{start + 1}:"
+            + "x" * int(os.environ.get("CURSOR_BYTES", "0")),
         )
     end = min(start + PAGE_SIZE, COUNT)
     return types.ListToolsResult(
@@ -45,23 +44,34 @@ async def list_tools(request: types.ListToolsRequest) -> types.ListToolsResult:
                     if i == COUNT - 1
                     else "Unrelated operation. " * 60
                 ),
-                inputSchema=SCHEMA,
+                input_schema=SCHEMA,
             )
             for i in range(start, end)
         ],
-        nextCursor=("100" if os.environ.get("REPEAT_CURSOR") else str(end))
+        next_cursor=("100" if os.environ.get("REPEAT_CURSOR") else str(end))
         if end < COUNT
         else None,
     )
 
 
-@server.call_tool(validate_input=False)
-async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    if name != "calendarEvents":
+async def call_tool(
+    context, params: types.CallToolRequestParams
+) -> types.CallToolResult:
+    if params.name != "calendarEvents":
         raise ValueError("unknown tool")
-    if arguments["filter"]["status"] != "confirmed":
+    if params.arguments["filter"]["status"] != "confirmed":
         raise ValueError("invalid status")
-    return [types.TextContent(type="text", text=json.dumps(arguments))]
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=json.dumps(params.arguments))]
+    )
+
+
+server = Server(
+    "catalog-test",
+    instructions="Find calendar events and catalog operations.",
+    on_list_tools=list_tools,
+    on_call_tool=call_tool,
+)
 
 
 async def main():

@@ -4,9 +4,9 @@ import asyncio
 import os
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-server = FastMCP("blocking-stdio-test")
+server = MCPServer("blocking-stdio-test")
 
 
 @server.tool()
