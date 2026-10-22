@@ -639,7 +639,10 @@ from rlm.images import attach
                     bundle = content.get("data", {})
                     mime = next((m for m in IMAGE_MIMES if m in bundle), None)
                     if mime is not None:
-                        outputs.append(self._keep_image(mime, bundle[mime]) + "\n")
+                        path = content.get("metadata", {}).get(mime, {}).get("path")
+                        outputs.append(
+                            self._keep_image(mime, bundle[mime], path) + "\n"
+                        )
                     elif msg_type == "execute_result" and bundle.get("text/plain"):
                         outputs.append(bundle["text/plain"] + "\n")
                 elif msg_type == "error":
@@ -658,8 +661,9 @@ from rlm.images import attach
 
         return "".join(outputs)
 
-    def _keep_image(self, mime: str, data: str) -> str:
-        """Keep one displayed image within the per-call limits; return its text pointer."""
+    def _keep_image(self, mime: str, data: str, path: str | None = None) -> str:
+        """Keep one displayed image within the per-call limits; return its text pointer,
+        which names the file ``attach`` read it from."""
         data = "".join(data.split())
         size = len(data) * 3 // 4
         if len(self._images) >= MAX_IMAGES_PER_CALL:
@@ -667,7 +671,8 @@ from rlm.images import attach
         if size > MAX_IMAGE_BYTES:
             return f"[image dropped: {size / 1e6:.1f} MB exceeds the {MAX_IMAGE_BYTES // 2**20} MB limit]"
         self._images.append({"mime": mime, "data": data})
-        return f"[image {len(self._images)}: {mime}, {max(1, size // 1024)} KB]"
+        source = f"{path}, " if path else ""
+        return f"[image {len(self._images)}: {source}{mime}, {max(1, size // 1024)} KB]"
 
     def shutdown(self):
         """Stop the kernel."""

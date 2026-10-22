@@ -37,7 +37,11 @@ def attach(path: str | Path) -> None:
         raise ValueError(
             f"{path}: {len(data) / 1e6:.1f} MB exceeds the {MAX_IMAGE_BYTES // 2**20} MB image limit"
         )
-    display({mime: base64.b64encode(data).decode()}, raw=True)
+    display(
+        {mime: base64.b64encode(data).decode()},
+        metadata={mime: {"path": str(Path(path).resolve())}},
+        raw=True,
+    )
 
 
 def image_part(image: dict) -> dict:
