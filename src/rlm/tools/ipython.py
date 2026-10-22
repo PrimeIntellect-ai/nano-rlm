@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import copy
 import functools
 import os
@@ -588,11 +589,26 @@ import rlm
 
     def _execute_locked(self, code: str, timeout: int | None) -> str:
         client = self._kc
-        msg_id = client.execute(code)
+        names = self._assigned_names(code)
+        # Jupyter evaluates these after the cell, without a second visible execution.
+        expressions = (
+            {
+                "shell_jobs": (
+                    "[(name, job.id, job.running, job.exit_code, job.text, "
+                    "job.truncated, job.error, job.timed_out) "
+                    f"for name in {names!r} "
+                    "if isinstance((job := globals().get(name)), rlm.shell.ShellJob)]"
+                )
+            }
+            if names
+            else None
+        )
+        msg_id = client.execute(code, user_expressions=expressions)
         self._cell_submitted = True
         deadline = None if timeout is None else time.monotonic() + timeout
 
         outputs: list[str] = []
+        reply = None
         try:
             while True:
                 if not self._km.is_alive():
@@ -638,11 +654,62 @@ import rlm
             try:
                 timeout = 0.1 if self._interrupt_requested.is_set() else 5
                 if self._kc is client and self._km.is_alive():
-                    client.get_shell_msg(timeout=timeout)
+                    reply = client.get_shell_msg(timeout=timeout)
             except Exception:
                 pass
 
+        if not outputs and reply is not None:
+            result = reply["content"].get("user_expressions", {}).get("shell_jobs", {})
+            if result.get("status") == "ok":
+                jobs = ast.literal_eval(result["data"]["text/plain"])
+                for (
+                    name,
+                    job_id,
+                    running,
+                    exit_code,
+                    text,
+                    truncated,
+                    error,
+                    timed_out,
+                ) in jobs:
+                    summary = f"ShellJob {name} ({job_id}): running={running}, exit_code={exit_code}"
+                    if timed_out:
+                        summary += ", timed_out=True"
+                    if truncated:
+                        summary += ", truncated=True"
+                    if error:
+                        summary += f", error={error}"
+                    if outputs:
+                        outputs.append("\n")
+                    outputs.append(
+                        summary + (f"\n{text}" if text else "\n[no command output]")
+                    )
+
         return "".join(outputs)
+
+    @staticmethod
+    def _assigned_names(code: str) -> list[str]:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return []
+
+        names: list[str] = []
+
+        def add(target: ast.expr) -> None:
+            if isinstance(target, ast.Name) and target.id not in names:
+                names.append(target.id)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for element in target.elts:
+                    add(element)
+
+        for statement in tree.body:
+            if isinstance(statement, ast.Assign):
+                for target in statement.targets:
+                    add(target)
+            elif isinstance(statement, ast.AnnAssign):
+                add(statement.target)
+        return names
 
     def shutdown(self):
         """Stop the kernel."""
