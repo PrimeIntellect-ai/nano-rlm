@@ -14,6 +14,53 @@ from rlm.shell_jobs import ShellJobs
 from test_supervisor import _config
 
 
+async def test_assignment_only_shell_job_shows_result(session):
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {"code": "job = await rlm.shell.run('printf hi; exit 7')"},
+                    )
+                ]
+            ),
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {"code": "quiet = await rlm.shell.run('true')"},
+                    )
+                ]
+            ),
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": "printed = await rlm.shell.run('printf visible'); print(printed.text)"
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(client=client, session=session, runtime_config=_config())
+    try:
+        await engine.prompt("Run a job")
+        outputs = [m["content"] for m in session.messages if m["role"] == "tool"]
+        assert "ShellJob job" in outputs[0]
+        assert "exit_code=7" in outputs[0]
+        assert outputs[0].endswith("\nhi")
+        assert "ShellJob quiet" in outputs[1]
+        assert "exit_code=0" in outputs[1]
+        assert outputs[1].endswith("[no command output]")
+        assert outputs[2].strip() == "visible"
+    finally:
+        await engine.aclose()
+
+
 async def test_result_yields_before_cell_deadline(session):
     config = _config()
     config = config.model_copy(
