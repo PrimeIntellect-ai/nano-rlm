@@ -394,7 +394,8 @@ async def test_attached_image_follows_tool_result(session, vision):
 
     messages = client.calls[1]["messages"]
     assert messages[-1 - vision]["role"] == "tool"
-    assert "[image 1: image/png, 1 KB]" in messages[-1 - vision]["content"]
+    pixel = session.dir / "pixel.png"
+    assert f"[image 1: {pixel}, image/png, 1 KB]" in messages[-1 - vision]["content"]
     if vision:
         assert messages[-1]["role"] == "user"
         assert messages[-1]["content"][1] == {
