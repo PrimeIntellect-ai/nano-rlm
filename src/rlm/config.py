@@ -95,6 +95,11 @@ class ExecutionPolicy(_ConfigModel):
     """The model reads images: images shown by a tool call (``attach(path)``, image
     display output, MCP image blocks) follow its result as one user message with image
     parts. Off: the result keeps only a text pointer per image."""
+    reply_ends_turn: bool = False
+    """A reply without tool calls ends the turn even when a steering message arrived
+    during the model call that made it: that message is not taken and comes back
+    ``promptRequired`` (``noRunningTurn``), for the client to send as a new prompt.
+    Off: the turn goes on with the steering message."""
 
     @model_validator(mode="after")
     def _validate_concurrency(self) -> Self:

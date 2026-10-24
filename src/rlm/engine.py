@@ -222,6 +222,7 @@ class RLMEngine:
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
         self.vision = config.policy.vision
+        self.reply_ends_turn = config.policy.reply_ends_turn
 
         # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
@@ -893,7 +894,7 @@ class RLMEngine:
 
             # No tool calls → done
             if not msg.tool_calls:
-                if self._steering_pending:
+                if self._steering_pending and not self.reply_ends_turn:
                     continue
                 if self._deliver_supervisor_input(include_queue=True, notify=False):
                     continue
