@@ -1268,3 +1268,41 @@ async def test_steering_unconsumed_at_budget_boundary(session, monkeypatch):
         turn.cancel()
         await asyncio.gather(turn, return_exceptions=True)
         await engine.aclose()
+
+
+async def test_reply_ends_turn_hands_back_steering_from_its_model_call(
+    session, monkeypatch
+):
+    client = DummyClient(
+        [DummyMessage(content="done"), DummyMessage(content="went on")]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=make_runtime_config(
+            policy=ExecutionPolicy(reply_ends_turn=True)
+        ),
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    create = client.create
+
+    async def blocked_create(**kwargs):
+        entered.set()
+        await release.wait()
+        return await create(**kwargs)
+
+    monkeypatch.setattr(client, "create", blocked_create)
+    turn = asyncio.create_task(engine.prompt("work"))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        receipt = asyncio.create_task(engine.steer("mention", "late"))
+        await asyncio.sleep(0)
+        release.set()
+        assert (await turn).answer == "done"
+        assert await receipt == {"outcome": "promptRequired", "reason": "noRunningTurn"}
+        assert len(client.calls) == 1
+        assert all(m.get("content") != "mention" for m in session.messages)
+    finally:
+        turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+        await engine.aclose()

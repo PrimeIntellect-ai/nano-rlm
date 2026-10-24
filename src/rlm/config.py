@@ -93,6 +93,11 @@ class ExecutionPolicy(_ConfigModel):
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
     allow_git: bool = False
+    reply_ends_turn: bool = False
+    """A reply without tool calls ends the turn even when a steering message arrived
+    during the model call that made it: that message is not taken and comes back
+    ``promptRequired`` (``noRunningTurn``), for the client to send as a new prompt.
+    Off: the turn goes on with the steering message."""
 
 
 class RuntimeConfig(_ConfigModel):
