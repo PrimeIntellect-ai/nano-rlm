@@ -69,7 +69,9 @@ def _scripted_factory(script: _Script):
         async def prompt(self, text, **kwargs):
             name = self.supervisor._invocations[self.invocation_id].name
             script.prompts.setdefault(name, []).append(text)
-            self.supervisor.inbox_notice(self.invocation_id)  # as the engine's first call
+            self.supervisor.inbox_notice(
+                self.invocation_id
+            )  # as the engine's first call
             turns = script.turns.get(name, [])
             turn = len(script.prompts[name]) - 1
             scope = await self.supervisor.open_scope(self.invocation_id)
@@ -355,7 +357,7 @@ async def test_episode_wall_clock_stops_running_agents(tmp_path):
     assert result.answer == ""
 
 
-async def test_failed_retirement_ends_the_agent_and_frees_the_episode(tmp_path):
+async def test_an_agent_failure_fails_the_episode(tmp_path):
     script = _Script()
     errors = {}
 
@@ -381,12 +383,14 @@ async def test_failed_retirement_ends_the_agent_and_frees_the_episode(tmp_path):
         tmp_path, script, founders=1, max_live_agents=2, idle_grace_seconds=1
     )
     try:
-        await asyncio.wait_for(swarm.prompt("task"), 10)
+        with pytest.raises(OSError, match="kernel would not stop"):
+            await asyncio.wait_for(swarm.prompt("task"), 10)
     finally:
         await swarm.aclose()
     assert errors["spawn"] == "kernel would not stop"
+    assert swarm.stop_reason == "agent_failed"
     a = swarm.execution_snapshot()["population"]["agents"][1]
-    assert a["status"] == "failed" and swarm.stop_reason == "quiescent"
+    assert a["status"] == "failed"
 
 
 async def test_running_shell_jobs_keep_the_episode_open(tmp_path):

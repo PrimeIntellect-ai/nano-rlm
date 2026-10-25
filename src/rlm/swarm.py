@@ -4,6 +4,10 @@ The swarm admits the founders, waits without any model call of its own until no 
 can act again (or a budget or the wall clock runs out), stops every agent, and reports
 the episode answer with population-wide accounting. All agents share one supervisor,
 so their model calls share the session's provider endpoint and semantic edges.
+
+An agent's engine only raises for infrastructure (a model call that failed after its
+retries, a kernel that could not be released): tool errors stay in the conversation. So
+one failed agent ends the episode as an error instead of a scored outcome.
 """
 
 from __future__ import annotations
@@ -98,7 +102,9 @@ class Swarm:
             (self.session.dir / "population_summary.json").write_text(
                 json.dumps(summary, indent=2)
             )
-        self._raise_if_extinct_by_error()
+        if failures := self.supervisor.population_failures():
+            transport = [e for e in failures if isinstance(e, ModelTransportError)]
+            raise (transport or failures)[0]
         usage = self._usage()
         return RLMResult(
             answer=self.supervisor.episode_answer["text"],
@@ -116,6 +122,8 @@ class Swarm:
         activity = self.supervisor.activity
         while True:
             activity.clear()
+            if self.supervisor.population_failures():
+                return "agent_failed"
             if self.supervisor.population_quiescent():
                 return self._quiescent_reason()
             timeout = None if deadline is None else deadline - time.monotonic()
@@ -142,21 +150,6 @@ class Swarm:
         if counts["ended"] == counts["admitted"]:
             return "extinct"
         return "quiescent"
-
-    def _raise_if_extinct_by_error(self) -> None:
-        """Every agent failing is an infrastructure failure, not an episode outcome."""
-        failures = self.supervisor.population_failures()
-        if self._stop_reason != "extinct" or len(failures) < self._summary["admitted"]:
-            return
-        transport = [
-            error for error in failures if isinstance(error, ModelTransportError)
-        ]
-        if transport:
-            raise transport[-1]
-        raise RuntimeError(
-            "every agent of the population failed: "
-            + "; ".join(str(error) or type(error).__name__ for error in failures)
-        )
 
     def _usage(self) -> TokenUsage:
         agents = (self._summary or self.supervisor.population_snapshot())["agents"]

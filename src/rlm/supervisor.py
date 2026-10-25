@@ -806,6 +806,7 @@ class SessionTreeSupervisor:
             agent.cleanup_error = "; ".join(str(e) or type(e).__name__ for e in errors)
             agent.status = "failed"
             agent.error = f"retirement cleanup failed: {agent.cleanup_error}"
+            agent.failure = errors[0]
             self._announce("ended", agent, status=agent.status, error=agent.error)
             raise errors[0]
 
