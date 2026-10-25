@@ -69,6 +69,7 @@ def _scripted_factory(script: _Script):
         async def prompt(self, text, **kwargs):
             name = self.supervisor._invocations[self.invocation_id].name
             script.prompts.setdefault(name, []).append(text)
+            self.supervisor.inbox_notice(self.invocation_id)  # as the engine's first call
             turns = script.turns.get(name, [])
             turn = len(script.prompts[name]) - 1
             scope = await self.supervisor.open_scope(self.invocation_id)
@@ -352,6 +353,112 @@ async def test_episode_wall_clock_stops_running_agents(tmp_path):
         await swarm.aclose()
     assert swarm.stop_reason == "max_seconds"
     assert result.answer == ""
+
+
+async def test_failed_retirement_ends_the_agent_and_frees_the_episode(tmp_path):
+    script = _Script()
+    errors = {}
+
+    async def founder(agent):
+        supervisor = agent.supervisor
+        await agent.op("agent.spawn", task="a", name="a", persistent=False)
+        while supervisor._lookup("a").status != "idle":
+            await asyncio.sleep(0.01)
+        supervisor._lookup("a").idle_since -= 100
+
+        async def broken_release():
+            raise OSError("kernel would not stop")
+
+        supervisor._lookup("a").engine.release_kernel = broken_release
+        try:
+            await agent.op("agent.spawn", task="b", name="b", persistent=False)
+        except OSError as error:
+            errors["spawn"] = str(error)
+        return "done"
+
+    script.turns = {"agent-1": [founder]}
+    swarm = _swarm(
+        tmp_path, script, founders=1, max_live_agents=2, idle_grace_seconds=1
+    )
+    try:
+        await asyncio.wait_for(swarm.prompt("task"), 10)
+    finally:
+        await swarm.aclose()
+    assert errors["spawn"] == "kernel would not stop"
+    a = swarm.execution_snapshot()["population"]["agents"][1]
+    assert a["status"] == "failed" and swarm.stop_reason == "quiescent"
+
+
+async def test_running_shell_jobs_keep_the_episode_open(tmp_path):
+    script = _Script()
+
+    async def start_job(agent):
+        await agent.op(
+            "shell.run",
+            command="sleep 1",
+            cwd=None,
+            yield_after=0,
+            timeout=None,
+            env=None,
+        )
+        return "waiting for the job"
+
+    async def collect(agent):
+        return "job finished"
+
+    script.turns = {"agent-1": [start_job, collect]}
+    swarm = _swarm(tmp_path, script, founders=1)
+    try:
+        await asyncio.wait_for(swarm.prompt("task"), 10)
+    finally:
+        await swarm.aclose()
+    assert len(script.prompts["agent-1"]) == 2
+
+
+async def test_agents_awaiting_a_reply_are_not_retired(tmp_path):
+    script = _Script()
+    release = asyncio.Event()
+    outcomes = {}
+
+    async def founder(agent):
+        supervisor = agent.supervisor
+        await agent.op("agent.spawn", task="slow", name="slow", persistent=False)
+        await agent.op("agent.spawn", task="asker", name="asker", persistent=False)
+        while supervisor._lookup("asker").status != "idle":
+            await asyncio.sleep(0.01)
+        supervisor._lookup("asker").idle_since -= 100
+        try:
+            await agent.op("agent.spawn", task="c", name="c", persistent=False)
+        except RuntimeError as error:
+            outcomes["spawn"] = str(error)
+        release.set()
+        return "done"
+
+    async def asker(agent):
+        await agent.op("agent.dm", agent_id="slow", message="what is 6*7?")
+        return "asked"
+
+    async def slow(agent):
+        await release.wait()
+        return "slow idle"
+
+    async def slow_answers(agent):
+        return "42"
+
+    script.turns = {
+        "agent-1": [founder],
+        "asker": [asker],
+        "slow": [slow, slow_answers],
+    }
+    swarm = _swarm(
+        tmp_path, script, founders=1, max_live_agents=3, idle_grace_seconds=1
+    )
+    try:
+        await asyncio.wait_for(swarm.prompt("task"), 10)
+    finally:
+        await swarm.aclose()
+    assert outcomes["spawn"].startswith("population_full")
+    assert any("42" in prompt for prompt in script.prompts["asker"][1:])
 
 
 def test_board_revisions_conflicts_and_retries(tmp_path):

@@ -212,6 +212,8 @@ class RLMEngine:
                 "environment configuration was removed (rlm is consumed via "
                 "the ACP runtime contract; children inherit in-memory)."
             )
+        if runtime_config.policy.population is not None and supervisor is None:
+            raise ValueError("a population episode runs through rlm.swarm.Swarm")
         self.runtime_config = runtime_config
         config = self.runtime_config
         self.model = config.model
@@ -296,9 +298,8 @@ class RLMEngine:
         self._turn = 0
         self._empty_reply_nudges = 0
         self._plan_reply_nudges = 0
-        self._answer_nudged = (
-            False  # one unsubmitted-answer reminder per population agent
-        )
+        # One unsubmitted-answer reminder per population agent.
+        self._answer_nudged = False
         self._quote_nesting_hints = 0
         self._last_answer = ""
         self._has_result = False

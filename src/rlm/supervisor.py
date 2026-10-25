@@ -133,6 +133,8 @@ MAX_MESSAGE_BYTES = 65_536
 # its cleanup finishes. Retired agents keep their conversation and can be revived.
 RESIDENT = frozenset({"starting", "running", "waiting", "idle"})
 ENDED = frozenset({"completed", "failed", "cancelled"})
+# Agents in these states can still act, so the population is not quiescent.
+ACTIVE = frozenset({"starting", "running", "waiting", "retiring"})
 # Inputs pushed into a population agent's conversation at its next model boundary.
 PEER_INPUTS = frozenset({"dm", "broadcast", "reply"})
 MAX_NOTICE_EVENTS = 8
@@ -187,7 +189,6 @@ class _Invocation:
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     # Population mode
-    founder: bool = False
     idle_since: float | None = None  # monotonic start of the current idle period
     kernel_generation: int = 0
     requesters: list[str] = field(default_factory=list)  # DM senders awaiting a reply
@@ -536,10 +537,9 @@ class SessionTreeSupervisor:
         if self._population:
             parent = self._invocations.get(agent.parent_id)
             context["population"] = {
-                "founder": agent.founder,
+                "founder": agent.parent_id is None,
                 "parent_name": parent.name if parent else None,
                 "task": self._episode_task,
-                "board_path": str(self._board.path) if self._board else None,
                 **self._population.model_dump(),
             }
         return context
@@ -641,6 +641,25 @@ class SessionTreeSupervisor:
             for agent in self._peers()
         )
 
+    def _job_owners(self) -> set[str]:
+        return {
+            job.info.owner_id
+            for job in self._shell_jobs.jobs.values()
+            if job.finished is None
+        }
+
+    def _awaiting_replies(self) -> set[str]:
+        """Agents whose direct message has not been answered yet."""
+        awaiting = set()
+        for agent in self._peers():
+            awaiting.update(agent.requesters)
+            awaiting.update(
+                event["sender_id"]
+                for event in agent.instructions
+                if event["type"] == "dm"
+            )
+        return awaiting
+
     def _lookup(self, name_or_id: str) -> _Invocation:
         for agent in self._peers():
             if name_or_id in (agent.id, agent.name):
@@ -733,18 +752,14 @@ class SessionTreeSupervisor:
         """Mark the longest-idle agent past its grace period as retiring, or fail at once."""
         policy = self._population
         now = time.monotonic()
-        busy_owners = {
-            job.info.owner_id
-            for job in self._shell_jobs.jobs.values()
-            if job.finished is None
-        }
+        busy = self._job_owners() | self._awaiting_replies()
         idle = [
             agent
             for agent in self._peers()
             if agent.status == "idle"
             and agent is not caller
             and not agent.instructions
-            and agent.id not in busy_owners
+            and agent.id not in busy
         ]
         eligible = [
             agent
@@ -787,19 +802,27 @@ class SessionTreeSupervisor:
             except Exception as exc:
                 errors.append(exc)
         if errors:
+            # An agent whose resources could not be released cannot be revived safely.
             agent.cleanup_error = "; ".join(str(e) or type(e).__name__ for e in errors)
+            agent.status = "failed"
+            agent.error = f"retirement cleanup failed: {agent.cleanup_error}"
+            self._announce("ended", agent, status=agent.status, error=agent.error)
             raise errors[0]
 
-    def _finish_retirement(
-        self, agent: _Invocation, task: asyncio.Task | None = None
-    ) -> None:
-        if task is not None and (task.cancelled() or task.exception() is not None):
-            return
+    def _finish_retirement(self, agent: _Invocation) -> bool:
+        """Free a retiring agent's slot once its cleanup succeeded; False if it ended meanwhile."""
+        if agent.status != "retiring":
+            return False
         agent.status = "retired"
         agent.idle_since = None
         self._counters["retirements"] += 1
         agent.session.write_meta(**self._info(agent))
-        self._announce("retired", agent, reason="capacity")
+        return True
+
+    def _settle_retirement(self, agent: _Invocation, task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is None:
+            if self._finish_retirement(agent):
+                self._announce("retired", agent, reason="capacity")
 
     async def _admit(
         self, parent: _Invocation, task: str, name: str | None, request_id: str | None
@@ -816,13 +839,22 @@ class SessionTreeSupervisor:
                 await asyncio.shield(retirement)
             except asyncio.CancelledError:
                 # The caller left; the slot frees once cleanup finishes.
-                retirement.add_done_callback(partial(self._finish_retirement, retiree))
+                retirement.add_done_callback(partial(self._settle_retirement, retiree))
                 raise
             finally:
                 self._reserved_births -= 1
-            # Hand the slot over without yielding, so no other spawn can take it.
-            self._finish_retirement(retiree)
-            self._check_birth(name)
+            # Hand the slot over without yielding, so no other spawn can take it, and
+            # announce the retirement with the counts after the handoff.
+            retired = self._finish_retirement(retiree)
+            try:
+                self._check_birth(name)
+                self._total_calls += 1
+                return self._create_agent(
+                    task, name, parent=parent, spawned_by_request_id=request_id
+                )
+            finally:
+                if retired:
+                    self._announce("retired", retiree, reason="capacity")
         self._total_calls += 1
         return self._create_agent(
             task, name, parent=parent, spawned_by_request_id=request_id
@@ -854,7 +886,6 @@ class SessionTreeSupervisor:
             name=name or f"agent-{self._admitted + 1}",
             task=task,
             persistent=True,
-            founder=parent is None,
             requesters=[parent.id] if parent else [],
             membership_seen=len(self._membership),
         )
@@ -926,16 +957,20 @@ class SessionTreeSupervisor:
 
     def population_quiescent(self) -> bool:
         """True when no agent can act again: none runs, starts, retires or has input queued."""
+        job_owners = self._job_owners()
         return all(
-            agent.status not in {"starting", "running", "waiting", "retiring"}
+            agent.status not in ACTIVE
             and (agent.runner is None or agent.runner.done())
             and not (agent.status == "idle" and agent.instructions)
+            and agent.id not in job_owners
             for agent in self._peers()
         )
 
     def _revive(self, agent: _Invocation) -> None:
         """Give a retired agent a live slot again; its next turn starts a fresh kernel."""
         policy = self._population
+        if agent.released:
+            raise RuntimeError(f"{agent.name} has ended")
         if self._used_slots() >= policy.max_live_agents:
             hint = (
                 " Its history is readable with rlm.population.history()."
@@ -969,6 +1004,8 @@ class SessionTreeSupervisor:
         request_id: str | None,
     ) -> dict:
         """Queue a message for target's next model boundary, reviving it if retired."""
+        if not self._population_open:
+            raise RuntimeError("population_closed: the episode is ending")
         if target is sender:
             raise ValueError("an agent cannot message itself")
         if target.status in ENDED:
@@ -1076,6 +1113,8 @@ class SessionTreeSupervisor:
     def _submit_answer(
         self, agent: _Invocation, text: str, expected_revision: int
     ) -> dict:
+        if not self._population_open:
+            raise RuntimeError("population_closed: the episode answer is frozen")
         current = self._answer
         if expected_revision != current["revision"]:
             raise RuntimeError(
@@ -1146,7 +1185,7 @@ class SessionTreeSupervisor:
                 "parent": self._invocations[agent.parent_id].name
                 if agent.parent_id
                 else None,
-                "founder": agent.founder,
+                "founder": agent.parent_id is None,
                 "status": agent.status,
                 "messageable": agent.status in RESIDENT or agent.status == "retired",
                 "requires_revival": agent.status == "retired",
@@ -1202,6 +1241,8 @@ class SessionTreeSupervisor:
             )
         if op == "board.search":
             return board.search(request["query"], request["limit"])
+        if not self._population_open:
+            raise RuntimeError("population_closed: the board is frozen")
         if op == "board.append":
             return board.append(agent.name, request["text"], request.get("request_id"))
         return board.edit(
@@ -1229,7 +1270,7 @@ class SessionTreeSupervisor:
                     "parent": self._invocations[agent.parent_id].name
                     if agent.parent_id
                     else None,
-                    "founder": agent.founder,
+                    "founder": agent.parent_id is None,
                     "status": agent.status,
                     "turns": agent.turns,
                     "prompt_tokens": agent.prompt_tokens,
@@ -1597,6 +1638,7 @@ class SessionTreeSupervisor:
 
     def _publish_job(self, job: JobRecord) -> None:
         self._subscriptions.finish("job", job.info.id)
+        self._activity.set()
         owner = self._invocations[job.info.owner_id]
         if self._closed or owner.capability not in self._capabilities or not job.notify:
             return
@@ -1917,6 +1959,8 @@ class SessionTreeSupervisor:
                     edge_type="agent_message",
                 )
             return dict(event)
+        if self._population and op in {"agent.send", "agent.steer", "agent.report"}:
+            raise RuntimeError(f"{op} is not used in a population: use rlm.agent.dm")
         if op == "agent.report":
             if parent.parent_id is None:
                 raise PermissionError("root agent has no parent")
@@ -1999,7 +2043,7 @@ class SessionTreeSupervisor:
                     pass
         elif op == "agent.cancel":
             await self._terminate(child)
-            if child.status == "cancelled":
+            if child.status == "cancelled" and not self._population:
                 self.semantic_edges.record_subagent_cancel(
                     self._scopes[request["scope_id"]].request_id, child.id
                 )
@@ -2016,9 +2060,10 @@ class SessionTreeSupervisor:
                 )
                 raise RuntimeError(child.error or "agent failed")
             if child.status == "cancelled":
-                self.semantic_edges.record_subagent_cancel(
-                    self._scopes[request["scope_id"]].request_id, child.id
-                )
+                if not self._population:
+                    self.semantic_edges.record_subagent_cancel(
+                        self._scopes[request["scope_id"]].request_id, child.id
+                    )
                 raise RuntimeError(child.error or "agent cancelled")
             if child.result is not None:
                 self.semantic_edges.finish_subagent(
@@ -2131,7 +2176,8 @@ class SessionTreeSupervisor:
                 child.done.set()
                 parent = self._invocations.get(child.parent_id)
                 if self._population:
-                    self._end_population_turn(child)
+                    if child.status == "idle":
+                        self._reply(child)
                 elif parent is not None and parent.capability in self._capabilities:
                     self._publish(
                         parent,
@@ -2166,7 +2212,7 @@ class SessionTreeSupervisor:
         self, agent: _Invocation, first_turn: bool
     ) -> tuple[str, dict[str, Any]]:
         """The input that starts a population agent's turn, attributed to its source."""
-        if first_turn and agent.founder:
+        if first_turn and agent.parent_id is None:
             return agent.task, {
                 "message_type": "assignment",
                 "message": runtime_event("assignment", agent.task),
@@ -2199,10 +2245,6 @@ class SessionTreeSupervisor:
             ),
             "event_ids": [event["id"] for event in events],
         }
-
-    def _end_population_turn(self, agent: _Invocation) -> None:
-        if agent.status == "idle":
-            self._reply(agent)
 
     async def _close_agent_subscriptions(self, agent_id: str) -> None:
         try:
@@ -2269,7 +2311,7 @@ class SessionTreeSupervisor:
                 child.runner.cancel()
             await asyncio.gather(child.runner, return_exceptions=True)
         if not child.released:
-            if child.status in {"starting", "running", "waiting", "idle"}:
+            if child.status in RESIDENT or child.status in {"retiring", "retired"}:
                 child.status = "cancelled"
             try:
                 await self._release_agent(child)

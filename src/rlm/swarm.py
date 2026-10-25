@@ -21,18 +21,6 @@ from rlm.supervisor import SessionTreeSupervisor
 from rlm.types import ProgrammaticToolCallStats, RLMResult, TokenUsage
 
 BOARD_SUMMARY_BYTES = 65_536
-COUNTERS = (
-    "births_denied",
-    "retirements",
-    "revivals",
-    "dms",
-    "broadcasts",
-    "replies",
-    "answer_submissions",
-    "board_revision",
-    "peak_live",
-    "admitted",
-)
 
 
 async def _settle(awaitable) -> None:
@@ -183,13 +171,14 @@ class Swarm:
         usage = self._usage()
         policy = self.runtime_config.policy
         metrics: dict[str, int | float] = {
-            f"population_{key}": summary[key] for key in COUNTERS
+            f"population_{key}": value
+            for key, value in summary.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
         }
         metrics.update(
             population_founders=self.policy.founders,
             population_failed=sum(a["status"] == "failed" for a in summary["agents"]),
             population_answered=int(summary["answer_revision"] > 0),
-            population_seconds=summary.get("seconds", 0.0),
             population_turns=self.supervisor.total_turns,
             population_new_tokens=self.supervisor.total_tokens,
             population_prompt_tokens=usage.prompt_tokens,
