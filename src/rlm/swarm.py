@@ -113,7 +113,7 @@ class Swarm:
         self._raise_if_extinct_by_error()
         usage = self._usage()
         return RLMResult(
-            answer=self.supervisor.episode_answer["text"] or "",
+            answer=self.supervisor.episode_answer["text"],
             session_dir=self.session.dir,
             usage=usage,
             turns=self.supervisor.total_turns,
@@ -188,9 +188,7 @@ class Swarm:
         metrics.update(
             population_founders=self.policy.founders,
             population_failed=sum(a["status"] == "failed" for a in summary["agents"]),
-            population_answered=int(summary["answer"]["text"] is not None)
-            if "answer" in summary
-            else 0,
+            population_answered=int(summary["answer_revision"] > 0),
             population_seconds=summary.get("seconds", 0.0),
             population_turns=self.supervisor.total_turns,
             population_new_tokens=self.supervisor.total_tokens,

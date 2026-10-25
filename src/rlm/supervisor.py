@@ -349,7 +349,7 @@ class SessionTreeSupervisor:
         self._membership: list[dict] = []
         self._message_receipts: dict[tuple[str, str], tuple[str, Any]] = {}
         self._board: SharedBoard | None = None
-        self._answer: dict[str, Any] = {"text": None, "revision": 0, "author": None}
+        self._answer: dict[str, Any] = {"text": "", "revision": 0, "author": None}
         self._activity = asyncio.Event()
 
     @asynccontextmanager
@@ -888,13 +888,18 @@ class SessionTreeSupervisor:
         self._episode_task = task
         self._population_open = True
         count = self._population.founders
-        for index in range(count):
+        founders = [
             self._create_agent(
                 f"You are agent-{index + 1}, one of {count} founders admitted at the "
                 "start of this episode. Begin work on the episode task.",
                 None,
                 parent=None,
             )
+            for index in range(count)
+        ]
+        # Founders know each other from their prompts; notices start after the cohort.
+        for founder in founders:
+            founder.membership_seen = len(self._membership)
 
     def close_population(self) -> None:
         """Close admission and stop waking agents; the episode is ending."""

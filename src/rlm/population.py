@@ -29,7 +29,8 @@ async def events(after: int = 0, limit: int = 100) -> builtins.list[dict]:
 
 
 async def answer() -> dict:
-    """The current episode answer: "text" (None until submitted), "revision", "author"."""
+    """The current episode answer: "text" ("" until submitted), "revision" (0 until
+    submitted) and "author"."""
     return await broker.agent_request("population.answer")
 
 
