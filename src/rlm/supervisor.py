@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import heapq
 import itertools
 import json
@@ -106,6 +107,8 @@ def _describe_membership(event: dict) -> str:
         return f"{name} was revived"
     if kind == "answer":
         return f"{name} submitted episode answer revision {event['revision']}"
+    if kind == "published":
+        return f"{name} published {event['artifact']} revision {event['revision']}"
     return f"{name} ended ({event['status']})"
 
 
@@ -345,10 +348,13 @@ class SessionTreeSupervisor:
                 "broadcasts",
                 "replies",
                 "answer_submissions",
+                "artifact_publications",
             )
         }
         self._membership: list[dict] = []
-        self._message_receipts: dict[tuple[str, str], tuple[str, Any]] = {}
+        self._receipts: dict[tuple[str, str], tuple[str, asyncio.Future]] = {}
+        self._deliveries: dict[str, dict[str, Any]] = {}  # message id -> receipt
+        self._artifacts: dict[Path, dict[str, Any]] = {}  # resolved path -> state
         self._board: SharedBoard | None = None
         self._answer: dict[str, Any] = {"text": "", "revision": 0, "author": None}
         self._activity = asyncio.Event()
@@ -420,9 +426,14 @@ class SessionTreeSupervisor:
         )
         os.chmod(self._socket_path, 0o600)
         if self._population:
-            self._board = SharedBoard(
-                self._invocations[self.root_id].session.dir / "board.md"
-            )
+            root = self._invocations[self.root_id]
+            self._board = SharedBoard(root.session.dir / "board.md")
+            for path in self._population.artifacts:
+                self._artifacts[(Path(root.cwd) / path).resolve()] = {
+                    "path": path,
+                    "revision": 0,
+                    "author": None,
+                }
 
     def write_brokered_skill_modules(
         self, dest_dir: Path, reserved_names: Iterable[str] = ()
@@ -540,6 +551,7 @@ class SessionTreeSupervisor:
                 "founder": agent.parent_id is None,
                 "parent_name": parent.name if parent else None,
                 "task": self._episode_task,
+                "drafts": str(agent.session.dir / "drafts"),
                 **self._population.model_dump(),
             }
         return context
@@ -894,6 +906,8 @@ class SessionTreeSupervisor:
         )
         try:
             agent.session.write_meta(**self._info(agent))
+            if self._artifacts:
+                (agent.session.dir / "drafts").mkdir()
             if parent is not None:
                 parent.session.log_sub_spawn(
                     agent.session.dir.name, "rlm.agent.spawn", prompt=task
@@ -1024,26 +1038,43 @@ class SessionTreeSupervisor:
             self._revive(target)
         self._record_event(target, event)
         target.instructions.append(event)
+        self._deliveries[event["id"]] = {
+            "message_id": event["id"],
+            "sender_id": sender.id,
+            "to": target.name,
+            "kind": kind,
+            "status": "accepted",
+            "reason": None,
+        }
         self._wake_agent(target)
         return event
 
-    def _once(self, sender: _Invocation, message_id: str | None, payload: Any, send):
-        """Run send once per sender and message_id; a retry returns the first receipt."""
-        if message_id is None:
-            return send()
-        key = (sender.id, message_id)
-        fingerprint = json.dumps(payload, sort_keys=True)
-        if key in self._message_receipts:
-            previous, receipt = self._message_receipts[key]
-            if previous != fingerprint:
-                raise ValueError("message_id was already used for a different message")
-            return receipt
-        receipt = send()
-        self._message_receipts[key] = (fingerprint, receipt)
-        return receipt
+    def _delivery(self, sender: _Invocation, message_id: str) -> dict:
+        receipt = self._deliveries.get(message_id)
+        if receipt is None or receipt["sender_id"] != sender.id:
+            raise ValueError("no message with this id was sent by you")
+        return {key: value for key, value in receipt.items() if key != "sender_id"}
 
-    def _dm(self, sender, scope_id, target_name, text, message_id) -> dict:
-        def send() -> dict:
+    async def _once(
+        self, sender: _Invocation, request_id: str | None, payload: Any, operation
+    ) -> Any:
+        """Run operation() once per sender and request_id. A retry, even one racing the
+        first call, gets the first outcome, including its error."""
+        if request_id is None:
+            return await operation()
+        key = (sender.id, request_id)
+        fingerprint = json.dumps(payload, sort_keys=True)
+        if key in self._receipts:
+            previous, outcome = self._receipts[key]
+            if previous != fingerprint:
+                raise ValueError("this request id was already used for another request")
+        else:
+            outcome = asyncio.ensure_future(operation())
+            self._receipts[key] = (fingerprint, outcome)
+        return await asyncio.shield(outcome)
+
+    async def _dm(self, sender, scope_id, target_name, text, message_id) -> dict:
+        async def send() -> dict:
             target = self._lookup(target_name)
             revived = target.status == "retired"
             event = self._message(
@@ -1057,29 +1088,29 @@ class SessionTreeSupervisor:
                 "revived": revived,
             }
 
-        return self._once(sender, message_id, ["dm", target_name, text], send)
+        return await self._once(sender, message_id, ["dm", target_name, text], send)
 
-    def _broadcast(self, sender, scope_id, text, message_id) -> dict:
-        def send() -> dict:
+    async def _broadcast(self, sender, scope_id, text, message_id) -> dict:
+        async def send() -> dict:
             delivered, rejected = [], []
             for target in self._peers():
                 if target is sender or target.status not in RESIDENT:
                     continue
                 try:
-                    self._message(
+                    event = self._message(
                         sender,
                         target,
                         "broadcast",
                         text,
                         self._scopes[scope_id].request_id,
                     )
-                    delivered.append(target.name)
+                    delivered.append({"to": target.name, "message_id": event["id"]})
                 except RuntimeError as exc:
                     rejected.append({"to": target.name, "reason": str(exc)})
             self._counters["broadcasts"] += 1
             return {"delivered": delivered, "rejected": rejected}
 
-        return self._once(sender, message_id, ["broadcast", text], send)
+        return await self._once(sender, message_id, ["broadcast", text], send)
 
     def _reply(self, agent: _Invocation) -> None:
         """Push a finished turn's answer to the agents whose messages it answered."""
@@ -1136,6 +1167,67 @@ class SessionTreeSupervisor:
         self._counters["answer_submissions"] += 1
         self._announce("answer", agent, revision=self._answer["revision"])
         return {"revision": self._answer["revision"], "changed": True}
+
+    def _declared_artifact(self, path: str) -> tuple[Path, dict[str, Any]]:
+        root = self._invocations[self.root_id]
+        resolved = (Path(root.cwd) / path).resolve()
+        if resolved not in self._artifacts:
+            declared = [state["path"] for state in self._artifacts.values()]
+            raise ValueError(
+                f"{path!r} is not a final artifact of this episode: {declared}"
+            )
+        return resolved, self._artifacts[resolved]
+
+    def _artifact_status(self, path: str) -> dict:
+        resolved, state = self._declared_artifact(path)
+        data = resolved.read_bytes() if resolved.is_file() else None
+        return {
+            "path": state["path"],
+            "revision": state["revision"],
+            "author": state["author"],
+            "exists": data is not None,
+            "bytes": len(data) if data is not None else 0,
+            "sha256": hashlib.sha256(data).hexdigest() if data is not None else None,
+        }
+
+    async def _publish_artifact(
+        self, agent: _Invocation, path: str, candidate: str, expected_revision: int
+    ) -> dict:
+        """Copy a complete candidate over a final artifact if nobody published since
+        expected_revision. The bytes are read once, so later draft edits cannot leak in."""
+        if not self._population_open:
+            raise RuntimeError("population_closed: the final artifacts are frozen")
+        resolved, state = self._declared_artifact(path)
+        if expected_revision != state["revision"]:
+            raise RuntimeError(
+                f"artifact_conflict: you expected revision {expected_revision} of "
+                f"{state['path']} but it is at revision {state['revision']} (by "
+                f"{state['author']}). Read it again and publish only an improvement."
+            )
+        source = (Path(agent.cwd) / candidate).resolve()
+        if source == resolved:
+            raise ValueError("publish a draft, not the final path itself")
+        data = source.read_bytes()
+        if resolved.is_file() and resolved.read_bytes() == data:
+            return {"revision": state["revision"], "changed": False}
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        tmp = resolved.with_name(f".{resolved.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, resolved)
+        state["revision"] += 1
+        state["author"] = agent.name
+        self._counters["artifact_publications"] += 1
+        self._announce(
+            "published", agent, artifact=state["path"], revision=state["revision"]
+        )
+        return {"revision": state["revision"], "changed": True}
+
+    def episode_output_empty(self) -> bool:
+        """Nothing scored has been produced yet: no declared artifact was published, or,
+        when the task declares none, no episode answer was submitted."""
+        if self._artifacts:
+            return all(state["revision"] == 0 for state in self._artifacts.values())
+        return self._answer["revision"] == 0
 
     @property
     def episode_answer(self) -> dict[str, Any]:
@@ -1266,6 +1358,13 @@ class SessionTreeSupervisor:
             "board_bytes": len(self._board.text.encode()) if self._board else 0,
             "answer_revision": self._answer["revision"],
             "answer_author": self._answer["author"],
+            "artifacts": {
+                state["path"]: {
+                    "revision": state["revision"],
+                    "author": state["author"],
+                }
+                for state in self._artifacts.values()
+            },
             "agents": [
                 {
                     "id": agent.id,
@@ -1361,6 +1460,8 @@ class SessionTreeSupervisor:
                     "reason": reason,
                 },
             )
+            if receipt := self._deliveries.get(instruction["id"]):
+                receipt.update(status="failed", reason=reason)
             sender = self._invocations.get(instruction["sender_id"])
             if sender is not None and sender.capability in self._capabilities:
                 self._publish(
@@ -1402,6 +1503,8 @@ class SessionTreeSupervisor:
                 event for event in agent.instructions if event not in selected
             ]
             for event in selected:
+                if receipt := self._deliveries.get(event["id"]):
+                    receipt["status"] = "delivered"
                 self.semantic_edges.deliver_message(
                     agent.id,
                     event["source_request_id"],
@@ -1908,22 +2011,44 @@ class SessionTreeSupervisor:
             return await self._shell_operation(parent, request)
         if op.startswith("services."):
             return await self._services_operation(parent, request)
-        if op.startswith(("board.", "population.", "agent.dm", "agent.broadcast")):
+        if (
+            op.startswith(
+                ("board.", "population.", "artifact.", "agent.dm", "agent.broadcast")
+            )
+            or op == "agent.delivery"
+        ):
             if not self._population:
                 raise RuntimeError(f"{op} is only available in a population episode")
             if op.startswith("board."):
                 return self._board_operation(parent, request)
             if op.startswith("population."):
                 return self._population_operation(parent, request)
+            if op == "artifact.read":
+                return self._artifact_status(request["path"])
+            if op == "artifact.publish":
+                return await self._once(
+                    parent,
+                    request.get("request_id"),
+                    ["publish", request["path"], request["candidate_path"]],
+                    partial(
+                        self._publish_artifact,
+                        parent,
+                        request["path"],
+                        request["candidate_path"],
+                        request["expected_revision"],
+                    ),
+                )
+            if op == "agent.delivery":
+                return self._delivery(parent, request["message_id"])
             if op == "agent.dm":
-                return self._dm(
+                return await self._dm(
                     parent,
                     request["scope_id"],
                     request["agent_id"],
                     request["message"],
                     request.get("message_id"),
                 )
-            return self._broadcast(
+            return await self._broadcast(
                 parent,
                 request["scope_id"],
                 request["message"],
@@ -1983,28 +2108,37 @@ class SessionTreeSupervisor:
                     self._scopes[request["scope_id"]].request_id,
                 ),
             )
-        if op == "agent.spawn" and self._population:
-            return self._info(
-                await self._admit(
-                    parent,
-                    request["task"],
-                    request["name"],
-                    self._scopes[request["scope_id"]].request_id,
+        if op == "agent.spawn":
+
+            async def spawn() -> dict:
+                if self._population:
+                    return self._info(
+                        await self._admit(
+                            parent,
+                            request["task"],
+                            request["name"],
+                            self._scopes[request["scope_id"]].request_id,
+                        )
+                    )
+                return self._info(
+                    self._spawn(
+                        parent,
+                        request["scope_id"],
+                        request["task"],
+                        request["name"],
+                        request["persistent"],
+                    )
                 )
+
+            return await self._once(
+                parent,
+                request.get("request_id"),
+                ["spawn", request["task"], request["name"]],
+                spawn,
             )
         if op in {"agent.get", "agent.info"} and self._population:
             return self._info(
                 self._lookup(request.get("name_or_id") or request["agent_id"])
-            )
-        if op == "agent.spawn":
-            return self._info(
-                self._spawn(
-                    parent,
-                    request["scope_id"],
-                    request["task"],
-                    request["name"],
-                    request["persistent"],
-                )
             )
         if op == "agent.list":
             agents = []

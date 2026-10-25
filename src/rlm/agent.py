@@ -105,16 +105,25 @@ class AgentHandle:
 
 
 async def spawn(
-    task: str, *, name: str | None = None, persistent: bool = False
+    task: str,
+    *,
+    name: str | None = None,
+    persistent: bool = False,
+    request_id: str | None = None,
 ) -> AgentHandle:
     """Register a child and return its handle before the child finishes.
 
     Sibling names remain reserved for the session. Persistent children keep their
     kernel after answering; all children terminate when their parent terminates.
+    Retrying with the same request_id returns the first outcome instead of spawning twice.
     """
     info = AgentInfo.from_payload(
         await broker.agent_request(
-            "agent.spawn", task=task, name=name, persistent=persistent
+            "agent.spawn",
+            task=task,
+            name=name,
+            persistent=persistent,
+            request_id=request_id,
         )
     )
     return AgentHandle(info.id, info.session_dir, info.name)
@@ -152,6 +161,12 @@ async def broadcast(message: str, *, message_id: str | None = None) -> dict:
     return await broker.agent_request(
         "agent.broadcast", message=message, message_id=message_id
     )
+
+
+async def delivery(message_id: str) -> dict:
+    """The delivery state of a message you sent: "status" is accepted (queued),
+    delivered (in the recipient's conversation) or failed (with a "reason")."""
+    return await broker.agent_request("agent.delivery", message_id=message_id)
 
 
 async def list(*, recursive: bool = False) -> builtins.list[AgentInfo]:

@@ -69,6 +69,14 @@ class PopulationPolicy(_ConfigModel):
     """Let peers read each other's conversation histories without waking them."""
     max_seconds: float | None = Field(default=None, gt=0)
     """Episode wall-clock limit (stop_reason=max_seconds). None = no limit."""
+    artifacts: tuple[str, ...] = ()
+    """Final files the task scores, relative to the working directory. Agents replace
+    them only through revision-checked publication (rlm.artifact.publish)."""
+
+    @field_validator("artifacts", mode="before")
+    @classmethod
+    def _artifacts_tuple(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
     def _founders_fit(self) -> PopulationPolicy:

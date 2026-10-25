@@ -59,6 +59,7 @@ class BrokerAgentSpawnRequest(TypedDict):
     task: Annotated[str, Field(min_length=1)]
     name: Annotated[str, Field(min_length=1)] | None
     persistent: bool
+    request_id: NotRequired[Annotated[str, Field(min_length=1, max_length=128)] | None]
 
 
 class BrokerAgentGetRequest(TypedDict):
@@ -128,6 +129,33 @@ class BrokerAgentDmRequest(TypedDict):
     agent_id: Annotated[str, Field(min_length=1)]
     message: Annotated[str, Field(min_length=1)]
     message_id: NotRequired[Annotated[str, Field(min_length=1, max_length=128)] | None]
+
+
+class BrokerAgentDeliveryRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.delivery"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    message_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerArtifactReadRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["artifact.read"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    path: Annotated[str, Field(min_length=1, max_length=4096)]
+
+
+class BrokerArtifactPublishRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["artifact.publish"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    path: Annotated[str, Field(min_length=1, max_length=4096)]
+    candidate_path: Annotated[str, Field(min_length=1, max_length=4096)]
+    expected_revision: Annotated[int, Field(ge=0)]
+    request_id: NotRequired[Annotated[str, Field(min_length=1, max_length=128)] | None]
 
 
 class BrokerAgentBroadcastRequest(TypedDict):
@@ -437,6 +465,9 @@ BrokerRequest = Annotated[
     | BrokerAgentReportRequest
     | BrokerAgentDmRequest
     | BrokerAgentBroadcastRequest
+    | BrokerAgentDeliveryRequest
+    | BrokerArtifactReadRequest
+    | BrokerArtifactPublishRequest
     | BrokerBoardReadRequest
     | BrokerBoardSearchRequest
     | BrokerBoardAppendRequest

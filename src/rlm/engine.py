@@ -172,6 +172,12 @@ UNSUBMITTED_ANSWER_NUDGE = (
     "episode task, submit it with `await rlm.population.submit(text, "
     "expected_revision=0)` in the format the task asks for; otherwise end your turn again."
 )
+UNPUBLISHED_ARTIFACTS_NUDGE = (
+    "Your reply ends your turn, but no final artifact has been published and only "
+    "published artifacts are scored, not any reply. If you have a complete draft, publish "
+    "it with `await rlm.artifact.publish(path, draft_path, expected_revision=0)`; "
+    "otherwise end your turn again."
+)
 PLAN_REPLY_NUDGE = (
     "Your last reply reads as a plan, not a final answer, and made no tool call. If the "
     "task is complete, state what you changed; otherwise continue with the next action."
@@ -680,7 +686,7 @@ class RLMEngine:
         return (
             self.runtime_config.policy.population is not None
             and not self._answer_nudged
-            and self._supervisor.episode_answer["revision"] == 0
+            and self._supervisor.episode_output_empty()
         )
 
     def _publish_agent_step(self, start: int) -> None:
@@ -937,7 +943,11 @@ class RLMEngine:
                 if self._needs_answer_nudge():
                     self._answer_nudged = True
                     message, provenance = runtime_event(
-                        "nudge", UNSUBMITTED_ANSWER_NUDGE, reason="unsubmitted_answer"
+                        "nudge",
+                        UNPUBLISHED_ARTIFACTS_NUDGE
+                        if self.runtime_config.policy.population.artifacts
+                        else UNSUBMITTED_ANSWER_NUDGE,
+                        reason="unsubmitted_answer",
                     )
                     self.session.log(
                         {

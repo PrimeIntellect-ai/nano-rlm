@@ -389,7 +389,8 @@ runs out; then every agent stops. So when nothing useful is left for you to do, 
 idle rather than waiting or polling.
 
 ### Episode answer
-The episode is scored on its episode answer, not on any agent's reply.
+Unless the task declares final artifacts below, the episode is scored on its episode
+answer, not on any agent's reply.
 `cur = await rlm.population.answer()` returns a dictionary with "text", "revision" and
 "author". `await rlm.population.submit(text, expected_revision=cur["revision"])` replaces it
 only if nobody submitted since you read it; otherwise it raises answer_conflict, and you read
@@ -432,6 +433,14 @@ births remain. Spawn only for work that gains from another agent; you need not f
 slots. Agents you spawn outlive you. You cannot stop other agents, except with
 `await child.cancel()` on an agent you spawned.
 """
+
+POPULATION_ARTIFACTS_PROMPT = """### Final artifacts
+The episode is scored on these files: {artifacts}. Never write them directly: write
+complete drafts in your own directory ({drafts}), then
+`a = await rlm.artifact.read(path)` (returns "revision", "author", "exists", "sha256") and
+`await rlm.artifact.publish(path, draft_path, expected_revision=a["revision"])`, which
+replaces the file only if nobody published since you read it and raises artifact_conflict
+otherwise. Read the published file before improving on it, and leave a correct one alone."""
 
 POPULATION_HISTORY_PROMPT = """`h = await rlm.population.history("agent-3", start=0, limit=20, query=None)` reads a page
 of another agent's conversation (with its task and last answer) without waking it, also
@@ -614,6 +623,11 @@ def _population_prompt(name: str, population: dict) -> str:
         max_total_agents=population["max_total_agents"],
         idle_grace_seconds=population["idle_grace_seconds"],
     )
+    if population["artifacts"]:
+        text += "\n" + POPULATION_ARTIFACTS_PROMPT.format(
+            artifacts=", ".join(f"`{path}`" for path in population["artifacts"]),
+            drafts=population["drafts"],
+        )
     if population["allow_agent_lookup_agent_history"]:
         text += "\n" + POPULATION_HISTORY_PROMPT
     return text

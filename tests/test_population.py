@@ -497,6 +497,8 @@ def test_population_prompt_replaces_tree_instructions():
         "idle_grace_seconds": 60.0,
         "allow_agent_lookup_agent_history": False,
         "max_seconds": None,
+        "artifacts": ("proof/Solution.lean",),
+        "drafts": "/s/drafts",
     }
     text = build_system_prompt(
         "/w",
@@ -518,6 +520,7 @@ def test_population_prompt_replaces_tree_instructions():
     assert "spawned by agent-1" in text
     assert "rlm.population.submit" in text
     assert "rlm.population.history" not in text
+    assert "`proof/Solution.lean`" in text and "/s/drafts" in text
     for tree_rule in (
         "You are a sub-agent",
         "message siblings",
@@ -606,3 +609,180 @@ async def test_real_kernels_run_one_population_episode(tmp_path):
     assert "agent-1: asked agent-2 for 6*7" in summary["board"]
     edges = swarm.execution_snapshot()["semantic_edges"]["edges"]
     assert {edge["type"] for edge in edges} >= {"agent_message", "agent_reply"}
+
+
+async def test_messages_are_idempotent_and_receipted(tmp_path):
+    script = _Script()
+    seen = {}
+
+    async def founder(agent):
+        first = await agent.op(
+            "agent.dm", agent_id="agent-2", message="hi", message_id="m1"
+        )
+        again = await agent.op(
+            "agent.dm", agent_id="agent-2", message="hi", message_id="m1"
+        )
+        assert again == first
+        with pytest.raises(ValueError, match="already used"):
+            await agent.op(
+                "agent.dm", agent_id="agent-2", message="other", message_id="m1"
+            )
+        seen["accepted"] = await agent.op(
+            "agent.delivery", message_id=first["message_id"]
+        )
+        broadcast = await agent.op("agent.broadcast", message="all", message_id="b1")
+        seen["broadcast"] = broadcast
+        seen["first"] = first
+        return "sent"
+
+    script.turns = {"agent-1": [founder]}
+    swarm = _swarm(tmp_path, script, founders=2)
+    try:
+        await swarm.prompt("task")
+        supervisor = swarm.supervisor
+        sender = supervisor._lookup("agent-1")
+        delivered = supervisor._delivery(sender, seen["first"]["message_id"])
+    finally:
+        await swarm.aclose()
+    assert seen["accepted"]["status"] in {"accepted", "delivered"}
+    assert delivered["status"] == "delivered" and delivered["to"] == "agent-2"
+    assert [item["to"] for item in seen["broadcast"]["delivered"]] == ["agent-2"]
+    assert swarm.execution_snapshot()["population"]["dms"] == 1
+
+
+async def test_spawn_retries_do_not_duplicate_births(tmp_path):
+    script = _Script()
+
+    async def founder(agent):
+        results = await asyncio.gather(
+            *(
+                agent.op(
+                    "agent.spawn",
+                    task="t",
+                    name="worker",
+                    persistent=False,
+                    request_id="spawn-1",
+                )
+                for _ in range(3)
+            )
+        )
+        assert len({result["id"] for result in results}) == 1
+        return "done"
+
+    script.turns = {"agent-1": [founder]}
+    swarm = _swarm(tmp_path, script, founders=1)
+    try:
+        await swarm.prompt("task")
+    finally:
+        await swarm.aclose()
+    assert swarm.execution_snapshot()["population"]["admitted"] == 2
+
+
+async def test_artifacts_are_published_by_revision(tmp_path):
+    script = _Script()
+    outcomes = {}
+
+    async def founder(agent):
+        drafts = (
+            agent.supervisor._invocations[agent.invocation_id].session.dir / "drafts"
+        )
+        (drafts / "a.txt").write_text("first")
+        state = await agent.op("artifact.read", path="out/final.txt")
+        assert state["revision"] == 0 and not state["exists"]
+        await agent.op(
+            "artifact.publish",
+            path="out/final.txt",
+            candidate_path=str(drafts / "a.txt"),
+            expected_revision=0,
+        )
+        (drafts / "a.txt").write_text("second")
+        with pytest.raises(RuntimeError, match="artifact_conflict"):
+            await agent.op(
+                "artifact.publish",
+                path="out/final.txt",
+                candidate_path=str(drafts / "a.txt"),
+                expected_revision=0,
+            )
+        with pytest.raises(ValueError, match="not a final artifact"):
+            await agent.op("artifact.read", path="other.txt")
+        outcomes["state"] = await agent.op("artifact.read", path="out/final.txt")
+        return "published"
+
+    script.turns = {"agent-1": [founder]}
+    swarm = _swarm(tmp_path, script, founders=1, artifacts=["out/final.txt"])
+    try:
+        await swarm.prompt("task")
+    finally:
+        await swarm.aclose()
+    assert (tmp_path / "out" / "final.txt").read_text() == "first"
+    assert (
+        outcomes["state"]["revision"] == 1 and outcomes["state"]["author"] == "agent-1"
+    )
+    snapshot = swarm.execution_snapshot()["population"]
+    assert snapshot["artifacts"] == {
+        "out/final.txt": {"revision": 1, "author": "agent-1"}
+    }
+
+
+async def test_answer_conflicts_history_permission_and_budget_stop(tmp_path):
+    script = _Script()
+
+    async def founder(agent):
+        await agent.op("population.submit", text="1", expected_revision=0)
+        with pytest.raises(RuntimeError, match="answer_conflict"):
+            await agent.op("population.submit", text="2", expected_revision=0)
+        with pytest.raises(PermissionError, match="disabled"):
+            await agent.op("population.history", agent="agent-1", start=0, limit=5)
+        agent.supervisor.record_call(10**9, agent.invocation_id)
+        with pytest.raises(RuntimeError, match="budget_exhausted"):
+            await agent.op("agent.spawn", task="t", name="late", persistent=False)
+        return "spent"
+
+    script.turns = {"agent-1": [founder]}
+    swarm = _swarm(tmp_path, script, founders=1)
+    try:
+        result = await swarm.prompt("task")
+    finally:
+        await swarm.aclose()
+    assert result.answer == "1"
+    assert swarm.stop_reason == "max_total_tokens"
+
+
+async def test_acp_runs_a_population_session(monkeypatch, tmp_path):
+    from acp import text_block
+
+    from rlm import acp
+    from test_acp import _Client, _initialize, _runtime_metadata
+
+    script = _Script()
+
+    async def founder(agent):
+        await agent.op("population.submit", text="42", expected_revision=0)
+        return "submitted"
+
+    script.turns = {"agent-1": [founder]}
+
+    class ScriptedSwarm(Swarm):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.supervisor._engine_factory = _scripted_factory(script)
+
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr(acp, "Swarm", ScriptedSwarm)
+    metadata = _runtime_metadata()
+    policy = metadata[acp.RUNTIME_METADATA_KEY]["policy"]
+    policy["population"] = {"founders": 2, "max_live_agents": 3, "artifacts": ["a.txt"]}
+    client = _Client()
+    agent = acp.RLMACPAgent()
+    agent.on_connect(client)
+    await _initialize(agent)
+    created = await agent.new_session(str(tmp_path), **metadata)
+    response = await agent.prompt(created.session_id, [text_block("compute")])
+    closed = await agent.close_session(created.session_id)
+
+    assert [update.content.text for _, update in client.updates] == ["42"]
+    snapshot = response.field_meta[acp.SESSION_METADATA_KEY]
+    assert snapshot["population"]["admitted"] == 2
+    assert snapshot["metrics"]["population_answered"] == 1
+    assert snapshot["last_stop_reason"] == "quiescent"
+    assert closed.field_meta[acp.SESSION_METADATA_KEY]["population"]["admitted"] == 2
