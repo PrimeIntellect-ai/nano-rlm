@@ -411,7 +411,9 @@ One Markdown board, shared by every agent, for plans, claims, findings and open 
 `await rlm.board.append(text)` adds a chunk; `await rlm.board.edit(old, new,
 expected_revision=b["revision"])` replaces the single occurrence of `old` only if the board is
 still at that revision, and raises board_conflict otherwise: read again and reconcile, never
-overwrite others' work. Read it when you start, and record what you claim and find.
+overwrite others' work. Appends never conflict, so two agents can append the same claim at
+once: claim work with an edit at the revision you read, which fails if someone claimed first.
+Read the board when you start, and record what you claim and find.
 
 ### Population and births
 `await rlm.population.status()` returns live, capacity and admission counts and the budgets.

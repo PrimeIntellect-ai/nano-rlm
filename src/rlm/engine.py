@@ -166,6 +166,12 @@ MULTILINE_COMMAND_HINT = (
     "r'''...''' (or r\"\"\"...\"\"\" when the text contains '''), so quotes, backslashes and "
     "newlines inside need no escaping."
 )
+UNSUBMITTED_ANSWER_NUDGE = (
+    "Your reply ends your turn, but the episode answer is still empty and only a "
+    "submitted answer is scored, not any reply. If you have the complete answer to the "
+    "episode task, submit it with `await rlm.population.submit(text, "
+    "expected_revision=0)` in the format the task asks for; otherwise end your turn again."
+)
 PLAN_REPLY_NUDGE = (
     "Your last reply reads as a plan, not a final answer, and made no tool call. If the "
     "task is complete, state what you changed; otherwise continue with the next action."
@@ -290,6 +296,9 @@ class RLMEngine:
         self._turn = 0
         self._empty_reply_nudges = 0
         self._plan_reply_nudges = 0
+        self._answer_nudged = (
+            False  # one unsubmitted-answer reminder per population agent
+        )
         self._quote_nesting_hints = 0
         self._last_answer = ""
         self._has_result = False
@@ -666,6 +675,13 @@ class RLMEngine:
         if repl is not None:
             repl.shutdown()
 
+    def _needs_answer_nudge(self) -> bool:
+        return (
+            self.runtime_config.policy.population is not None
+            and not self._answer_nudged
+            and self._supervisor.episode_answer["revision"] == 0
+        )
+
     def _publish_agent_step(self, start: int) -> None:
         if self._supervisor is not None:
             self._supervisor.agent_step(self._invocation_id, start)
@@ -911,6 +927,20 @@ class RLMEngine:
                     self.session.log(
                         {
                             "type": "plan_reply_nudge",
+                            "message": message,
+                            "provenance": provenance,
+                        },
+                        in_context=True,
+                    )
+                    continue
+                if self._needs_answer_nudge():
+                    self._answer_nudged = True
+                    message, provenance = runtime_event(
+                        "nudge", UNSUBMITTED_ANSWER_NUDGE, reason="unsubmitted_answer"
+                    )
+                    self.session.log(
+                        {
+                            "type": "unsubmitted_answer_nudge",
                             "message": message,
                             "provenance": provenance,
                         },
