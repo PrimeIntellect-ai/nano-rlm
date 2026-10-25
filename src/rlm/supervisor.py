@@ -649,9 +649,11 @@ class SessionTreeSupervisor:
         }
 
     def _awaiting_replies(self) -> set[str]:
-        """Agents whose direct message has not been answered yet."""
+        """Agents whose direct message to a live agent has not been answered yet."""
         awaiting = set()
         for agent in self._peers():
+            if agent.status in ENDED:
+                continue
             awaiting.update(agent.requesters)
             awaiting.update(
                 event["sender_id"]
