@@ -19,7 +19,15 @@ class AgentInfo:
     name: str | None
     task: str
     status: Literal[
-        "starting", "running", "waiting", "idle", "completed", "failed", "cancelled"
+        "starting",
+        "running",
+        "waiting",
+        "idle",
+        "retiring",
+        "retired",
+        "completed",
+        "failed",
+        "cancelled",
     ]
     persistent: bool
     created_at: float
@@ -123,6 +131,27 @@ async def get(name_or_id: str) -> AgentHandle:
 async def send_to_parent(message: str) -> str:
     """Place a report in the immediate parent's inbox; the parent chooses when to read it."""
     return await broker.agent_request("agent.report", message=message)
+
+
+async def dm(agent: str, message: str, *, message_id: str | None = None) -> dict:
+    """Send a direct message to another agent of the population, by name or ID.
+
+    It reaches the recipient at its next model call and wakes it if idle; a retired
+    recipient is revived when a slot is free. Returns a receipt; retrying with the same
+    message_id returns the original receipt instead of sending twice."""
+    return await broker.agent_request(
+        "agent.dm", agent_id=agent, message=message, message_id=message_id
+    )
+
+
+async def broadcast(message: str, *, message_id: str | None = None) -> dict:
+    """Send one message to every live agent of the population except the caller.
+
+    Returns the names it was delivered to and any per-recipient rejections. Retired
+    agents are not revived by a broadcast."""
+    return await broker.agent_request(
+        "agent.broadcast", message=message, message_id=message_id
+    )
 
 
 async def list(*, recursive: bool = False) -> builtins.list[AgentInfo]:

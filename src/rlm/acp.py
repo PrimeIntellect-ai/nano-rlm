@@ -51,6 +51,7 @@ from rlm.config import (
 )
 from rlm.mcp import MCPHTTPServer, MCPServer, MCPStdioServer
 from rlm.session import Session
+from rlm.swarm import Swarm
 
 CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
@@ -130,11 +131,12 @@ class _SessionSnapshot(_ContractModel):
     programmatic_tool_call_stats: _ProgrammaticToolCallSnapshot
     supervisor: _SupervisorSnapshot
     limits: _LimitsSnapshot
+    population: dict[str, Any] | None = None
 
 
 @dataclass
 class _SessionState:
-    engine: RLMEngine
+    engine: RLMEngine | Swarm
     session_id: str
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     prompt_task: asyncio.Task | None = None
@@ -312,8 +314,10 @@ class RLMACPAgent(Agent):
         runtime_config, external_session_id = _runtime_config(kwargs)
         session = Session()
         session_id = session.dir.name
+        # A population policy runs the session as one episode of peer agents.
+        runner = Swarm if runtime_config.policy.population is not None else RLMEngine
         try:
-            engine = RLMEngine(
+            engine = runner(
                 cwd=cwd,
                 session=session,
                 mcp_servers=resolved_mcp_servers,

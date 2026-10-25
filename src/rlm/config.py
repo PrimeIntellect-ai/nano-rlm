@@ -7,7 +7,7 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rlm.network import NetworkBlocklist
 from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
@@ -46,6 +46,37 @@ class InvocationContext(_ConfigModel):
 
     def child(self) -> InvocationContext:
         return InvocationContext(depth=self.depth + 1)
+
+
+class PopulationPolicy(_ConfigModel):
+    """Run a session as one episode of peer agents instead of one root agent's tree.
+
+    The harness admits the founders; any peer can spawn more within the caps. A final
+    answer ends an agent's turn and leaves it idle with its kernel; a new birth at the
+    live cap retires the longest-idle peer past its grace period (conversation kept,
+    kernel released), and a direct message revives it when a slot is free. The episode
+    ends when every agent is idle or gone, or a budget or the wall clock runs out.
+    """
+
+    founders: int = Field(default=1, gt=0)
+    max_live_agents: int = Field(default=8, gt=0)
+    """Agents holding a kernel at once, idle agents included."""
+    max_total_agents: int = Field(default=32, gt=0)
+    """Agents admitted over the episode, founders included. Revival is not a new admission."""
+    idle_grace_seconds: float = Field(default=60, ge=0)
+    """How long an idle agent keeps its kernel before a birth may retire it."""
+    allow_agent_lookup_agent_history: bool = False
+    """Let peers read each other's conversation histories without waking them."""
+    max_seconds: float | None = Field(default=None, gt=0)
+    """Episode wall-clock limit (stop_reason=max_seconds). None = no limit."""
+
+    @model_validator(mode="after")
+    def _founders_fit(self) -> PopulationPolicy:
+        if self.founders > min(self.max_live_agents, self.max_total_agents):
+            raise ValueError(
+                "founders must fit within max_live_agents and max_total_agents"
+            )
+        return self
 
 
 class ExecutionPolicy(_ConfigModel):
@@ -94,6 +125,18 @@ class ExecutionPolicy(_ConfigModel):
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
     allow_git: bool = False
+    population: PopulationPolicy | None = None
+    """Run the session as a population episode; None = one root agent's tree. Recursion
+    depth does not limit a population: its caps and the tree budgets do."""
+
+    @model_validator(mode="after")
+    def _population_caps(self) -> ExecutionPolicy:
+        if self.population is not None and self.max_subagent_calls is not None:
+            raise ValueError(
+                "a population is capped by population.max_total_agents, "
+                "not max_subagent_calls"
+            )
+        return self
 
 
 class RuntimeConfig(_ConfigModel):
@@ -124,9 +167,10 @@ class RuntimeConfig(_ConfigModel):
         node (depth >= 1, can still recurse)      -> subagent_append_to_system_prompt
         leaf (depth == max_depth, cannot recurse) -> leaf_append_to_system_prompt
 
-        Unset tiers fall back in order: leaf -> subagent -> root.
+        Unset tiers fall back in order: leaf -> subagent -> root. Every population
+        peer gets the root append: they share one task contract.
         """
-        if self.invocation.depth == 0:
+        if self.invocation.depth == 0 or self.policy.population is not None:
             return self.append_to_system_prompt
         if (
             self.invocation.depth >= self.policy.max_depth

@@ -120,6 +120,109 @@ class BrokerAgentReportRequest(TypedDict):
     message: Annotated[str, Field(min_length=1)]
 
 
+class BrokerAgentDmRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.dm"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+    message: Annotated[str, Field(min_length=1)]
+    message_id: NotRequired[Annotated[str, Field(min_length=1, max_length=128)] | None]
+
+
+class BrokerAgentBroadcastRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.broadcast"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    message: Annotated[str, Field(min_length=1)]
+    message_id: NotRequired[Annotated[str, Field(min_length=1, max_length=128)] | None]
+
+
+class BrokerBoardReadRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["board.read"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    start_line: Annotated[int, Field(ge=1)]
+    max_lines: Annotated[int, Field(ge=1, le=1000)]
+    revision: NotRequired[Annotated[int, Field(ge=0)] | None]
+
+
+class BrokerBoardSearchRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["board.search"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    query: Annotated[str, Field(min_length=1, max_length=1024)]
+    limit: Annotated[int, Field(ge=1, le=100)]
+
+
+class BrokerBoardAppendRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["board.append"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    text: Annotated[str, Field(min_length=1)]
+    request_id: NotRequired[Annotated[str, Field(min_length=1, max_length=128)] | None]
+
+
+class BrokerBoardEditRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["board.edit"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    old: Annotated[str, Field(min_length=1)]
+    new: str
+    expected_revision: Annotated[int, Field(ge=0)]
+    request_id: NotRequired[Annotated[str, Field(min_length=1, max_length=128)] | None]
+
+
+class BrokerPopulationRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["population.status", "population.answer"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerPopulationListRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["population.list"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    include_self: bool
+    include_ended: bool
+
+
+class BrokerPopulationEventsRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["population.events"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    after: Annotated[int, Field(ge=0)]
+    limit: Annotated[int, Field(ge=1, le=500)]
+
+
+class BrokerPopulationSubmitRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["population.submit"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    text: Annotated[str, Field(min_length=1, max_length=262_144)]
+    expected_revision: Annotated[int, Field(ge=0)]
+
+
+class BrokerPopulationHistoryRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["population.history"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent: Annotated[str, Field(min_length=1)]
+    start: Annotated[int, Field(ge=0)]
+    limit: Annotated[int, Field(ge=1, le=100)]
+    query: NotRequired[Annotated[str, Field(min_length=1, max_length=1024)] | None]
+
+
 class BrokerInboxListRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
     op: Literal["inbox.list"]
@@ -332,6 +435,17 @@ BrokerRequest = Annotated[
     | BrokerToolsServersRequest
     | BrokerAgentMessageRequest
     | BrokerAgentReportRequest
+    | BrokerAgentDmRequest
+    | BrokerAgentBroadcastRequest
+    | BrokerBoardReadRequest
+    | BrokerBoardSearchRequest
+    | BrokerBoardAppendRequest
+    | BrokerBoardEditRequest
+    | BrokerPopulationRequest
+    | BrokerPopulationListRequest
+    | BrokerPopulationEventsRequest
+    | BrokerPopulationSubmitRequest
+    | BrokerPopulationHistoryRequest
     | BrokerInboxListRequest
     | BrokerInboxReadRequest
     | BrokerShellRunRequest

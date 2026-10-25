@@ -18,6 +18,7 @@ from typing import Any
 
 from openai import APIStatusError, AsyncOpenAI
 
+from rlm.broker import BrokerEndpoint
 from rlm.client import (
     call_with_retries,
     extract_usage,
@@ -129,6 +130,13 @@ WAIT_SCHEMA = {
     },
 }
 
+
+KERNEL_RELEASED_NOTICE = (
+    "Supervisor: You were retired while idle to free a slot for a new agent, and a "
+    "message revived you. Your conversation is intact, but your IPython kernel is new: "
+    "Python variables, imports and in-kernel tasks were lost, and your shell jobs and "
+    "subscriptions were stopped. Recreate what you need."
+)
 
 MAX_EMPTY_REPLY_NUDGES = 2
 EMPTY_REPLY_NUDGE = (
@@ -264,6 +272,7 @@ class RLMEngine:
 
         # IPython REPL (started lazily in single-agent execution)
         self._repl: IPythonREPL | None = None
+        self._repl_released = False  # release_kernel(): restart on the next prompt
         self._steering_active = False
         self._steering_pending: list[tuple[str, str | None, asyncio.Future]] = []
         self._steering_ids: dict[str, tuple[str, asyncio.Future]] = {}
@@ -368,15 +377,19 @@ class RLMEngine:
         *,
         message_type: str = "user",
         event_ids: list[str] | None = None,
+        message: tuple[dict, dict] | None = None,
     ) -> RLMResult:
-        """Run one user turn while accepting steering at model boundaries."""
+        """Run one user turn while accepting steering at model boundaries.
+
+        message: the turn's rendered user message and its provenance, when the caller
+        attributes the input itself; by default it is derived from message_type."""
         if self._steering_active:
             raise RuntimeError("a prompt is already running")
         self._steering_active = True
         self._steering_applied = []
         try:
             return await self._prompt(
-                prompt, message_type=message_type, event_ids=event_ids
+                prompt, message_type=message_type, event_ids=event_ids, message=message
             )
         finally:
             self._steering_active = False
@@ -395,6 +408,7 @@ class RLMEngine:
         *,
         message_type: str = "user",
         event_ids: list[str] | None = None,
+        message: tuple[dict, dict] | None = None,
     ) -> RLMResult:
         """Run one user turn while preserving conversation and kernel state."""
         if self._closed or self._close_task is not None:
@@ -406,7 +420,10 @@ class RLMEngine:
         if self.session is not None:
             self.session.check_writable()
 
-        if self.depth > self.max_depth:
+        if (
+            self.depth > self.max_depth
+            and self.runtime_config.policy.population is None
+        ):
             answer = f"[depth limit {self.max_depth} reached, cannot start]"
             self._metrics.stop_reason = "depth_limit"
             self._last_answer = answer
@@ -420,9 +437,15 @@ class RLMEngine:
         self._has_result = False
         self._prompt_kernel_notices = []
 
-        if not self._started:
+        if not self._started or self._repl_released:
             try:
-                await self._start(prompt)
+                if self._started:
+                    await self._start_repl(
+                        self._supervisor.endpoint_for(self._invocation_id)
+                    )
+                    self._pending_kernel_notices.append(KERNEL_RELEASED_NOTICE)
+                else:
+                    await self._start(prompt)
             except BaseException as exc:
                 self._metrics.stop_reason = (
                     "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
@@ -441,15 +464,18 @@ class RLMEngine:
         self._metrics.stop_reason = ""
         prompt_id = uuid.uuid4().hex
         context_before = list(self.session.context_indices)
-        message = {"role": "user", "content": prompt}
         provenance = None
-        if message_type == "supervisor_notification":
+        if message is not None:
+            message, provenance = message
+        elif message_type == "supervisor_notification":
             message, provenance = runtime_event("notice", prompt)
         elif message_type == "parent_message" or self.depth > 0:
             parent_id = self._supervisor.agent_context(self._invocation_id)["parent_id"]
             message, provenance = agent_input(
                 prompt, agent=parent_id, kind="instruction"
             )
+        else:
+            message = {"role": "user", "content": prompt}
         try:
             self.session.log(
                 {
@@ -579,30 +605,8 @@ class RLMEngine:
                     self._owns_supervisor = False
                 raise
 
-        self._repl = IPythonREPL(
-            cwd=self.cwd,
-            session=self.session,
-            kernel_env=self.kernel_env,
-            depth=self.depth,
-            max_depth=self.max_depth,
-            broker_endpoint=broker_endpoint,
-            exec_timeout=self.exec_timeout,
-            allow_git=self.allow_git,
-        )
         try:
-            startup = asyncio.create_task(self._repl.run_in_thread(self._repl.start))
-            cancelled = False
-            while True:
-                try:
-                    await asyncio.shield(startup)
-                    break
-                except asyncio.CancelledError:
-                    if startup.done():
-                        raise
-                    cancelled = True
-            if cancelled:
-                raise asyncio.CancelledError
-
+            await self._start_repl(broker_endpoint)
             system_prompt = self._load_system_prompt(self._active_tools)
 
             self.session.log(
@@ -615,13 +619,52 @@ class RLMEngine:
             self._last_good = len(self.session.messages)
             self._started = True
         except BaseException:
-            self._repl.shutdown()
-            self._repl = None
+            if self._repl is not None:
+                self._repl.shutdown()
+                self._repl = None
             if self._owns_supervisor and self._supervisor is not None:
                 await self._supervisor.aclose()
                 self._supervisor = None
                 self._owns_supervisor = False
             raise
+
+    async def _start_repl(self, broker_endpoint: BrokerEndpoint | None) -> None:
+        repl = IPythonREPL(
+            cwd=self.cwd,
+            session=self.session,
+            kernel_env=self.kernel_env,
+            depth=self.depth,
+            max_depth=self.max_depth,
+            broker_endpoint=broker_endpoint,
+            exec_timeout=self.exec_timeout,
+            allow_git=self.allow_git,
+        )
+        try:
+            startup = asyncio.create_task(repl.run_in_thread(repl.start))
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(startup)
+                    break
+                except asyncio.CancelledError:
+                    if startup.done():
+                        raise
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
+        except BaseException:
+            repl.shutdown()
+            raise
+        self._repl = repl
+        self._repl_released = False
+
+    async def release_kernel(self) -> None:
+        """Stop the IPython kernel and keep the conversation. The next prompt starts a
+        fresh kernel and tells the model that its Python state was lost."""
+        repl, self._repl = self._repl, None
+        self._repl_released = True
+        if repl is not None:
+            repl.shutdown()
 
     def _publish_agent_step(self, start: int) -> None:
         if self._supervisor is not None:
@@ -690,14 +733,12 @@ class RLMEngine:
             self._invocation_id, include_queue=include_queue
         )
         for event in instructions:
-            message, provenance = agent_input(
-                event["content"],
-                agent=event.get("sender_id"),
-                kind="steer" if event.get("type") == "steer" else "instruction",
-            )
+            message, provenance = self._supervisor.render_input(event)
             self.session.log(
                 {
-                    "type": "parent_message",
+                    "type": "agent_message"
+                    if provenance["from"] == "peer"
+                    else "parent_message",
                     "event_id": event["id"],
                     "message": message,
                     "provenance": provenance,
@@ -1189,9 +1230,9 @@ class RLMEngine:
             self._own_turns += 1
         if self._supervisor is not None:
             if checkpoint:
-                self._supervisor.record_usage(new_tokens)
+                self._supervisor.record_usage(new_tokens, self._invocation_id, usage)
             else:
-                self._supervisor.record_call(new_tokens, self._invocation_id)
+                self._supervisor.record_call(new_tokens, self._invocation_id, usage)
         if not checkpoint:
             self._last_prompt_tokens = usage.prompt_tokens
             self._last_call_id = request_id
