@@ -654,6 +654,9 @@ class RLMEngine:
             broker_endpoint=broker_endpoint,
             exec_timeout=self.exec_timeout,
             allow_git=self.allow_git,
+            identity=self._supervisor.process_identity(self._invocation_id)
+            if self._supervisor is not None
+            else None,
         )
         try:
             startup = asyncio.create_task(repl.run_in_thread(repl.start))

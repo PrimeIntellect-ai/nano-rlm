@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -499,6 +503,7 @@ def test_population_prompt_replaces_tree_instructions():
         "max_seconds": None,
         "artifacts": ("proof/Solution.lean",),
         "drafts": "/s/drafts",
+        "process_isolation": "none",
     }
     text = build_system_prompt(
         "/w",
@@ -786,3 +791,71 @@ async def test_acp_runs_a_population_session(monkeypatch, tmp_path):
     assert snapshot["metrics"]["population_answered"] == 1
     assert snapshot["last_stop_reason"] == "quiescent"
     assert closed.field_meta[acp.SESSION_METADATA_KEY]["population"]["admitted"] == 2
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can grant per-agent identities")
+async def test_per_agent_isolation_needs_a_root_host(tmp_path):
+    swarm = _swarm(tmp_path, _Script(), founders=1, process_isolation="per_agent")
+    try:
+        with pytest.raises(RuntimeError, match="needs the RLM host to run as root"):
+            await swarm.prompt("task")
+    finally:
+        await swarm.aclose()
+
+
+ISOLATION_PROBE = r"""
+import glob, os, signal
+me = os.environ["RLM_SESSION_DIR"]
+peer = next(d for d in glob.glob(os.path.join(os.path.dirname(me), "sub-*")) if d != me)
+try:
+    os.listdir(peer)
+    peer_dir = "readable"
+except PermissionError:
+    peer_dir = "denied"
+try:
+    os.kill(os.getppid(), 0)
+    host = "signalable"
+except PermissionError:
+    host = "denied"
+with open(f"shared-{os.getuid()}.txt", "w") as f:
+    f.write("x")
+job = await rlm.shell.run("id -u")
+print("PROBE", os.getuid(), peer_dir, host, job.text.strip())
+"""
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="per-agent identities need a root host")
+async def test_per_agent_isolation_separates_agents():
+    # Agent uids must traverse to their session directories, so avoid pytest's 0700 tmp.
+    root = Path(tempfile.mkdtemp(prefix="rlm-isolation-"))
+    root.chmod(0o755)
+    workspace = root / "workspace"
+    workspace.mkdir()
+
+    def probe(messages):
+        tools = [m for m in messages if m["role"] == "tool"]
+        if not tools:
+            return _cell(ISOLATION_PROBE)
+        return DummyMessage(content=tools[-1]["content"].strip())
+
+    swarm = Swarm(
+        cwd=str(workspace),
+        session=Session(root / "episode"),
+        runtime_config=_config(founders=2, process_isolation="per_agent"),
+    )
+    supervisor = swarm.supervisor
+    supervisor._engine_factory = lambda **kwargs: RLMEngine(
+        client=_ReactiveClient(probe), **kwargs
+    )
+    try:
+        await asyncio.wait_for(swarm.prompt("probe"), 120)
+        replies = [agent.result.answer for agent in supervisor._peers()]
+    finally:
+        await swarm.aclose()
+    probes = [reply.split()[1:] for reply in replies]
+    assert {uid for uid, *_ in probes} == {"61001", "61002"}
+    for uid, peer_dir, host, job_uid in probes:
+        assert (peer_dir, host, job_uid) == ("denied", "denied", uid)
+    owners = {path.stat().st_uid for path in workspace.glob("shared-*.txt")}
+    shutil.rmtree(root)
+    assert owners == {61001, 61002}

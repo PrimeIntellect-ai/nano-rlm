@@ -442,6 +442,10 @@ complete drafts in your own directory ({drafts}), then
 replaces the file only if nobody published since you read it and raises artifact_conflict
 otherwise. Read the published file before improving on it, and leave a correct one alone."""
 
+POPULATION_ISOLATION_PROMPT = """Your kernel and shell commands run under your own user id. Other agents' processes,
+session directories and drafts are off limits; the workspace is shared through a common
+group, and files you create there stay editable by the other agents."""
+
 POPULATION_HISTORY_PROMPT = """`h = await rlm.population.history("agent-3", start=0, limit=20, query=None)` reads a page
 of another agent's conversation (with its task and last answer) without waking it, also
 when it is retired."""
@@ -630,6 +634,8 @@ def _population_prompt(name: str, population: dict) -> str:
         )
     if population["allow_agent_lookup_agent_history"]:
         text += "\n" + POPULATION_HISTORY_PROMPT
+    if population["process_isolation"] == "per_agent":
+        text += "\n" + POPULATION_ISOLATION_PROMPT
     return text
 
 

@@ -84,7 +84,14 @@ class ServiceManager:
         }
 
     def start(
-        self, *, name: str, command: str, cwd: str, env: dict[str, str], owner_id: str
+        self,
+        *,
+        name: str,
+        command: str,
+        cwd: str,
+        env: dict[str, str],
+        owner_id: str,
+        popen_kwargs: dict | None = None,
     ) -> dict:
         _check_name(name)
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -107,6 +114,7 @@ class ServiceManager:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
                 close_fds=True,
+                **(popen_kwargs or {}),
             )
         self._procs[name] = proc
         # Reap it when it exits so a finished service never lingers as the supervisor's zombie.

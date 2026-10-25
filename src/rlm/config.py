@@ -7,6 +7,8 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rlm.network import NetworkBlocklist
@@ -69,6 +71,10 @@ class PopulationPolicy(_ConfigModel):
     """Let peers read each other's conversation histories without waking them."""
     max_seconds: float | None = Field(default=None, gt=0)
     """Episode wall-clock limit (stop_reason=max_seconds). None = no limit."""
+    process_isolation: Literal["none", "per_agent"] = "none"
+    """per_agent runs each agent's kernel and shell commands under its own uid in a shared
+    agents group, so agents cannot signal each other or the supervisor or read each other's
+    sessions; it needs a root host and fails at startup otherwise. none shares one uid."""
     artifacts: tuple[str, ...] = ()
     """Final files the task scores, relative to the working directory. Agents replace
     them only through revision-checked publication (rlm.artifact.publish)."""

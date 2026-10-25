@@ -54,6 +54,12 @@ from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.history import History
+from rlm.isolation import (
+    ProcessIdentity,
+    agent_identity,
+    require_root,
+    share_with_agents,
+)
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
 from rlm.types import AgentResult, ProgrammaticToolCallStats, RLMResult, TokenUsage
@@ -196,6 +202,7 @@ class _Invocation:
     kernel_generation: int = 0
     requesters: list[str] = field(default_factory=list)  # DM senders awaiting a reply
     failure: BaseException | None = None
+    identity: ProcessIdentity | None = None  # per-agent process isolation
     membership_seen: int = 0  # population events already announced to this agent
 
 
@@ -427,6 +434,12 @@ class SessionTreeSupervisor:
         os.chmod(self._socket_path, 0o600)
         if self._population:
             root = self._invocations[self.root_id]
+            if self._population.process_isolation == "per_agent":
+                require_root()
+                share_with_agents(Path(root.cwd))
+                # Agents connect as their own uids; their capabilities still authenticate.
+                os.chmod(self._broker_dir, 0o711)
+                os.chmod(self._socket_path, 0o666)
             self._board = SharedBoard(root.session.dir / "board.md")
             for path in self._population.artifacts:
                 self._artifacts[(Path(root.cwd) / path).resolve()] = {
@@ -908,6 +921,8 @@ class SessionTreeSupervisor:
             agent.session.write_meta(**self._info(agent))
             if self._artifacts:
                 (agent.session.dir / "drafts").mkdir()
+            if self._population.process_isolation == "per_agent":
+                agent.identity = agent_identity(self._admitted + 1, agent.session.dir)
             if parent is not None:
                 parent.session.log_sub_spawn(
                     agent.session.dir.name, "rlm.agent.spawn", prompt=task
@@ -963,6 +978,18 @@ class SessionTreeSupervisor:
         for agent, result in zip(peers, results):
             if isinstance(result, BaseException):
                 logger.warning("rlm: cleanup of %s failed: %s", agent.name, result)
+
+    def process_identity(self, invocation_id: str) -> ProcessIdentity | None:
+        return self._invocations[invocation_id].identity
+
+    def _process_env(self, agent: _Invocation, request: dict) -> dict[str, str]:
+        """Environment for an agent's shell command or service."""
+        return {
+            **build_kernel_env(dict(agent.runtime_config.kernel_env)),
+            **(agent.identity.env() if agent.identity else {}),
+            **agent.shell_env,
+            **(request.get("env") or {}),
+        }
 
     def population_failures(self) -> list[BaseException]:
         return [agent.failure for agent in self._peers() if agent.failure is not None]
@@ -1845,11 +1872,10 @@ class SessionTreeSupervisor:
                 command=command,
                 cwd=str(cwd.resolve()),
                 directory=parent.session.dir,
-                env={
-                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
-                    **parent.shell_env,
-                    **(request.get("env") or {}),
-                },
+                env=self._process_env(parent, request),
+                popen_kwargs=parent.identity.popen_kwargs()
+                if parent.identity
+                else None,
                 source_request_id=self._scopes[request["scope_id"]].request_id,
                 # yield_after= bounds how long run() blocks; timeout= is the kill deadline.
                 timeout=request.get("timeout"),
@@ -1959,12 +1985,11 @@ class SessionTreeSupervisor:
                 name=request["name"],
                 command=command,
                 cwd=str(cwd.resolve()),
-                env={
-                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
-                    **parent.shell_env,
-                    **(request.get("env") or {}),
-                },
+                env=self._process_env(parent, request),
                 owner_id=parent.id,
+                popen_kwargs=parent.identity.popen_kwargs()
+                if parent.identity
+                else None,
             )
         if op == "services.list":
             return self._services.list()
