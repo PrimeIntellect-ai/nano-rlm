@@ -30,7 +30,6 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
     APIConnectionError,
     APITimeoutError,
     InternalServerError,
-    NotFoundError,
     RateLimitError,
     APIResponseValidationError,
     ValidationError,
@@ -82,8 +81,9 @@ async def call_with_retries(
 ) -> Any:
     """Call ``func(**kwargs)`` with widely-spaced retries on transient errors.
 
-    Extends the SDK's retry set with ``NotFoundError`` to ride out intermittent
-    tunnel/proxy 404s that the SDK itself does not retry.
+    A 404 gets one quick retry. Persistent tunnel/registration 404s must instead
+    reach the outer rollout retry, which creates a fresh tunnel rather than
+    spending many minutes retrying a dead endpoint.
     """
     for attempt in range(len(_RETRY_DELAYS) + 1):
         if attempt:
@@ -96,6 +96,9 @@ async def call_with_retries(
             attempt_kwargs["extra_headers"] = headers
         try:
             return await func(**attempt_kwargs)
+        except NotFoundError:
+            if attempt >= 1:
+                raise
         except _RETRYABLE as error:
             if attempt == len(_RETRY_DELAYS):
                 if isinstance(error, (APIConnectionError, ConnectionResetError)):
