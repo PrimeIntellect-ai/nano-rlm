@@ -21,11 +21,13 @@ def network_url_is_blocked(block: NetworkBlocklist, value: object) -> bool:
         try:
             parsed = urlsplit(rule if "://" in rule else f"//{rule}")
             port = parsed.port
+            pattern = (parsed.hostname or "").lower().rstrip(".")
+            if not pattern.isascii():
+                pattern = AnyHttpUrl(f"http://{pattern}").host.rstrip(".")
         except ValueError:
             continue
         if parsed.scheme and port is None:
             port = 443 if parsed.scheme == "https" else 80
-        pattern = (parsed.hostname or "").lower().rstrip(".")
         if not pattern or (parsed.scheme and parsed.scheme != url.scheme):
             continue
         if port is not None and port != url.port:
