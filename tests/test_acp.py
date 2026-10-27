@@ -212,6 +212,40 @@ async def test_engine_prompt_preserves_conversation(session):
     assert meta["answer_preview"] == "second"
 
 
+async def test_engine_continues_a_loaded_session(session):
+    first = RLMEngine(
+        client=DummyClient([DummyMessage(content="first")]),
+        session=session,
+        runtime_config=make_runtime_config(),
+    )  # type: ignore[arg-type]
+    try:
+        await first.prompt("one")
+    finally:
+        await first.aclose()
+    system = session.messages[0]
+
+    loaded = Session(session.dir, load=True)
+    engine = RLMEngine(
+        client=DummyClient([DummyMessage(content="second")]),
+        session=loaded,
+        runtime_config=make_runtime_config(),
+    )  # type: ignore[arg-type]
+    try:
+        result = await engine.prompt("restored")
+    finally:
+        await engine.aclose()
+
+    assert result.turns == 1
+    assert engine._turn == 2
+    assert loaded.messages == [
+        system,
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "first"},
+        {"role": "user", "content": "restored"},
+        {"role": "assistant", "content": "second"},
+    ]
+
+
 def test_execution_snapshot_after_finalize_is_numeric_and_credential_free(session):
     config = RuntimeConfig(
         model="test-model",
@@ -850,7 +884,7 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
 
     initialized = await _initialize(agent)
     assert initialized.agent_capabilities.mcp_capabilities.http is True
-    assert initialized.agent_capabilities.load_session is False
+    assert initialized.agent_capabilities.load_session is True
     assert initialized.agent_capabilities.field_meta is None
     assert initialized.field_meta == {
         CONTRACT_METADATA_KEY: True,
@@ -920,6 +954,48 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert closed.field_meta[ACP_SEMANTIC_EDGES_METADATA_KEY] == {"edges": []}
     assert "test-secret" not in closed.model_dump_json(by_alias=True)
     assert engine.closed is True
+
+
+async def test_acp_load_session_continues_the_ledger(monkeypatch, tmp_path):
+    _Engine.instances.clear()
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    monkeypatch.setattr("rlm.acp.RLMEngine", _Engine)
+    system = {"role": "system", "content": "system"}
+    user = {"role": "user", "content": "task"}
+    call = {"role": "assistant", "content": "working", "tool_calls": []}
+    result = {"role": "tool", "tool_call_id": "c1", "content": "out"}
+    stale = {"role": "user", "content": "rolled back"}
+    session = Session()
+    session.log({"type": "system", "message": system}, in_context=True)
+    session.log({"type": "user", "turn": 0, "message": user}, in_context=True)
+    session.log_assistant(0, None, call)
+    checkpoint = list(session.context_indices)
+    session.log({"type": "user", "message": stale}, in_context=True)
+    session.replace_context([system, user, call], reason="rollback", indices=checkpoint)
+    session.log_tool_result(0, "bash", "out", 0.1, call_id="c1")
+    session.close()
+    # A process killed mid-write leaves a partial last line.
+    with open(session.dir / "messages.jsonl", "a") as file:
+        file.write('{"type": "assist')
+    client = _Client()
+    agent = RLMACPAgent()
+    agent.on_connect(client)  # type: ignore[arg-type]
+
+    initialized = await _initialize(agent)
+    assert initialized.agent_capabilities.load_session is True
+    await agent.load_session(str(tmp_path), session.dir.name, **_runtime_metadata())
+
+    loaded = _Engine.instances[0].session
+    assert loaded.messages == [system, user, call, result]
+    assert loaded.recorded_turns == 1
+    assert [update.content.text for _, update in client.updates] == ["task", "working"]
+    reply = await agent.prompt(session.dir.name, [text_block("restored")])
+    assert reply.stop_reason == "end_turn"
+    loaded.log({"type": "user", "message": {"role": "user", "content": "next"}})
+    lines = (session.dir / "messages.jsonl").read_text().splitlines()
+    assert json.loads(lines[-1])["message"]["content"] == "next"
+    with pytest.raises(RequestError):
+        await agent.load_session(str(tmp_path), "missing", **_runtime_metadata())
 
 
 async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path):

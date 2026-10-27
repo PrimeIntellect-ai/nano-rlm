@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from typing import Annotated, Any
@@ -11,12 +12,15 @@ from acp import (
     PROTOCOL_VERSION,
     Agent,
     InitializeResponse,
+    LoadSessionResponse,
     NewSessionResponse,
     PromptResponse,
     RequestError,
     run_agent,
     text_block,
     update_agent_message,
+    update_agent_message_text,
+    update_user_message_text,
 )
 from acp.interfaces import Client
 from acp.schema import (
@@ -50,7 +54,7 @@ from rlm.config import (
     RuntimeConfig,
 )
 from rlm.mcp import MCPHTTPServer, MCPServer, MCPStdioServer
-from rlm.session import Session
+from rlm.session import Session, sessions_dir
 
 CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
@@ -286,6 +290,7 @@ class RLMACPAgent(Agent):
         return InitializeResponse(
             protocol_version=PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
+                load_session=True,
                 prompt_capabilities=PromptCapabilities(),
                 mcp_capabilities=McpCapabilities(http=True),
                 session_capabilities=SessionCapabilities(
@@ -308,10 +313,59 @@ class RLMACPAgent(Agent):
             raise RequestError.invalid_params(
                 {"reason": "RLM does not support additional session directories"}
             )
+        return NewSessionResponse(
+            session_id=self._open(Session, cwd, mcp_servers, kwargs)
+        )
+
+    async def load_session(
+        self,
+        cwd: str,
+        session_id: str,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | AcpMcpServer | McpServerStdio]
+        | None = None,
+        additional_directories: list[str] | None = None,
+        **kwargs: Any,
+    ) -> LoadSessionResponse:
+        """Continue a session whose ledger is on disk in a new process: the engine
+        resumes on the recorded context with a fresh kernel, so the REPL's variables,
+        background jobs, and sub-agents of the earlier process are gone."""
+        if additional_directories:
+            raise RequestError.invalid_params(
+                {"reason": "RLM does not support additional session directories"}
+            )
+        directory = sessions_dir() / session_id
+        if (
+            not session_id.isalnum()
+            or session_id in self._sessions
+            or not (directory / "messages.jsonl").is_file()
+        ):
+            raise RequestError.resource_not_found(session_id)
+        self._open(lambda: Session(directory, load=True), cwd, mcp_servers, kwargs)
+        session = self._sessions[session_id].engine.session
+        for message in session.messages:
+            content = message.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            if message["role"] == "user":
+                update = update_user_message_text(content)
+            elif message["role"] == "assistant":
+                update = update_agent_message_text(content)
+            else:
+                continue
+            await self._client.session_update(session_id=session_id, update=update)
+        return LoadSessionResponse()
+
+    def _open(
+        self,
+        make_session: Callable[[], Session],
+        cwd: str,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | AcpMcpServer | McpServerStdio]
+        | None,
+        meta: dict[str, Any],
+    ) -> str:
         resolved_mcp_servers = _mcp_servers(mcp_servers)
-        runtime_config, external_session_id = _runtime_config(kwargs)
-        session = Session()
-        session_id = session.dir.name
+        runtime_config, external_session_id = _runtime_config(meta)
+        session = make_session()
         try:
             engine = RLMEngine(
                 cwd=cwd,
@@ -324,8 +378,8 @@ class RLMACPAgent(Agent):
             session.close()
             raise
         state = _SessionState(engine=engine, session_id=external_session_id)
-        self._sessions[session_id] = state
-        return NewSessionResponse(session_id=session_id)
+        self._sessions[session.dir.name] = state
+        return session.dir.name
 
     async def prompt(
         self,
