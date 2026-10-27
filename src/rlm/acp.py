@@ -77,6 +77,7 @@ class _RuntimeMetadata(_ContractModel):
     builtin_tools: list[Annotated[str, Field(min_length=1)]] | None = None
     kernel_env: dict[str, str]
     search_api_key: str | None
+    network_block: list[str] = Field(default_factory=list)
 
 
 class _UsageSnapshot(_ContractModel):
@@ -216,6 +217,7 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
             ),
             kernel_env=tuple(payload.kernel_env.items()),
             search_api_key=payload.search_api_key,
+            network_block=tuple(payload.network_block),
         ),
         payload.session_id,
     )
