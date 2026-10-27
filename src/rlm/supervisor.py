@@ -344,7 +344,11 @@ class SessionTreeSupervisor:
         return self._mcp_registry.servers() if self._mcp_registry else []
 
     async def _call_search(self, arguments: dict[str, Any]) -> str:
-        return await run_search(self._root_config.search_api_key, **arguments)
+        return await run_search(
+            self._root_config.search_api_key,
+            network_block=self._root_config.network_block,
+            **arguments,
+        )
 
     def programmatic_tool_call_stats(
         self, invocation_id: str
