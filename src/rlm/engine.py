@@ -1175,7 +1175,9 @@ class RLMEngine:
                 request["parallel_tool_calls"] = False
 
         try:
-            response = await call_with_retries(self._model_attempt, **request)
+            response = await call_with_retries(
+                self._model_attempt, client=self.client, **request
+            )
         except BaseException:
             self._semantic_edges.fail_request(request_id)
             raise
