@@ -194,6 +194,7 @@ class _Invocation:
     turns: int = 0
     new_tokens: int = 0
     prompt_tokens: int = 0
+    compactions: int = 0
     completion_tokens: int = 0
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -402,6 +403,9 @@ class SessionTreeSupervisor:
         if agent is not None:
             agent.turns += 1
             agent.new_tokens += tokens
+
+    def record_compaction(self, agent_id: str) -> None:
+        self._invocations[agent_id].compactions += 1
 
     def record_usage(
         self, tokens: int, agent_id: str | None = None, usage: TokenUsage | None = None
@@ -1058,6 +1062,10 @@ class SessionTreeSupervisor:
             raise RuntimeError(
                 f"agent_retiring: {target.name} is releasing its slot; retry shortly"
             )
+        if self.spent_agent_turns(target.id):
+            raise RuntimeError(
+                f"agent_turns_exhausted: {target.name} made all its model calls and stopped"
+            )
         if len(target.instructions) >= MAX_INBOX_EVENTS:
             raise RuntimeError(f"{target.name}'s message queue is full")
         event = self._event(sender, kind, text, request_id)
@@ -1250,11 +1258,16 @@ class SessionTreeSupervisor:
         return {"revision": state["revision"], "changed": True}
 
     def episode_output_empty(self) -> bool:
-        """Nothing scored has been produced yet: no declared artifact was published, or,
-        when the task declares none, no episode answer was submitted."""
+        """Nothing scored has been produced yet: no declared artifact was published or,
+        for an answer-scored task without artifacts, no episode answer was submitted."""
         if self._artifacts:
             return all(state["revision"] == 0 for state in self._artifacts.values())
-        return self._answer["revision"] == 0
+        return self._population.scored_on == "answer" and self._answer["revision"] == 0
+
+    def spent_agent_turns(self, invocation_id: str) -> bool:
+        """The agent made all the model calls the population allows one agent."""
+        cap = self._population.max_agent_turns if self._population else None
+        return cap is not None and self._invocations[invocation_id].turns >= cap
 
     @property
     def episode_answer(self) -> dict[str, Any]:
@@ -1380,6 +1393,10 @@ class SessionTreeSupervisor:
         return {
             **self.population_counts(),
             "peak_live": self._peak_live,
+            "compactions": sum(agent.compactions for agent in self._peers()),
+            "agents_turn_capped": sum(
+                self.spent_agent_turns(agent.id) for agent in self._peers()
+            ),
             **self._counters,
             "board_revision": self._board.revision if self._board else 0,
             "board_bytes": len(self._board.text.encode()) if self._board else 0,
@@ -1406,6 +1423,7 @@ class SessionTreeSupervisor:
                     "completion_tokens": agent.completion_tokens,
                     "new_tokens": agent.new_tokens,
                     "kernel_generation": agent.kernel_generation,
+                    "compactions": agent.compactions,
                     "error": agent.error,
                 }
                 for agent in self._peers()
@@ -1454,6 +1472,9 @@ class SessionTreeSupervisor:
             return
         if self._budget_exhausted(agent):
             self._fail_instructions(agent, "tree_budget_exhausted")
+            return
+        if self.spent_agent_turns(agent.id):
+            self._fail_instructions(agent, "agent_turns_exhausted")
             return
         agent.done.clear()
         agent.status = "starting"

@@ -75,6 +75,12 @@ class PopulationPolicy(_ConfigModel):
     """per_agent runs each agent's kernel and shell commands under its own uid in a shared
     agents group, so agents cannot signal each other or the supervisor or read each other's
     sessions; it needs a root host and fails at startup otherwise. none shares one uid."""
+    scored_on: Literal["answer", "workspace"] = "answer"
+    """What the task scores: the submitted episode answer, or the final state of the shared
+    workspace (e.g. a repository's tests), for which no answer is needed."""
+    max_agent_turns: int | None = Field(default=None, gt=0)
+    """Model calls one agent may make over the episode; an agent that reaches it ends its
+    turn for good. None = no per-agent limit (the tree budgets still apply)."""
     artifacts: tuple[str, ...] = ()
     """Final files the task scores, relative to the working directory. Agents replace
     them only through revision-checked publication (rlm.artifact.publish)."""

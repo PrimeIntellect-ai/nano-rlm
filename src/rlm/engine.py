@@ -816,7 +816,7 @@ class RLMEngine:
                     or self._last_handoff_summary
                     or (
                         "[turn budget reached]"
-                        if capped == "max_total_turns"
+                        if capped in {"max_total_turns", "max_agent_turns"}
                         else "[token budget reached]"
                     )
                 )
@@ -1203,6 +1203,10 @@ class RLMEngine:
     def _spent_tree_cap(self) -> str | None:
         """The stop_reason of a spent tree budget, or None. Live supervisor totals
         cover the whole tree; without a supervisor this engine is the whole tree."""
+        if self._supervisor is not None and self._supervisor.spent_agent_turns(
+            self._invocation_id
+        ):
+            return "max_agent_turns"
         if self._supervisor is not None:
             turns = self._supervisor.total_turns
             tokens = self._supervisor.total_tokens
@@ -1500,6 +1504,8 @@ class RLMEngine:
         )
 
         # Metrics: close the old branch.
+        if self._supervisor is not None:
+            self._supervisor.record_compaction(self._invocation_id)
         self._metrics.record(
             CompactionApplied(
                 dropped_chars=dropped_chars,

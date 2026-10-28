@@ -504,6 +504,8 @@ def test_population_prompt_replaces_tree_instructions():
         "artifacts": ("proof/Solution.lean",),
         "drafts": "/s/drafts",
         "process_isolation": "none",
+        "scored_on": "answer",
+        "max_agent_turns": None,
     }
     text = build_system_prompt(
         "/w",
@@ -526,6 +528,30 @@ def test_population_prompt_replaces_tree_instructions():
     assert "rlm.population.submit" in text
     assert "rlm.population.history" not in text
     assert "`proof/Solution.lean`" in text and "/s/drafts" in text
+    workspace = build_system_prompt(
+        "/w",
+        [],
+        session_dir="/s",
+        allow_recursion=False,
+        allow_git=False,
+        active_tools=tools,
+        agent_info={
+            "id": "x",
+            "parent_id": None,
+            "name": "agent-1",
+            "persistent": True,
+            "population": {
+                **population,
+                "founder": True,
+                "scored_on": "workspace",
+                "max_agent_turns": 40,
+                "artifacts": (),
+            },
+        },
+    )
+    assert "final state of the shared workspace" in workspace
+    assert "rlm.population.submit" not in workspace
+    assert "at most 40 model calls" in workspace
     for tree_rule in (
         "You are a sub-agent",
         "message siblings",
@@ -859,3 +885,29 @@ async def test_per_agent_isolation_separates_agents():
     owners = {path.stat().st_uid for path in workspace.glob("shared-*.txt")}
     shutil.rmtree(root)
     assert owners == {61001, 61002}
+
+
+async def test_agent_turn_cap_stops_the_agent_and_its_messages(tmp_path):
+    def policy(messages):
+        if any(m["role"] == "tool" for m in messages[-1:]) or len(messages) > 6:
+            return _cell("print('again')")
+        return _cell("print('work')")
+
+    swarm = Swarm(
+        cwd=str(tmp_path),
+        session=Session(tmp_path / "episode"),
+        runtime_config=_config(founders=2, max_agent_turns=2, scored_on="workspace"),
+    )
+    supervisor = swarm.supervisor
+    supervisor._engine_factory = lambda **kwargs: RLMEngine(
+        client=_ReactiveClient(policy), **kwargs
+    )
+    try:
+        await asyncio.wait_for(swarm.prompt("work"), 120)
+        answers = [agent.result.answer for agent in supervisor._peers()]
+    finally:
+        await swarm.aclose()
+    assert answers == ["[turn budget reached]"] * 2
+    snapshot = swarm.execution_snapshot()["population"]
+    assert snapshot["agents_turn_capped"] == 2
+    assert [agent["turns"] for agent in snapshot["agents"]] == [2, 2]

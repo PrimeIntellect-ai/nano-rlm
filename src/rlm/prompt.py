@@ -386,16 +386,9 @@ direct messages, your reply is delivered to their senders (your first reply goes
 agent that spawned you). A message to you starts a new turn in the same context. The episode
 ends once every agent is idle or gone with no message pending, or when a budget or the clock
 runs out; then every agent stops. So when nothing useful is left for you to do, reply and go
-idle rather than waiting or polling.
+idle rather than waiting or polling.{turn_cap}
 
-### Episode answer
-Unless the task declares final artifacts below, the episode is scored on its episode
-answer, not on any agent's reply.
-`cur = await rlm.population.answer()` returns a dictionary with "text", "revision" and
-"author". `await rlm.population.submit(text, expected_revision=cur["revision"])` replaces it
-only if nobody submitted since you read it; otherwise it raises answer_conflict, and you read
-it again and resubmit only if yours is better. Submit the complete answer in exactly the
-format the task asks for, and leave a correct answer alone.
+{output}
 
 ### Messages
 `await rlm.agent.dm("agent-3", text)` sends a direct message. It reaches the recipient at its
@@ -433,6 +426,21 @@ births remain. Spawn only for work that gains from another agent; you need not f
 slots. Agents you spawn outlive you. You cannot stop other agents, except with
 `await child.cancel()` on an agent you spawned.
 """
+
+POPULATION_ANSWER_PROMPT = """### Episode answer
+Unless the task declares final artifacts below, the episode is scored on its episode
+answer, not on any agent's reply.
+`cur = await rlm.population.answer()` returns a dictionary with "text", "revision" and
+"author". `await rlm.population.submit(text, expected_revision=cur["revision"])` replaces it
+only if nobody submitted since you read it; otherwise it raises answer_conflict, and you read
+it again and resubmit only if yours is better. Submit the complete answer in exactly the
+format the task asks for, and leave a correct answer alone."""
+
+POPULATION_WORKSPACE_PROMPT = """### Episode output
+The episode is scored on the final state of the shared workspace, checked after every agent
+stops; no reply or episode answer is scored. All agents edit the same files: claim the parts
+you change on the board before editing, do not undo or overwrite another agent's work without
+agreeing on it, and leave the workspace in the state you want scored."""
 
 POPULATION_ARTIFACTS_PROMPT = """### Final artifacts
 The episode is scored on these files: {artifacts}. Never write them directly: write
@@ -619,9 +627,17 @@ def _population_prompt(name: str, population: dict) -> str:
         if population["founder"]
         else f"You were spawned by {population['parent_name']}, whose brief is your first message."
     )
+    turn_cap = population["max_agent_turns"]
     text = POPULATION_PROMPT.format(
         name=name,
         origin=origin,
+        turn_cap=f" Each agent may make at most {turn_cap} model calls over the episode; "
+        "after that it stops for good."
+        if turn_cap
+        else "",
+        output=POPULATION_WORKSPACE_PROMPT
+        if population["scored_on"] == "workspace"
+        else POPULATION_ANSWER_PROMPT,
         founders=population["founders"],
         max_live_agents=population["max_live_agents"],
         max_total_agents=population["max_total_agents"],
