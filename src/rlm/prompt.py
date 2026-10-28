@@ -434,8 +434,10 @@ answer, not on any agent's reply.
 `cur = await rlm.population.answer()` returns a dictionary with "text", "revision" and
 "author". `await rlm.population.submit(text, expected_revision=cur["revision"])` replaces it
 only if nobody submitted since you read it; otherwise it raises answer_conflict, and you read
-it again and resubmit only if yours is better. Submit the complete answer in exactly the
-format the task asks for, and leave a correct answer alone."""
+it again and resubmit only if yours is better. Submit only the final answer, in exactly the
+format the task asks for (for example `\\boxed{...}`), not an account of how you got it, and
+leave a correct answer alone. Pass LaTeX as a raw string, `r"\\boxed{\\frac{1}{2}}"`: in a
+plain string Python reads `\\b`, `\\f` and `\\n` as escape characters."""
 
 POPULATION_WORKSPACE_PROMPT = """### Episode output
 The episode is scored on the final state of the shared workspace, checked after every agent

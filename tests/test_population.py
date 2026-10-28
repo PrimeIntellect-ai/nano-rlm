@@ -818,6 +818,8 @@ async def test_answer_conflicts_history_permission_and_budget_stop(tmp_path):
         await agent.op("population.submit", text="1", expected_revision=0)
         with pytest.raises(RuntimeError, match="answer_conflict"):
             await agent.op("population.submit", text="2", expected_revision=0)
+        with pytest.raises(ValueError, match="raw string"):
+            await agent.op("population.submit", text="\boxed{2}", expected_revision=1)
         with pytest.raises(PermissionError, match="disabled"):
             await agent.op("population.history", agent="agent-1", start=0, limit=5)
         agent.supervisor.record_call(10**9, agent.invocation_id)

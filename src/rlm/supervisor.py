@@ -67,6 +67,8 @@ from rlm.types import AgentResult, ProgrammaticToolCallStats, RLMResult, TokenUs
 # Per-agent limits for runtime hints.
 MAX_LONG_RUN_NOTES = 3
 MAX_WAIT_HELD_JOB_HINTS = 2
+# Control characters an answer only holds when Python ate a LaTeX backslash (\a, \b, \f, \v, \r).
+SWALLOWED_ESCAPES = frozenset("\a\b\f\v\r")
 # shell.completed events carry this much of the end of the output.
 COMPLETED_TAIL_BYTES = 4 * 1024
 # Hint once per variable after this many command prefixes.
@@ -1220,6 +1222,12 @@ class SessionTreeSupervisor:
                 f"episode answer is at revision {current['revision']} (by "
                 f"{current['author']}). Read it with rlm.population.answer() and "
                 "resubmit only if yours is better."
+            )
+        if escaped := sorted({repr(c) for c in text if c in SWALLOWED_ESCAPES}):
+            raise ValueError(
+                f"the answer contains control characters {', '.join(escaped)}: Python read "
+                "a LaTeX backslash as an escape (\\b in \\boxed, \\f in \\frac, ...). "
+                'Pass the text as a raw string, e.g. r"\\boxed{\\frac{1}{2}}".'
             )
         if text == current["text"]:
             return {"revision": current["revision"], "changed": False}
