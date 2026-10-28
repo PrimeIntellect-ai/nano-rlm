@@ -569,6 +569,7 @@ class SessionTreeSupervisor:
                 "parent_name": parent.name if parent else None,
                 "task": self._episode_task,
                 "drafts": str(agent.session.dir / "drafts"),
+                "job_hold_seconds": agent.runtime_config.policy.exec_timeout,
                 **self._population.model_dump(),
             }
         return context
@@ -1003,16 +1004,44 @@ class SessionTreeSupervisor:
         """Set whenever an agent finishes a turn or membership changes."""
         return self._activity
 
+    def _job_holds(self) -> dict[str, float]:
+        """Idle agents that an unfinished shell job of theirs may still wake, with the
+        monotonic time the hold ends: exec_timeout after the agent went idle."""
+        holds = {}
+        for agent_id in self._job_owners():
+            agent = self._invocations[agent_id]
+            if (
+                agent.status == "idle"
+                and not self._budget_exhausted(agent)
+                and not self.spent_agent_turns(agent_id)
+            ):
+                holds[agent_id] = (
+                    agent.idle_since + agent.runtime_config.policy.exec_timeout
+                )
+        return holds
+
     def population_quiescent(self) -> bool:
-        """True when no agent can act again: none runs, starts, retires or has input queued."""
-        job_owners = self._job_owners()
+        """True when no agent can act again: none runs, starts, retires or has input
+        queued, and no idle agent's shell job may still wake it."""
+        now = time.monotonic()
+        held = {agent_id for agent_id, end in self._job_holds().items() if now < end}
         return all(
             agent.status not in ACTIVE
             and (agent.runner is None or agent.runner.done())
             and not (agent.status == "idle" and agent.instructions)
-            and agent.id not in job_owners
+            and agent.id not in held
             for agent in self._peers()
         )
+
+    def population_recheck_at(self) -> float | None:
+        """When the earliest job hold ends: quiescence can change then without activity."""
+        now = time.monotonic()
+        return min(
+            (end for end in self._job_holds().values() if end > now), default=None
+        )
+
+    def all_agents_turn_capped(self) -> bool:
+        return all(self.spent_agent_turns(agent.id) for agent in self._peers())
 
     def _revive(self, agent: _Invocation) -> None:
         """Give a retired agent a live slot again; its next turn starts a fresh kernel."""
@@ -1242,6 +1271,12 @@ class SessionTreeSupervisor:
         source = (Path(agent.cwd) / candidate).resolve()
         if source == resolved:
             raise ValueError("publish a draft, not the final path itself")
+        # The supervisor reads as root: an isolated agent publishes only its own drafts.
+        drafts = (agent.session.dir / "drafts").resolve()
+        if agent.identity is not None and not source.is_relative_to(drafts):
+            raise PermissionError(
+                f"publish a draft from your drafts directory {drafts}"
+            )
         data = source.read_bytes()
         if resolved.is_file() and resolved.read_bytes() == data:
             return {"revision": state["revision"], "changed": False}
@@ -1479,6 +1514,8 @@ class SessionTreeSupervisor:
         agent.done.clear()
         agent.status = "starting"
         agent.idle_since = None
+        # The new turn announces every completion so far.
+        agent.announced_quiet = len(agent.inbox)
         self._start_runner(agent)
 
     def _start_runner(self, agent: _Invocation) -> None:
@@ -1680,6 +1717,14 @@ class SessionTreeSupervisor:
         notice = self.inbox_notice(invocation_id)
         return "Supervisor: " + notice["text"] if notice else None
 
+    @staticmethod
+    def _unseen_completions(agent: _Invocation) -> bool:
+        """Unread shell completions no wait has returned for: notices omit them."""
+        return any(
+            not event["read"] and event["type"] == "shell.completed"
+            for event in agent.inbox[agent.announced_quiet :]
+        )
+
     async def wait_for_events(self, invocation_id: str, timeout: float) -> str:
         agent = self._invocations[invocation_id]
         self._note_wait_with_held_jobs(agent)
@@ -1687,10 +1732,7 @@ class SessionTreeSupervisor:
         def ready():
             return (
                 len(agent.inbox) > agent.announced
-                or any(
-                    not event["read"] and event["type"] == "shell.completed"
-                    for event in agent.inbox[agent.announced_quiet :]
-                )
+                or self._unseen_completions(agent)
                 or bool(agent.instructions)
             )
 
@@ -2387,7 +2429,9 @@ class SessionTreeSupervisor:
                         ),
                     )
                 if child.status == "idle" and (
-                    child.instructions or len(child.inbox) > child.announced
+                    child.instructions
+                    or len(child.inbox) > child.announced
+                    or self._unseen_completions(child)
                 ):
                     self._wake_agent(child)
 
@@ -2477,6 +2521,8 @@ class SessionTreeSupervisor:
             child.cleanup_error = "; ".join(str(e) or type(e).__name__ for e in errors)
         child.released = not errors
         if errors:
+            if self._population and child.failure is None:
+                child.failure = errors[0]
             raise errors[0]
 
     async def _terminate(self, child: _Invocation) -> None:

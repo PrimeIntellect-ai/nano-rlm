@@ -126,13 +126,17 @@ class Swarm:
                 return "agent_failed"
             if self.supervisor.population_quiescent():
                 return self._quiescent_reason()
-            timeout = None if deadline is None else deadline - time.monotonic()
-            if timeout is not None and timeout <= 0:
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
                 return "max_seconds"
+            recheck = self.supervisor.population_recheck_at()
+            wake = min((t for t in (deadline, recheck) if t is not None), default=None)
             try:
-                await asyncio.wait_for(activity.wait(), timeout)
+                await asyncio.wait_for(
+                    activity.wait(), None if wake is None else wake - now
+                )
             except asyncio.TimeoutError:
-                return "max_seconds"
+                pass
 
     def _quiescent_reason(self) -> str:
         policy = self.runtime_config.policy
@@ -146,6 +150,8 @@ class Swarm:
             and self.supervisor.total_turns >= policy.max_total_turns
         ):
             return "max_total_turns"
+        if self.supervisor.all_agents_turn_capped():
+            return "max_agent_turns"
         counts = self.supervisor.population_counts()
         if counts["ended"] == counts["admitted"]:
             return "extinct"

@@ -386,7 +386,8 @@ direct messages, your reply is delivered to their senders (your first reply goes
 agent that spawned you). A message to you starts a new turn in the same context. The episode
 ends once every agent is idle or gone with no message pending, or when a budget or the clock
 runs out; then every agent stops. So when nothing useful is left for you to do, reply and go
-idle rather than waiting or polling.{turn_cap}
+idle rather than waiting or polling. A shell job still running when you go idle wakes you when
+it finishes, but holds the episode open for at most {job_hold_seconds}s.{turn_cap}
 
 {output}
 
@@ -642,6 +643,7 @@ def _population_prompt(name: str, population: dict) -> str:
         max_live_agents=population["max_live_agents"],
         max_total_agents=population["max_total_agents"],
         idle_grace_seconds=population["idle_grace_seconds"],
+        job_hold_seconds=population["job_hold_seconds"],
     )
     if population["artifacts"]:
         text += "\n" + POPULATION_ARTIFACTS_PROMPT.format(

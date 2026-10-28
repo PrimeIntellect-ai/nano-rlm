@@ -27,12 +27,14 @@ from rlm.tools import get_active_builtin_tools
 from rlm.types import RLMResult, TokenUsage
 
 
-def _config(**population) -> RuntimeConfig:
+def _config(exec_timeout: int = 300, **population) -> RuntimeConfig:
     return RuntimeConfig(
         model="test-model",
         provider=ProviderConfig(base_url="http://interceptor", api_key="secret"),
         invocation=InvocationContext(),
-        policy=ExecutionPolicy(population=PopulationPolicy(**population)),
+        policy=ExecutionPolicy(
+            exec_timeout=exec_timeout, population=PopulationPolicy(**population)
+        ),
     )
 
 
@@ -423,6 +425,59 @@ async def test_running_shell_jobs_keep_the_episode_open(tmp_path):
     assert len(script.prompts["agent-1"]) == 2
 
 
+async def test_an_idle_agents_job_holds_the_episode_only_for_exec_timeout(tmp_path):
+    script = _Script()
+
+    async def leave_a_server(agent):
+        await agent.op(
+            "shell.run",
+            command="sleep 1000",
+            cwd=None,
+            yield_after=0,
+            timeout=None,
+            env=None,
+        )
+        return "server left running"
+
+    script.turns = {"agent-1": [leave_a_server]}
+    swarm = _swarm(tmp_path, script, founders=1, exec_timeout=1)
+    try:
+        await asyncio.wait_for(swarm.prompt("task"), 10)
+    finally:
+        await swarm.aclose()
+    assert swarm.stop_reason == "quiescent"
+    assert len(script.prompts["agent-1"]) == 1
+
+
+async def test_a_job_finishing_mid_turn_wakes_its_idle_agent(tmp_path):
+    script = _Script()
+
+    async def keep_working(agent):
+        await agent.op(
+            "shell.run",
+            command="sleep 0.1",
+            cwd=None,
+            yield_after=0,
+            timeout=None,
+            env=None,
+        )
+        await asyncio.sleep(0.5)
+        # The engine reads the notices before every model call; a completion has none.
+        assert agent.supervisor.inbox_notice(agent.invocation_id) is None
+        return "I will look at the job when it completes"
+
+    async def collect(agent):
+        return "job finished"
+
+    script.turns = {"agent-1": [keep_working, collect]}
+    swarm = _swarm(tmp_path, script, founders=1)
+    try:
+        await asyncio.wait_for(swarm.prompt("task"), 10)
+    finally:
+        await swarm.aclose()
+    assert len(script.prompts["agent-1"]) == 2
+
+
 async def test_agents_awaiting_a_reply_are_not_retired(tmp_path):
     script = _Script()
     release = asyncio.Event()
@@ -503,6 +558,7 @@ def test_population_prompt_replaces_tree_instructions():
         "max_seconds": None,
         "artifacts": ("proof/Solution.lean",),
         "drafts": "/s/drafts",
+        "job_hold_seconds": 300,
         "process_isolation": "none",
         "scored_on": "answer",
         "max_agent_turns": None,
