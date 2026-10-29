@@ -2,9 +2,9 @@
 
 import os
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-server = FastMCP("stdio-test")
+server = MCPServer("stdio-test")
 
 
 @server.tool()
