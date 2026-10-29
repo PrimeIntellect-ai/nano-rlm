@@ -27,6 +27,7 @@ def test_runtime_config_redacts_secrets():
         skills=("search", "edit"),
         kernel_env=(("TASK_TOKEN", "task-secret"),),
         search_api_key="search-secret",
+        network_block=("example.com",),
     )
 
     assert config.model == "override"
@@ -47,6 +48,7 @@ def test_runtime_config_redacts_secrets():
     assert config.skills == ("search", "edit")
     assert config.kernel_env == (("TASK_TOKEN", "task-secret"),)
     assert config.search_api_key == "search-secret"
+    assert config.network_block == ("example.com",)
     assert "task-secret" not in repr(config)
     assert "search-secret" not in repr(config)
     assert "test-key" not in repr(config.provider)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from rlm.network import NetworkBlocklist
 from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
 
 
@@ -112,6 +113,8 @@ class RuntimeConfig(_ConfigModel):
     (`ipython` alone). Validated against the registry when the engine starts."""
     kernel_env: tuple[tuple[str, str], ...] = Field(default=(), repr=False)
     search_api_key: str | None = Field(default=None, repr=False)
+    network_block: NetworkBlocklist = ()
+    """Search-result destination rules shared by every agent in the session tree."""
 
     @property
     def resolved_append_to_system_prompt(self) -> str | None:
