@@ -112,6 +112,12 @@ Calls return text (str). If a tool returns JSON text, decode it with `json.loads
 before indexing fields; prose and CSV remain text.
 """
 
+MCP_PRELOADED_PROMPT = """## MCP tools
+The tools of MCP server(s) {servers} are loaded in your kernel, each a global named
+`<server>_<tool>`: `await` it with keyword arguments; `help(tool)` or `tool.schema` shows its
+arguments. Calls return text (str): decode JSON text with `json.loads(result)`.
+"""
+
 # One curated line per built-in skill, appended generically for whatever is enabled.
 BUILTIN_SKILL_PROMPTS: dict[str, str] = {
     "bash": BASH_SKILL_PROMPT,
@@ -386,6 +392,7 @@ def build_system_prompt(
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
     mcp_servers: list[dict] | None = None,
+    mcp_preload: list[str] | None = None,
 ) -> str:
     """Compose task instructions with the guide for this agent's actual runtime."""
     has_ipython = _has_tool(active_tools, "ipython")
@@ -397,7 +404,11 @@ def build_system_prompt(
     ]
     if extra_instructions:
         parts.append(extra_instructions)
-    if has_ipython and any(server["tool_count"] > 0 for server in mcp_servers or []):
+    with_tools = [s for s in mcp_servers or [] if s["tool_count"] > 0]
+    preloaded = [s["name"] for s in with_tools if s["name"] in (mcp_preload or [])]
+    if has_ipython and preloaded:
+        parts.append(MCP_PRELOADED_PROMPT.format(servers=", ".join(preloaded)))
+    if has_ipython and [s for s in with_tools if s["name"] not in preloaded]:
         parts.append(MCP_DISCOVERY_PROMPT)
         parts.append("MCP servers: " + json.dumps(mcp_servers))
     if can_delegate and delegation_prompt:

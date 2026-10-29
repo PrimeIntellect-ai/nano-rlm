@@ -98,6 +98,10 @@ class ExecutionPolicy(_ConfigModel):
     """The model reads images: images shown by a tool call (``attach(path)``, image
     display output, MCP image blocks) follow its result as one user message with image
     parts. Off: the result keeps only a text pointer per image."""
+    mcp_preload: list[str] = Field(default_factory=list)
+    """MCP servers whose tools are loaded into the kernel at its start, each a global by
+    its name (``<server>_<tool>``), as ``rlm.tools.load(server)`` gives them: for a small
+    catalog the agent uses at once. Others are found with ``rlm.tools.search``."""
     reply_ends_turn: bool = False
     """A reply without tool calls ends the turn even when a steering message arrived
     during the model call that made it: that message is not taken and comes back

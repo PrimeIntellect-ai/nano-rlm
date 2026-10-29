@@ -303,6 +303,14 @@ class BrokerToolsGetRequest(TypedDict):
     name: Annotated[str, Field(min_length=1, max_length=96)]
 
 
+class BrokerToolsLoadRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["tools.load"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    server: Annotated[str, Field(min_length=1, max_length=96)]
+
+
 class BrokerToolsServersRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
     op: Literal["tools.servers"]
@@ -329,6 +337,7 @@ BrokerRequest = Annotated[
     | BrokerSkillRequest
     | BrokerToolsSearchRequest
     | BrokerToolsGetRequest
+    | BrokerToolsLoadRequest
     | BrokerToolsServersRequest
     | BrokerAgentMessageRequest
     | BrokerAgentReportRequest

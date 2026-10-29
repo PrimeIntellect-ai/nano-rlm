@@ -411,3 +411,38 @@ async def test_mcp_image_blocks_reach_the_model_as_images(tmp_path):
     assert messages[-1]["content"][1]["image_url"]["url"].startswith(
         "data:image/png;base64,iVBORw0KGgo"
     )
+
+
+async def test_a_preloaded_servers_tools_are_kernel_globals_and_the_prompt_says_so(
+    tmp_path,
+):
+    session = Session(tmp_path / "session")
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython", {"code": "print(await local_echo(text='hi'))"}
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config().model_copy(
+            update={"policy": ExecutionPolicy(mcp_preload=["local"])}
+        ),
+        mcp_servers={"local": _stdio_server()},
+        cwd=str(tmp_path),
+    )
+
+    await engine.run("use the tool")
+    await engine.aclose()
+
+    messages = client.calls[1]["messages"]
+    assert messages[-1]["content"].rstrip().endswith(":hi"), messages[-1]
+    system = messages[0]["content"]
+    assert "## MCP tools" in system and "MCP tool discovery" not in system

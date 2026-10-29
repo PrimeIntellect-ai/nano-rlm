@@ -202,6 +202,16 @@ class MCPRegistry:
         self._capabilities[descriptor.capability] = name
         return descriptor
 
+    def names(self, server: str) -> list[str]:
+        """Every tool name of `server`, in catalog order."""
+        if self._tools is None:
+            raise RuntimeError("MCP tools have not been discovered")
+        if server not in self._servers:
+            raise ValueError(f"unknown MCP server: {server!r}")
+        return [
+            name for name, entry in self._tools.items() if entry.server_name == server
+        ]
+
     def search(
         self,
         query: str,

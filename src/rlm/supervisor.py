@@ -1106,6 +1106,17 @@ class SessionTreeSupervisor:
             return await self._services.stop(request["name"], request["grace"])
         raise ValueError(f"unknown services operation {op!r}")
 
+    def _mcp_tool(self, name: str) -> dict:
+        """Tool `name`'s descriptor, its calls brokered from now on."""
+        descriptor = self._mcp_registry.get(name)
+        if descriptor.capability not in self._mcp_capabilities:
+            self._brokered_skills[descriptor.capability] = (
+                descriptor,
+                partial(self._mcp_registry.call, descriptor.capability),
+            )
+            self._mcp_capabilities.add(descriptor.capability)
+        return descriptor.to_dict()
+
     async def _agent_operation(self, request: dict) -> Any:
         parent = self._caller(request["capability"], request["scope_id"])
         op = request["op"]
@@ -1121,14 +1132,12 @@ class SessionTreeSupervisor:
             if op == "tools.servers":
                 return self._mcp_registry.servers()
             if op == "tools.get":
-                descriptor = self._mcp_registry.get(request["name"])
-                if descriptor.capability not in self._mcp_capabilities:
-                    self._brokered_skills[descriptor.capability] = (
-                        descriptor,
-                        partial(self._mcp_registry.call, descriptor.capability),
-                    )
-                    self._mcp_capabilities.add(descriptor.capability)
-                return descriptor.to_dict()
+                return self._mcp_tool(request["name"])
+            if op == "tools.load":
+                return [
+                    self._mcp_tool(name)
+                    for name in self._mcp_registry.names(request["server"])
+                ]
             return self._mcp_registry.search(
                 request["query"],
                 request["limit"],

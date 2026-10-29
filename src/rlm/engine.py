@@ -224,6 +224,7 @@ class RLMEngine:
         self.allow_git = config.policy.allow_git
         self.vision = config.policy.vision
         self.reply_ends_turn = config.policy.reply_ends_turn
+        self.mcp_preload = config.policy.mcp_preload
 
         # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
@@ -618,6 +619,7 @@ class RLMEngine:
                     cancelled = True
             if cancelled:
                 raise asyncio.CancelledError
+            await self._preload_mcp()
 
             system_prompt = self._load_system_prompt(self._active_tools)
 
@@ -1562,6 +1564,32 @@ class RLMEngine:
         }
         return snapshot
 
+    async def _preload_mcp(self) -> None:
+        """Bind the tools of the policy's `mcp_preload` servers as kernel globals."""
+        if not self.mcp_preload or not any(
+            tool.name == "ipython" for tool in self._active_tools
+        ):
+            return
+        servers = [s for s in self.mcp_preload if s in self.mcp_servers]
+        code = "".join(
+            f"globals().update(await rlm.tools.load(server={server!r}))\n"
+            for server in servers
+        )
+        if not code or self._supervisor is None or self._invocation_id is None:
+            return
+        # A model's cell runs in a broker scope, as its tool call opens one; so does this one.
+        scope_id = await self._supervisor.open_scope(self._invocation_id, "mcp-preload")
+        try:
+            self._repl.set_broker_scope(scope_id)
+            output = await self._repl.run_in_thread(self._repl.execute, code)
+        finally:
+            try:
+                await self._supervisor.close_scope(scope_id)
+            finally:
+                self._repl.set_broker_scope(None)
+        if output.strip():  # the cell prints nothing unless it fails
+            raise RuntimeError(f"MCP preload failed: {output[-2000:]}")
+
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         return build_system_prompt(
             self.cwd,
@@ -1578,6 +1606,7 @@ class RLMEngine:
             mcp_servers=self._supervisor.mcp_server_summaries()
             if self._supervisor
             else None,
+            mcp_preload=self.mcp_preload,
             task_instructions=Path(self.system_prompt_path).read_text()
             if self.system_prompt_path
             else None,
