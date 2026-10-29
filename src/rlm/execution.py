@@ -13,6 +13,7 @@ import socket
 import struct
 import argparse
 import hmac
+import logging
 import os
 from dataclasses import asdict
 import sys
@@ -28,6 +29,8 @@ from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.registry import get_builtin_tool
 from rlm.types import IpythonExecuted, RLMMetrics, TokenUsage
 from rlm.execution_transport import ExecutionTransport, StdioTransport, TcpTransport
+
+logger = logging.getLogger(__name__)
 
 WORKSPACE_TOOLS = ("ipython", "bash", "edit", "fetch")
 
@@ -173,6 +176,24 @@ class RemoteREPL(IPythonREPL):
         )
         self._peer = None
         self.session_dir = None
+        # Interrupts and teardown run off the caller's thread, which can be the
+        # supervisor's event loop, in order and without waiting on a slow worker.
+        self._control = concurrent.futures.ThreadPoolExecutor(
+            1, thread_name_prefix="rlm-control"
+        )
+        self._control_done: concurrent.futures.Future | None = None
+
+    def _control_call(self, method, timeout):
+        peer = self._peer
+
+        def call():
+            if peer is not None and not peer.closed.is_set():
+                try:
+                    peer.call(method, timeout=timeout)
+                except Exception:
+                    logger.warning("execution worker %s failed", method, exc_info=True)
+
+        self._control_done = self._control.submit(call)
 
     def _broker(self, method, request):
         if method != "broker" or self.broker_endpoint is None:
@@ -217,6 +238,9 @@ class RemoteREPL(IPythonREPL):
         )
 
     def execute_tool(self, name, args):
+        if self._control_done is not None:
+            # A call must not overtake a pending interrupt or its release.
+            self._control_done.result()
         result = self._peer.call(
             "tool",
             {
@@ -241,20 +265,24 @@ class RemoteREPL(IPythonREPL):
         return self.execute_tool("ipython", {"code": code, "timeout": timeout}).content
 
     def interrupt(self):
-        if self._peer is not None and not self._peer.closed.is_set():
-            self._peer.call("interrupt", timeout=5)
+        self._control_call("interrupt", 5)
 
     def finish_interrupt(self):
-        if self._peer is not None and not self._peer.closed.is_set():
-            self._peer.call("finish_interrupt", timeout=5)
+        self._control_call("finish_interrupt", 5)
 
     def shutdown(self):
-        try:
-            if self._peer is not None and not self._peer.closed.is_set():
-                self._peer.call("close", timeout=30)
-        finally:
-            self.transport.close()
-            self._executor.shutdown(wait=False)
+        def close():
+            try:
+                if self._peer is not None and not self._peer.closed.is_set():
+                    self._peer.call("close", timeout=30)
+            except Exception:
+                logger.warning("execution worker close failed", exc_info=True)
+            finally:
+                self.transport.close()
+                self._executor.shutdown(wait=False)
+
+        self._control.submit(close)
+        self._control.shutdown(wait=False)
 
 
 class _Worker:

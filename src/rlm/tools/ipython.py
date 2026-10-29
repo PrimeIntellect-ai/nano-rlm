@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import functools
 import os
 from queue import Empty
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -255,6 +257,35 @@ class _KernelDied(RuntimeError):
 
 MAX_RECOVERY_ATTEMPTS = 3
 MAX_CELL_OUTPUT_BYTES = 1024 * 1024
+
+
+def kill_descendant_groups(pid: int) -> None:
+    """SIGKILL the process groups of `pid`'s descendants, read from /proc; a no-op
+    where there is none. The caller's own group is spared."""
+    try:
+        entries = [entry for entry in os.listdir("/proc") if entry.isdigit()]
+    except FileNotFoundError:
+        return
+    parents: dict[int, list[int]] = {}
+    groups: dict[int, int] = {}
+    for entry in entries:
+        try:
+            with open(f"/proc/{entry}/stat") as stat:
+                # The command name can hold spaces and parentheses; fields follow it.
+                fields = stat.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        parents.setdefault(int(fields[1]), []).append(int(entry))
+        groups[int(entry)] = int(fields[2])
+    targets, pending = set(), [pid]
+    while pending:
+        for child in parents.get(pending.pop(), []):
+            targets.add(groups[child])
+            pending.append(child)
+    targets.discard(os.getpgrp())
+    for group in targets:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, signal.SIGKILL)
 
 
 class IPythonREPL:
@@ -523,10 +554,18 @@ import rlm
             ):
                 return True
 
+    def _kill_kernel_commands(self):
+        """Kill the process groups the kernel's commands run in. Shell commands start
+        sessions of their own, so killing the kernel's process group misses them."""
+        pid = getattr(self._km.provisioner, "pid", None) if self._km else None
+        if pid is not None:
+            kill_descendant_groups(pid)
+
     def restart_kernel(self):
         """Restart the kernel and restore the initial REPL state."""
         if self._kc:
             self._kc.stop_channels()
+        self._kill_kernel_commands()
         self._km.restart_kernel(now=True)
         self._kc = self._km.client()
         self._kc.start_channels()
@@ -664,6 +703,7 @@ import rlm
             self._kc.stop_channels()
             self._kc = None
         if self._km and self._km.has_kernel:
+            self._kill_kernel_commands()
             self._km.shutdown_kernel(now=True)
         if self._km:
             self._km = None
