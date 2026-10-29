@@ -44,6 +44,7 @@ from rlm.shell_jobs import (
     JobRecord,
     ShellJobs,
 )
+from rlm.service_manager import ServiceManager
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
@@ -211,6 +212,7 @@ class SessionTreeSupervisor:
         self._connection_writers: set[asyncio.StreamWriter] = set()
         self._scopes: dict[str, _Scope] = {}
         self._mcp_registry = MCPRegistry(mcp_servers, cwd) if mcp_servers else None
+        self._mcp_capabilities: set[str] = set()
         self._brokered_skills: dict[
             str,
             tuple[
@@ -222,6 +224,10 @@ class SessionTreeSupervisor:
             self._publish_subscription, self._record_subscription
         )
         self._shell_jobs = ShellJobs(self._publish_job, self._publish_job_output)
+        # Services outlive this supervisor, so their records live outside the session directory.
+        self._services = ServiceManager(
+            Path(os.environ.get("RLM_SERVICES_DIR", "/tmp/rlm-services"))
+        )
         self._root_config = runtime_config
         if "search" in runtime_config.skills:
             capability = secrets.token_urlsafe(24)
@@ -315,11 +321,7 @@ class SessionTreeSupervisor:
         if self._closed:
             raise RuntimeError("session supervisor is closed")
         if self._mcp_registry is not None:
-            for descriptor in await self._mcp_registry.discover():
-                self._brokered_skills[descriptor.capability] = (
-                    descriptor,
-                    partial(self._mcp_registry.call, descriptor.capability),
-                )
+            await self._mcp_registry.discover()
         self._broker_dir = Path(tempfile.mkdtemp(prefix="rlm-brk-"))
         os.chmod(self._broker_dir, 0o700)
         self._socket_path = str(self._broker_dir / "b.sock")
@@ -331,11 +333,22 @@ class SessionTreeSupervisor:
     def write_brokered_skill_modules(
         self, dest_dir: Path, reserved_names: Iterable[str] = ()
     ) -> list[str]:
-        descriptors = [entry[0] for entry in self._brokered_skills.values()]
+        descriptors = [
+            entry[0]
+            for capability, entry in self._brokered_skills.items()
+            if capability not in self._mcp_capabilities
+        ]
         return write_skill_modules(descriptors, dest_dir, reserved_names)
 
+    def mcp_server_summaries(self) -> list[dict[str, Any]]:
+        return self._mcp_registry.servers() if self._mcp_registry else []
+
     async def _call_search(self, arguments: dict[str, Any]) -> str:
-        return await run_search(self._root_config.search_api_key, **arguments)
+        return await run_search(
+            self._root_config.search_api_key,
+            network_block=self._root_config.network_block,
+            **arguments,
+        )
 
     def programmatic_tool_call_stats(
         self, invocation_id: str
@@ -1038,13 +1051,74 @@ class SessionTreeSupervisor:
             return await self._shell_jobs.cancel(job)
         return job.snapshot()
 
+    async def _services_operation(self, parent: _Invocation, request: dict) -> Any:
+        op = request["op"]
+        if op == "services.start":
+            command = request["command"]
+            if not command.strip():
+                raise ValueError("empty command")
+            blocked = find_blocked_command(
+                command, allow_git=parent.runtime_config.policy.allow_git
+            )
+            if blocked:
+                raise PermissionError(refusal(blocked))
+            cwd = Path(parent.cwd) / (request["cwd"] or ".")
+            return self._services.start(
+                name=request["name"],
+                command=command,
+                cwd=str(cwd.resolve()),
+                env={
+                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
+                    **parent.shell_env,
+                    **(request.get("env") or {}),
+                },
+                owner_id=parent.id,
+            )
+        if op == "services.list":
+            return self._services.list()
+        if op == "services.get":
+            return self._services.get(request["name"])
+        if op == "services.tail":
+            return self._services.tail(request["name"], request["lines"])
+        if op == "services.stop":
+            return await self._services.stop(request["name"], request["grace"])
+        raise ValueError(f"unknown services operation {op!r}")
+
     async def _agent_operation(self, request: dict) -> Any:
         parent = self._caller(request["capability"], request["scope_id"])
         op = request["op"]
+        if op.startswith("tools."):
+            if self._mcp_registry is None:
+                if op == "tools.servers":
+                    return []
+                if op == "tools.search":
+                    if request.get("cursor") is not None:
+                        raise ValueError("invalid MCP search cursor")
+                    return {"matches": [], "next_cursor": None}
+                raise ValueError("no MCP tools are configured")
+            if op == "tools.servers":
+                return self._mcp_registry.servers()
+            if op == "tools.get":
+                descriptor = self._mcp_registry.get(request["name"])
+                if descriptor.capability not in self._mcp_capabilities:
+                    self._brokered_skills[descriptor.capability] = (
+                        descriptor,
+                        partial(self._mcp_registry.call, descriptor.capability),
+                    )
+                    self._mcp_capabilities.add(descriptor.capability)
+                return descriptor.to_dict()
+            return self._mcp_registry.search(
+                request["query"],
+                request["limit"],
+                request["server"],
+                request.get("cursor"),
+            )
         if op.startswith("watch."):
             return await self._watch_operation(parent, request)
         if op.startswith("shell."):
             return await self._shell_operation(parent, request)
+        if op.startswith("services."):
+            return await self._services_operation(parent, request)
         if op.startswith("hints."):
             tags = set(request.get("tags") or [])
             if op == "hints.mute":

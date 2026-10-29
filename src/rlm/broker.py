@@ -41,6 +41,16 @@ _JSON_TO_PY = {
 }
 
 
+def json_annotation(json_type: Any) -> Any:
+    """Map one JSON schema type to a Python annotation; unions and unknown types stay unannotated."""
+    if isinstance(json_type, list):
+        types = [t for t in json_type if t != "null"]
+        json_type = types[0] if len(types) == 1 else None
+    if not isinstance(json_type, str):
+        return inspect.Parameter.empty
+    return _JSON_TO_PY.get(json_type, inspect.Parameter.empty)
+
+
 class BrokerAgentSpawnRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
     op: Literal["agent.spawn"]
@@ -188,6 +198,50 @@ class BrokerShellReadRequest(TypedDict):
     max_bytes: Annotated[int, Field(ge=1, le=65_536)]
 
 
+class BrokerServicesStartRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["services.start"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+    command: Annotated[str, Field(min_length=1, max_length=65_536)]
+    cwd: str | None
+    env: dict[str, str] | None
+
+
+class BrokerServicesListRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["services.list"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerServicesGetRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["services.get"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+
+
+class BrokerServicesTailRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["services.tail"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+    lines: Annotated[int, Field(ge=1)]
+
+
+class BrokerServicesStopRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["services.stop"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=64)]
+    grace: Annotated[float, Field(ge=0, le=60)]
+
+
 class BrokerWatchAgentRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
     op: Literal["watch.agent"]
@@ -230,6 +284,32 @@ class BrokerWatchHandleRequest(TypedDict):
     subscription_id: Annotated[str, Field(min_length=1)]
 
 
+class BrokerToolsSearchRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["tools.search"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    query: Annotated[str, Field(min_length=1, max_length=1024)]
+    limit: Annotated[int, Field(ge=1, le=20)]
+    server: str | None
+    cursor: NotRequired[Annotated[str, Field(min_length=1, max_length=128)] | None]
+
+
+class BrokerToolsGetRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["tools.get"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1, max_length=96)]
+
+
+class BrokerToolsServersRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["tools.servers"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+
+
 class BrokerSkillRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid")
     op: Literal["skill.call"]
@@ -247,6 +327,9 @@ BrokerRequest = Annotated[
     | BrokerAgentResultRequest
     | BrokerAgentWaitRequest
     | BrokerSkillRequest
+    | BrokerToolsSearchRequest
+    | BrokerToolsGetRequest
+    | BrokerToolsServersRequest
     | BrokerAgentMessageRequest
     | BrokerAgentReportRequest
     | BrokerInboxListRequest
@@ -258,6 +341,11 @@ BrokerRequest = Annotated[
     | BrokerShellEnvRequest
     | BrokerHintsRequest
     | BrokerShellReadRequest
+    | BrokerServicesStartRequest
+    | BrokerServicesListRequest
+    | BrokerServicesGetRequest
+    | BrokerServicesTailRequest
+    | BrokerServicesStopRequest
     | BrokerWatchAgentRequest
     | BrokerWatchJobRequest
     | BrokerWatchPathRequest
@@ -409,7 +497,7 @@ def make_skill(descriptor: dict[str, Any]):
             field,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             default=inspect.Parameter.empty if field in required else None,
-            annotation=_JSON_TO_PY.get(value.get("type"), inspect.Parameter.empty),
+            annotation=json_annotation(value.get("type")),
         )
         for field, value in properties.items()
         if field.isidentifier() and not keyword.iskeyword(field)
@@ -417,7 +505,7 @@ def make_skill(descriptor: dict[str, Any]):
     parameters.sort(
         key=lambda parameter: parameter.default is not inspect.Parameter.empty
     )
-    signature = inspect.Signature(parameters)
+    signature = inspect.Signature(parameters, return_annotation=str)
     names = [parameter.name for parameter in parameters]
 
     async def run(*args: Any, **kwargs: Any) -> str:
@@ -431,7 +519,12 @@ def make_skill(descriptor: dict[str, Any]):
 
     run.__name__ = run.__qualname__ = name
     run.__signature__ = signature
-    run.__doc__ = description
+    run.__doc__ = (
+        description
+        + "\n\nReturns text (str). Decode JSON text with json.loads(result); "
+        "prose and CSV remain text."
+    )
+    run.schema = schema
     return run
 
 

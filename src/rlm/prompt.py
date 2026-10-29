@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from rlm.tools.base import BuiltinTool
+    from rlm.tools.skills import SkillDoc
 
 
 # Importable names of the base toolkit declared in pyproject.toml.
@@ -43,7 +44,8 @@ PROJECT_ENV_PROMPT = (
 )
 IPYTHON_CONTROL_PROMPT = (
     "Use `rlm.shell.run` for Bash; `yield_after=` is how long it waits before yielding a handle (0 = at once) and "
-    "`await job.result()` collects any job. " + PROJECT_ENV_PROMPT
+    "`await job.result()` collects any job. Use `rlm.services.start` for a server or daemon that must keep "
+    "running after you finish. " + PROJECT_ENV_PROMPT
 )
 KERNEL_PACKAGES_PROMPT = (
     "Pre-installed in the kernel venv: " + ", ".join(BASE_TOOLKIT) + ". "
@@ -54,7 +56,8 @@ BASH_SKILL_PROMPT = (
     "For short, blocking shell work, use `out = await bash('''command here''')` — always "
     "triple-quote the command so shell quotes and multi-line scripts never "
     "need escaping. It returns the output as a string, useful for further Python processing. "
-    "Use rlm.shell.run(..., yield_after=0) for supervisor-owned background work."
+    "Use rlm.shell.run(..., yield_after=0) for supervisor-owned background work, and "
+    "rlm.services.start for a server or daemon that must keep running after you finish."
 )
 BASH_SKILL_WITH_TOOL_PROMPT = (
     "Inside ipython you can also run shell with `await bash(command=...)` — "
@@ -62,7 +65,7 @@ BASH_SKILL_WITH_TOOL_PROMPT = (
     "in one cell or avoiding shell quoting."
 )
 EDIT_SKILL_PROMPT = (
-    "Change existing files with the pre-imported async `edit` skill, not with "
+    "Change existing files with the pre-imported async `edit` tool, not with "
     '`str.replace` + `write_text`: `await edit(path="pkg/file.py", old_str=..., new_str=...)` '
     "replaces exactly one occurrence and raises ValueError when old_str is absent or "
     "appears more than once, so a stale or ambiguous hunk cannot be applied silently. "
@@ -74,17 +77,35 @@ EDIT_SKILL_PROMPT = (
     "Use write_text only for files you create."
 )
 SEARCH_SKILL_PROMPT = (
-    "For web search, use the pre-imported async `search` skill from IPython: "
+    "For web search, use the pre-imported async `search` tool from IPython: "
     '`await search(query="...")` returns one formatted text string containing '
     "titles, URLs, and snippets, not a list of records. Assign it to a variable "
     "and print it to read the results. To cover "
     "several angles at once, fan out with `asyncio.gather(search(...), search(...))`."
 )
 FETCH_SKILL_PROMPT = (
-    "To read a specific webpage, use the pre-imported async `fetch` skill: "
+    "To read a specific webpage, use the pre-imported async `fetch` tool: "
     '`await fetch(url="...")` returns the webpage as cleaned text. It can be used '
     "to open URLs from `search` results."
 )
+
+MCP_DISCOVERY_PROMPT = """## MCP tool discovery
+Use `await rlm.tools.servers()` for server names, tool counts and available descriptions. Search by keywords
+with `page = await rlm.tools.search("calendar events", limit=5, server=None)`.
+Use a non-empty keyword query and a limit from 1 to 20; an empty query cannot list tools.
+`page["matches"]` contains id, server and a short description, without argument schemas.
+Each page has at most 20 matches. If `page["next_cursor"]` is not None, retrieve more
+with the same query and server and `cursor=page["next_cursor"]`. Stop when it is None.
+If no match fits, try other keywords or filter by server. Load a selected tool with
+`tool = await rlm.tools.get(page["matches"][0]["id"])`. Inspect `tool.schema` for the full
+JSON input schema (nested fields, enums and constraints), or `help(tool)` for its
+Python signature and description, then call `await tool(...)` using that schema.
+Save callables in variables to reuse them, and use asyncio.gather for independent calls.
+MCP tools are loaded async functions: use `await tool(...)`, not guessed methods such as
+`tool.search(...)`. Tool names are not pre-imported, regardless of catalog size.
+Calls return text (str). If a tool returns JSON text, decode it with `json.loads(result)`
+before indexing fields; prose and CSV remain text.
+"""
 
 # One curated line per built-in skill, appended generically for whatever is enabled.
 BUILTIN_SKILL_PROMPTS: dict[str, str] = {
@@ -199,15 +220,32 @@ result() stops waiting but leaves the job running. Jobs survive kernel restarts:
 .timeout, .error; status is starting, running, completed, failed, cancelled, or timed_out;
 nonzero exit codes are completed processes, failed means startup/capture failure), and
 `await rlm.shell.get(job_id)` recovers the ShellJob for a lost variable.
-`await job.cancel()` stops the process group. Owner termination cancels its jobs. Keep Bash
-alive until its work finishes; detached processes are outside this guarantee. Before your
-final answer, `await rlm.shell.list()` must show no running job whose result you still need.
+`await job.cancel()` stops the process group. Owner termination cancels its jobs. A job's
+processes, including anything it started with `&` or `nohup`, are stopped when the job ends,
+and running jobs are stopped when you finish. Keep Bash alive until its work finishes. Before
+your final answer, `await rlm.shell.list()` must show no running job whose result you still need.
 Only a job handed back with .running True posts a shell.completed inbox event when it ends;
 finished results post nothing. Those events are quiet: they wake native `wait` but are not
 counted in the unread notice, because `await job.result()` already collects the job. IPython `!`/`%%bash` and any enabled blocking bash
-skill/tool are not supervisor-owned jobs.
+tool are not supervisor-owned jobs.
 
 Agent cleanup errors are reported separately in AgentInfo.cleanup_error; completed answers remain readable. Use cancel() to retry unfinished cleanup.
+
+## Services
+A process that must keep running after you finish, such as a server or daemon you are asked
+to leave running, is a service, not a job: `svc = await rlm.services.start(name, command,
+cwd=..., env=...)` starts it in its own session with its output appended to a log file, and
+it keeps running after your session ends. It returns a Service snapshot (.name, .pid, .log,
+.running, .exit_code); `await svc.tail(50)` reads the end of its log and `await svc.stop()`
+stops it. start() returns at once, so check the service came up (tail() or connect to it)
+before relying on it. `await rlm.services.list()` and `await rlm.services.get(name)` recover
+services after kernel restarts. Starting a name that is still running raises.
+```python
+svc = await rlm.services.start("api", "python3 server.py --port 8080", cwd="/app")
+r = await rlm.shell.run("curl -sf localhost:8080/health")       # check it answers
+if not r.ok:
+    print(await svc.tail(50))
+```
 
 ## Inbox and waiting
 `await rlm.inbox.list()` returns unread event dictionaries: ["id"], ["type"],
@@ -333,7 +371,6 @@ instructions and evidence by searching/selectively printing records, not the ent
 
 def build_system_prompt(
     cwd: str,
-    skills_dir: str | None,
     installed_skills: list[str],
     *,
     depth: int = 0,
@@ -343,9 +380,11 @@ def build_system_prompt(
     allow_git: bool,
     active_tools: list[BuiltinTool],
     shell_skills: list[str] | None = None,
+    skill_docs: list["SkillDoc"] | None = None,
     task_instructions: str | None = None,
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
+    mcp_servers: list[dict] | None = None,
 ) -> str:
     """Compose task instructions with the guide for this agent's actual runtime."""
     has_ipython = _has_tool(active_tools, "ipython")
@@ -357,6 +396,9 @@ def build_system_prompt(
     ]
     if extra_instructions:
         parts.append(extra_instructions)
+    if has_ipython and any(server["tool_count"] > 0 for server in mcp_servers or []):
+        parts.append(MCP_DISCOVERY_PROMPT)
+        parts.append("MCP servers: " + json.dumps(mcp_servers))
     if can_delegate and delegation_prompt:
         parts.append(DELEGATION_PROMPT)
     parts.append("## Agent context")
@@ -430,29 +472,47 @@ def build_system_prompt(
         parts.append(
             "Use the native edit tool for exact single-occurrence string replacement; its schema describes the arguments."
         )
-    if skills_dir:
-        parts.append(
-            f"Local skills live under {skills_dir}. Read their SKILL.md files when helpful."
-        )
+    if skill_docs:
+        parts.append(_skill_docs_prompt(skill_docs))
     shell_skill_set = set(shell_skills or [])
     if installed_skills and has_ipython:
         parts.append(
-            "Installed skills (pre-imported): "
+            "Python tools (pre-imported): "
             + ", ".join(f"`{name}`" for name in installed_skills)
-            + ". Each is async; use help(skill) for its signature."
+            + ". Each is async; use help(tool) for its signature."
         )
         for name in installed_skills:
             if guidance := _builtin_skill_prompt(name, active_tools):
                 parts.append(guidance)
     if shell_skill_set and (has_ipython or _has_tool(active_tools, "bash")):
         parts.append(
-            "Shell-enabled installed skills: "
+            "Shell-enabled Python tools: "
             + ", ".join(f"`{name}`" for name in sorted(shell_skill_set))
-            + ". Discover CLI usage with `<skill> --help`. Other listed skills are IPython-only."
+            + ". Discover CLI usage with `<tool> --help`. Other listed Python tools are IPython-only."
         )
     if _should_include_git_history_guard(active_tools, allow_git):
         parts.append(GIT_HISTORY_GUARD_PROMPT)
     return "\n\n".join(parts)
+
+
+SKILLS_PROMPT = """## Skills
+A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used. Each entry includes a name, description, and file path so you can open the source for full instructions when using a specific skill.
+### Available skills
+{skills}
+### How to use skills
+- Trigger rules: If the user names a skill OR the task clearly matches a skill's description shown above, you must use that skill for that turn.
+- How to use a skill: read its `SKILL.md` completely before taking task actions. Resolve relative paths in it against the directory that holds it. If it ships `scripts/`, prefer running them over retyping their code.
+- Missing/blocked: If a skill's file can't be read, say so briefly and continue with the best fallback."""
+
+
+def _skill_docs_prompt(skill_docs: list["SkillDoc"]) -> str:
+    lines = "\n".join(
+        f"- {doc.name}: {doc.description} (file: {doc.location})"
+        if doc.description
+        else f"- {doc.name}: (file: {doc.location})"
+        for doc in skill_docs
+    )
+    return SKILLS_PROMPT.format(skills=lines)
 
 
 def _should_include_git_history_guard(
