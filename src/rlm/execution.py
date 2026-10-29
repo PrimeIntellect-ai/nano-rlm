@@ -179,14 +179,12 @@ class RemoteREPL(IPythonREPL):
             raise PermissionError("unknown execution callback")
         if request.get("capability") != self.broker_endpoint.capability:
             raise PermissionError("invalid execution capability")
-        # These operations currently launch jobs/watchers in the supervisor process.
-        # Refuse them until they have execution-session implementations.
-        if (
-            request.get("op", "").startswith("shell.")
-            or request.get("op") == "watch.path"
-        ):
+        # These operations currently launch jobs/services/watchers in the supervisor
+        # process. Refuse them until they have execution-session implementations.
+        op = request.get("op", "")
+        if op.startswith(("shell.", "services.")) or op == "watch.path":
             raise ValueError(
-                "split execution does not support rlm.shell or watch.path; use bash/IPython in the task workspace"
+                "split execution does not support rlm.shell, rlm.services or watch.path; use bash/IPython in the task workspace"
             )
         with socket.socket(socket.AF_UNIX) as connection:
             connection.connect(self.broker_endpoint.socket_path)

@@ -582,8 +582,8 @@ use a private network or an encrypted tunnel. The worker removes its token from
 the environment before starting tools. The orchestrator owns listener teardown.
 
 Supervisor shell jobs
-(`rlm.shell`) and filesystem watchers (`rlm.watch.path`) return explicit errors in
-this mode. `await child.history()` uses the supervisor; the current agent's local
+(`rlm.shell`), services (`rlm.services`) and filesystem watchers
+(`rlm.watch.path`) return explicit errors in this mode. `await child.history()` uses the supervisor; the current agent's local
 history is a snapshot refreshed before each cell. Worker frames, including history
 snapshots and outputs, are limited to 16 MiB. Kernel recovery preserves the existing
 no-replay behavior. Worker disconnects fail the session; the orchestrator must stop
