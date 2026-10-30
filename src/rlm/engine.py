@@ -285,6 +285,8 @@ class RLMEngine:
         self._steering_ids: dict[str, tuple[str, asyncio.Future]] = {}
         self._steering_applied: list[tuple[int, dict]] = []
         self._steering_ready = asyncio.Event()
+        self._notices_pending: list[tuple[str, str | None, asyncio.Future]] = []
+        self._notice_ids: dict[str, tuple[str, asyncio.Future]] = {}
         self._pending_kernel_notices: list[str] = []
         self._prompt_kernel_notices: list[str] = []
 
@@ -338,6 +340,42 @@ class RLMEngine:
         self._steering_pending.append((text, message_id, receipt))
         self._steering_ready.set()
         return await asyncio.shield(receipt)
+
+    async def notify(self, text: str, message_id: str | None = None) -> dict:
+        """Show a client's notice at the next model boundary, after the tool results,
+        as a runtime notice rather than a user message. It does not interrupt a tool;
+        it ends a native wait. The receipt says "delivered" once it is in context, or
+        promptRequired/noRunningTurn when the turn ended before that."""
+        if message_id is not None and message_id in self._notice_ids:
+            previous, receipt = self._notice_ids[message_id]
+            if previous != text:
+                raise ValueError("notice message ID reused with different content")
+            return await asyncio.shield(receipt)
+        if not self._steering_active:
+            return {"outcome": "promptRequired", "reason": "noRunningTurn"}
+        receipt = asyncio.get_running_loop().create_future()
+        if message_id is not None:
+            self._notice_ids[message_id] = (text, receipt)
+        self._notices_pending.append((text, message_id, receipt))
+        self._steering_ready.set()
+        return await asyncio.shield(receipt)
+
+    def _apply_notices(self) -> None:
+        while self._notices_pending:
+            text, message_id, receipt = self._notices_pending.pop(0)
+            message, provenance = runtime_event("client", text)
+            self.session.log(
+                {
+                    "type": "client_notice",
+                    "message": message,
+                    "provenance": provenance,
+                    "notice_id": message_id,
+                },
+                in_context=True,
+            )
+            receipt.set_result({"outcome": "delivered"})
+        if not self._steering_pending:
+            self._steering_ready.clear()
 
     def _apply_steering(self) -> None:
         while self._steering_pending:
@@ -403,6 +441,13 @@ class RLMEngine:
                     {"outcome": "promptRequired", "reason": "noRunningTurn"}
                 )
             self._steering_pending.clear()
+            for _, message_id, receipt in self._notices_pending:
+                if message_id is not None:
+                    self._notice_ids.pop(message_id, None)
+                receipt.set_result(
+                    {"outcome": "promptRequired", "reason": "noRunningTurn"}
+                )
+            self._notices_pending.clear()
             self._steering_ready.clear()
 
     async def _prompt(
@@ -820,6 +865,7 @@ class RLMEngine:
                 )
                 break
             self._apply_steering()
+            self._apply_notices()
             self._deliver_kernel_notices()
             self._deliver_supervisor_input()
             messages = self.session.messages
