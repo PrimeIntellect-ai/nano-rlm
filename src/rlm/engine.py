@@ -214,6 +214,7 @@ class RLMEngine:
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
+        self.network_guidance = config.policy.network_guidance
 
         # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
@@ -1471,6 +1472,7 @@ class RLMEngine:
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "max_compaction_attempts": self.max_compaction_attempts,
                 "allow_git": self.runtime_config.policy.allow_git,
+                "network_guidance": self.runtime_config.policy.network_guidance,
             },
             "semantic_edges": self._semantic_edges.snapshot(),
         }
@@ -1485,6 +1487,7 @@ class RLMEngine:
             allow_recursion=self.depth < self.max_depth,
             delegation_prompt=self.runtime_config.policy.delegation_prompt,
             allow_git=self.allow_git,
+            network_guidance=self.network_guidance,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
             skill_docs=discover_skill_docs(SKILLS_DIR) if SKILLS_DIR else [],

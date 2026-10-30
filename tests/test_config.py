@@ -23,6 +23,7 @@ def test_runtime_config_redacts_secrets():
             max_compactions=3,
             max_compaction_attempts=7,
             allow_git=True,
+            network_guidance=False,
         ),
         skills=("search", "edit"),
         kernel_env=(("TASK_TOKEN", "task-secret"),),
@@ -44,6 +45,7 @@ def test_runtime_config_redacts_secrets():
         max_concurrent_subagents=4,
         max_subagent_calls=None,
         allow_git=True,
+        network_guidance=False,
     )
     assert config.skills == ("search", "edit")
     assert config.kernel_env == (("TASK_TOKEN", "task-secret"),)

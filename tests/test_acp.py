@@ -57,6 +57,7 @@ def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
             "max_concurrent_subagents": 4,
             "max_subagent_calls": None,
             "allow_git": False,
+            "network_guidance": False,
         },
         "system_prompt_path": None,
         "append_to_system_prompt": None,
@@ -154,6 +155,7 @@ class _Engine:
                 "max_compactions": None,
                 "max_compaction_attempts": 5,
                 "allow_git": False,
+                "network_guidance": False,
             },
             "semantic_edges": {"edges": []},
         }

@@ -94,6 +94,10 @@ class ExecutionPolicy(_ConfigModel):
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
     allow_git: bool = False
+    network_guidance: bool = True
+    """Include prompt guidance that assumes outbound network access (installing extra
+    kernel packages, the online-solutions clause of the Git guard). Disable it for
+    boxes with no network."""
 
 
 class RuntimeConfig(_ConfigModel):

@@ -108,6 +108,7 @@ class _LimitsSnapshot(_ContractModel):
     max_compactions: int | None = Field(default=None, gt=0)
     max_compaction_attempts: int = Field(gt=0)
     allow_git: bool
+    network_guidance: bool
 
 
 class _SemanticEdge(_ContractModel):
