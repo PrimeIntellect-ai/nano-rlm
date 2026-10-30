@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rlm.images import IMAGE_MIMES, MAX_IMAGE_BYTES, MAX_IMAGES_PER_CALL
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
 from rlm.tools.skills import discover_skills
@@ -237,9 +238,11 @@ class IpythonTool:
                 metric_events=metric_events,
             )
 
+        content = context.repl.execute(code, timeout=timeout)
         return ToolOutcome(
-            content=context.repl.execute(code, timeout=timeout),
+            content=content,
             metric_events=metric_events,
+            images=context.repl.take_images(),
         )
 
     @staticmethod
@@ -288,6 +291,7 @@ class IPythonREPL:
         self._recovery_failed = False
         self._cell_submitted = False
         self._recovery_notices: list[str] = []
+        self._images: list[dict[str, str]] = []
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="rlm-repl"
         )
@@ -431,6 +435,7 @@ for _name in {skill_names!r}:
     globals()[_name] = _wrap_callable(_module, _source)
 
 import rlm
+from rlm.images import attach
 """
         self._execute_silent(setup_code)
 
@@ -441,6 +446,11 @@ import rlm
     def take_recovery_notices(self) -> list[str]:
         notices, self._recovery_notices = self._recovery_notices, []
         return notices
+
+    def take_images(self) -> list[dict[str, str]]:
+        """Images displayed by the last cell, as ``{"mime", "data"}``."""
+        images, self._images = self._images, []
+        return images
 
     def _execute_silent(self, code: str, *, interruptible: bool = False):
         """Execute setup and verify the matching reply succeeded."""
@@ -593,6 +603,7 @@ import rlm
         deadline = None if timeout is None else time.monotonic() + timeout
 
         outputs: list[str] = []
+        self._images = []
         try:
             while True:
                 if not self._km.is_alive():
@@ -624,10 +635,16 @@ import rlm
 
                 if msg_type == "stream":
                     outputs.append(content["text"])
-                elif msg_type == "execute_result":
-                    text = content.get("data", {}).get("text/plain", "")
-                    if text:
-                        outputs.append(text + "\n")
+                elif msg_type in ("display_data", "execute_result"):
+                    bundle = content.get("data", {})
+                    mime = next((m for m in IMAGE_MIMES if m in bundle), None)
+                    if mime is not None:
+                        path = content.get("metadata", {}).get(mime, {}).get("path")
+                        outputs.append(
+                            self._keep_image(mime, bundle[mime], path) + "\n"
+                        )
+                    elif msg_type == "execute_result" and bundle.get("text/plain"):
+                        outputs.append(bundle["text/plain"] + "\n")
                 elif msg_type == "error":
                     tb = "\n".join(content.get("traceback", []))
                     tb = _ANSI_RE.sub("", tb)
@@ -643,6 +660,19 @@ import rlm
                 pass
 
         return "".join(outputs)
+
+    def _keep_image(self, mime: str, data: str, path: str | None = None) -> str:
+        """Keep one displayed image within the per-call limits; return its text pointer,
+        which names the file ``attach`` read it from."""
+        data = "".join(data.split())
+        size = len(data) * 3 // 4
+        if len(self._images) >= MAX_IMAGES_PER_CALL:
+            return f"[image dropped: at most {MAX_IMAGES_PER_CALL} images per call]"
+        if size > MAX_IMAGE_BYTES:
+            return f"[image dropped: {size / 1e6:.1f} MB exceeds the {MAX_IMAGE_BYTES // 2**20} MB limit]"
+        self._images.append({"mime": mime, "data": data})
+        source = f"{path}, " if path else ""
+        return f"[image {len(self._images)}: {source}{mime}, {max(1, size // 1024)} KB]"
 
     def shutdown(self):
         """Stop the kernel."""

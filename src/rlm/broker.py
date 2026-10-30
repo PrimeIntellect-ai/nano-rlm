@@ -478,6 +478,12 @@ async def call_skill(capability: str, arguments: dict[str, Any]) -> str:
         }
     )
     result = response.get("result")
+    if isinstance(result, dict) and set(result) == {"text", "images"}:
+        from IPython.display import display
+
+        for image in result["images"]:
+            display({image["mime"]: image["data"]}, raw=True)
+        result = result["text"]
     if not isinstance(result, str):
         raise RuntimeError("invalid skill response from RLM supervisor")
     return result

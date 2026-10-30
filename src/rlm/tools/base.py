@@ -14,6 +14,8 @@ class ToolOutcome:
 
     content: str
     metric_events: list[BuiltinMetricEvent] = field(default_factory=list)
+    images: list[dict[str, str]] = field(default_factory=list)
+    """Images shown by the call, as ``{"mime": ..., "data": <base64>}``."""
 
 
 @dataclass
