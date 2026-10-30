@@ -94,6 +94,10 @@ class ExecutionPolicy(_ConfigModel):
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
     allow_git: bool = False
+    mcp_preload: list[str] = Field(default_factory=list)
+    """MCP servers whose tools are loaded into the kernel at its start, each a global by
+    its name (``<server>_<tool>``), as ``rlm.tools.load(server)`` gives them: for a small
+    catalog the agent uses at once. Others are found with ``rlm.tools.search``."""
 
 
 class RuntimeConfig(_ConfigModel):
