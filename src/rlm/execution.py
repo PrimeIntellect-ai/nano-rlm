@@ -182,8 +182,11 @@ class RemoteREPL(IPythonREPL):
             1, thread_name_prefix="rlm-control"
         )
         self._control_done: concurrent.futures.Future | None = None
+        self._control_closed = False
 
     def _control_call(self, method, timeout):
+        if self._control_closed:
+            return
         peer = self._peer
 
         def call():
@@ -281,6 +284,9 @@ class RemoteREPL(IPythonREPL):
                 self.transport.close()
                 self._executor.shutdown(wait=False)
 
+        if self._control_closed:
+            return
+        self._control_closed = True
         self._control.submit(close)
         self._control.shutdown(wait=False)
 

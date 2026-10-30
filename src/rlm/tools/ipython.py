@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -259,36 +260,37 @@ MAX_RECOVERY_ATTEMPTS = 3
 MAX_CELL_OUTPUT_BYTES = 1024 * 1024
 
 
-def kill_descendant_groups(pid: int) -> None:
-    """SIGKILL the process groups of `pid`'s descendants, read from /proc; a no-op
-    where there is none. The caller's own group is spared."""
+def kill_marked_groups(marker: str) -> None:
+    """SIGKILL the process group of every process whose environment holds `marker`,
+    read from /proc; a no-op where there is none. Reparented and detached processes
+    keep their environment, so this also reaches the commands of a dead kernel. The
+    caller's own group is spared."""
     try:
         entries = [entry for entry in os.listdir("/proc") if entry.isdigit()]
     except FileNotFoundError:
         return
-    parents: dict[int, list[int]] = {}
-    groups: dict[int, int] = {}
+    needle = marker.encode()
+    groups = set()
     for entry in entries:
         try:
-            with open(f"/proc/{entry}/stat") as stat:
-                # The command name can hold spaces and parentheses; fields follow it.
-                fields = stat.read().rsplit(")", 1)[1].split()
-        except (OSError, IndexError):
+            with open(f"/proc/{entry}/environ", "rb") as environ:
+                if needle not in environ.read().split(b"\0"):
+                    continue
+            groups.add(os.getpgid(int(entry)))
+        except OSError:
             continue
-        parents.setdefault(int(fields[1]), []).append(int(entry))
-        groups[int(entry)] = int(fields[2])
-    targets, pending = set(), [pid]
-    while pending:
-        for child in parents.get(pending.pop(), []):
-            targets.add(groups[child])
-            pending.append(child)
-    targets.discard(os.getpgrp())
-    for group in targets:
+    groups -= {0, 1, os.getpgrp()}
+    for group in groups:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(group, signal.SIGKILL)
 
 
+KERNEL_TOKEN_ENV = "RLM_KERNEL_TOKEN"
+
+
 class IPythonREPL:
+    _kernel_token: str | None = None
+
     """Persistent IPython kernel communicating via Jupyter protocol."""
 
     def __init__(
@@ -358,6 +360,9 @@ class IPythonREPL:
             self.kernel_env,
             private_dir=self._ipc_dir,
         )
+        # Marks every process the kernel starts, wherever it is reparented.
+        self._kernel_token = uuid.uuid4().hex
+        kernel_env[KERNEL_TOKEN_ENV] = self._kernel_token
         launcher = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
         launcher_dir = os.path.dirname(os.path.abspath(launcher))
         path_entries = kernel_env.get("PATH", "").split(os.pathsep)
@@ -557,9 +562,8 @@ import rlm
     def _kill_kernel_commands(self):
         """Kill the process groups the kernel's commands run in. Shell commands start
         sessions of their own, so killing the kernel's process group misses them."""
-        pid = getattr(self._km.provisioner, "pid", None) if self._km else None
-        if pid is not None:
-            kill_descendant_groups(pid)
+        if self._kernel_token is not None:
+            kill_marked_groups(f"{KERNEL_TOKEN_ENV}={self._kernel_token}")
 
     def restart_kernel(self):
         """Restart the kernel and restore the initial REPL state."""
