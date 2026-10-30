@@ -855,6 +855,7 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert initialized.field_meta == {
         CONTRACT_METADATA_KEY: True,
         "steering": {"supported": True},
+        "notify": {"supported": True},
     }
 
     created = await agent.new_session(
@@ -1113,6 +1114,7 @@ async def test_acp_stdio_lifecycle(tmp_path):
     assert initialized.field_meta == {
         CONTRACT_METADATA_KEY: True,
         "steering": {"supported": True},
+        "notify": {"supported": True},
     }
     assert created.field_meta is None
     assert closed.field_meta[SESSION_METADATA_KEY]["session_id"] == "wire-session"
@@ -1235,6 +1237,107 @@ async def test_steering_wakes_native_wait_after_tool_result(session):
         turn.cancel()
         await asyncio.gather(turn, return_exceptions=True)
         await engine.aclose()
+
+
+async def test_notice_wakes_native_wait_and_follows_the_tool_result(session):
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("wait", {"timeout": 300})]),
+            DummyMessage(content="notified"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )
+    assert (await engine.notify("DM from b1: hi", "d1"))["outcome"] == "promptRequired"
+    turn = asyncio.create_task(engine.prompt("wait for a mention"))
+
+    async def wake_and_finish():
+        while (
+            engine._supervisor is None
+            or engine._supervisor._invocations[engine._invocation_id].status
+            != "waiting"
+        ):
+            await asyncio.sleep(0.01)
+        receipt = await engine.notify("DM from b1: hi", "d1")
+        assert receipt == {"outcome": "delivered"}
+        assert await engine.notify("DM from b1: hi", "d1") == receipt
+        with pytest.raises(ValueError, match="different content"):
+            await engine.notify("changed", "d1")
+        assert (await turn).answer == "notified"
+
+    try:
+        await asyncio.wait_for(wake_and_finish(), timeout=10)
+        messages = client.calls[-1]["messages"]
+        index = next(
+            i
+            for i, m in enumerate(messages)
+            if "DM from b1: hi" in str(m.get("content"))
+        )
+        assert messages[index - 1]["role"] == "tool"
+        assert messages[index]["role"] == "user"
+        assert 'kind="client"' in messages[index]["content"], "a runtime notice"
+        assert not any(
+            m.get("content") == "DM from b1: hi"
+            for m in History(engine.session.dir).user_messages()
+        ), "not a user message"
+    finally:
+        turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+        await engine.aclose()
+
+
+async def test_a_notice_that_finds_the_final_reply_says_no_turn_runs(
+    session, monkeypatch
+):
+    client = DummyClient([DummyMessage(content="answer")])
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    create = client.create
+
+    async def blocked_create(**kwargs):
+        entered.set()
+        await release.wait()
+        return await create(**kwargs)
+
+    monkeypatch.setattr(client, "create", blocked_create)
+    turn = asyncio.create_task(engine.prompt("work"))
+    try:
+        await asyncio.wait_for(entered.wait(), 20)
+        receipt = asyncio.create_task(engine.notify("late DM", "d2"))
+        await asyncio.sleep(0)
+        release.set()
+        assert (await turn).answer == "answer", "a notice never extends a turn"
+        assert await receipt == {
+            "outcome": "promptRequired",
+            "reason": "noRunningTurn",
+        }
+    finally:
+        turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+        await engine.aclose()
+
+
+async def test_acp_notify_route(tmp_path):
+    agent = RLMACPAgent()
+    initialized = await _initialize(agent)
+    assert initialized.field_meta["notify"] == {"supported": True}
+    session = await _new_session(agent, str(tmp_path))
+    try:
+        params = {
+            "sessionId": session.session_id,
+            "prompt": [{"type": "text", "text": "DM"}],
+        }
+        assert await agent.ext_method("session/notify", params) == {
+            "outcome": "promptRequired",
+            "reason": "noRunningTurn",
+        }
+        with pytest.raises(RequestError):
+            await agent.ext_method("session/notify", {**params, "prompt": []})
+    finally:
+        await agent.shutdown()
 
 
 async def test_steering_unconsumed_at_budget_boundary(session, monkeypatch):

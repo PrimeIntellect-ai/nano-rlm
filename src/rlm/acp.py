@@ -293,7 +293,11 @@ class RLMACPAgent(Agent):
                 ),
             ),
             agent_info=Implementation(name="rlm", title="RLM", version=version("rlm")),
-            field_meta={CONTRACT_METADATA_KEY: True, "steering": {"supported": True}},
+            field_meta={
+                CONTRACT_METADATA_KEY: True,
+                "steering": {"supported": True},
+                "notify": {"supported": True},
+            },
         )
 
     async def new_session(
@@ -415,7 +419,9 @@ class RLMACPAgent(Agent):
             )
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        if method != "session/steering":
+        # session/steering inserts a user message; session/notify shows a runtime
+        # notice after the tool results (RLMEngine.notify). Both take the same params.
+        if method not in ("session/steering", "session/notify"):
             raise RequestError.method_not_found(method)
         session_id = params.get("sessionId")
         if not isinstance(session_id, str):
@@ -447,6 +453,8 @@ class RLMACPAgent(Agent):
                 {"reason": "invalid steering text or messageId"}
             )
         try:
+            if method == "session/notify":
+                return await state.engine.notify(text, message_id)
             return await state.engine.steer(text, message_id)
         except ValueError as error:
             raise RequestError.invalid_params({"reason": str(error)}) from error
