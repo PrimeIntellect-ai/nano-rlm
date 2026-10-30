@@ -5,6 +5,7 @@ provenance for conversion to chat templates with distinct roles.
 
     <runtime_event kind="notice" unread="2" hints="env-prefix">...</runtime_event>
     <agent_input from="parent" agent="a1b2c3" kind="instruction">...</agent_input>
+    <agent_input from="peer" agent="agent-2" kind="dm">...</agent_input>
 
 The human task prompt is never wrapped. Tool output keeps its own role.
 """
@@ -43,14 +44,17 @@ def runtime_event(kind: str, text: str, **attrs: object) -> tuple[dict, dict]:
     return {"role": "user", "content": content}, provenance
 
 
-def agent_input(text: str, *, agent: str | None, kind: str) -> tuple[dict, dict]:
-    """A user-role message carrying a parent agent's instruction (kind: instruction or
-    steer), plus its provenance record."""
-    provenance = {"source": "agent", "from": "parent", "kind": kind}
+def agent_input(
+    text: str, *, agent: str | None, kind: str, sender: str = "parent"
+) -> tuple[dict, dict]:
+    """A user-role message carrying another agent's input, plus its provenance record.
+
+    sender: parent (kind: instruction or steer) or peer (kind: dm, broadcast or reply)."""
+    provenance = {"source": "agent", "from": sender, "kind": kind}
     if agent:
         provenance["agent"] = agent
     content = (
-        f'<{AGENT_INPUT} from="parent"{_attrs({"agent": agent, "kind": kind})}>\n'
+        f'<{AGENT_INPUT} from="{sender}"{_attrs({"agent": agent, "kind": kind})}>\n'
         f"{text}\n</{AGENT_INPUT}>"
     )
     return {"role": "user", "content": content}, provenance

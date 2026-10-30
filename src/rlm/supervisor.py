@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import heapq
 import itertools
 import json
+import logging
+import math
 import os
 import re
 import secrets
@@ -45,9 +48,18 @@ from rlm.shell_jobs import (
     ShellJobs,
 )
 from rlm.service_manager import ServiceManager
+from rlm.provenance import agent_input, runtime_event
+from rlm.shared_board import SharedBoard
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
 from rlm.tools.git_block import find_blocked_command, refusal
+from rlm.history import History
+from rlm.isolation import (
+    ProcessIdentity,
+    agent_identity,
+    require_root,
+    share_with_agents,
+)
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
 from rlm.types import AgentResult, ProgrammaticToolCallStats, RLMResult, TokenUsage
@@ -55,6 +67,8 @@ from rlm.types import AgentResult, ProgrammaticToolCallStats, RLMResult, TokenUs
 # Per-agent limits for runtime hints.
 MAX_LONG_RUN_NOTES = 3
 MAX_WAIT_HELD_JOB_HINTS = 2
+# Control characters an answer only holds when Python ate a LaTeX backslash (\a, \b, \f, \v, \r).
+SWALLOWED_ESCAPES = frozenset("\a\b\f\v\r")
 # shell.completed events carry this much of the end of the output.
 COMPLETED_TAIL_BYTES = 4 * 1024
 # Hint once per variable after this many command prefixes.
@@ -83,6 +97,41 @@ def _leading_env_assignments(command: str) -> list[tuple[str, str]]:
     return out
 
 
+logger = logging.getLogger(__name__)
+
+_AUTO_NAME_RE = re.compile(r"agent-\d+")
+
+
+def _describe_membership(event: dict) -> str:
+    name = event["agent"]
+    kind = event["type"]
+    if kind == "joined":
+        if event.get("parent"):
+            return f"{name} joined (spawned by {event['parent']})"
+        return f"{name} joined as a founder"
+    if kind == "retired":
+        return f"{name} retired to free a slot (a DM revives it)"
+    if kind == "revived":
+        return f"{name} was revived"
+    if kind == "answer":
+        return f"{name} submitted episode answer revision {event['revision']}"
+    if kind == "published":
+        return f"{name} published {event['artifact']} revision {event['revision']}"
+    return f"{name} ended ({event['status']})"
+
+
+def _message_text(message: dict) -> str:
+    """A history message as text: its content plus any tool-call arguments."""
+    content = message.get("content")
+    text = (
+        content if isinstance(content, str) else json.dumps(content) if content else ""
+    )
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        text += f"\n[{function.get('name')}] {function.get('arguments', '')}"
+    return text.strip()
+
+
 if TYPE_CHECKING:
     from rlm.engine import RLMEngine
 
@@ -91,6 +140,16 @@ MAX_BROKER_CONNECTIONS = 128
 BROKER_INITIAL_FRAME_TIMEOUT_SECONDS = 5
 MAX_INBOX_EVENTS = 10_000
 MAX_MESSAGE_BYTES = 65_536
+# Population agents in these states hold a live slot; "retiring" also holds one until
+# its cleanup finishes. Retired agents keep their conversation and can be revived.
+RESIDENT = frozenset({"starting", "running", "waiting", "idle"})
+ENDED = frozenset({"completed", "failed", "cancelled"})
+# Agents in these states can still act, so the population is not quiescent.
+ACTIVE = frozenset({"starting", "running", "waiting", "retiring"})
+# Inputs pushed into a population agent's conversation at its next model boundary.
+PEER_INPUTS = frozenset({"dm", "broadcast", "reply"})
+MAX_NOTICE_EVENTS = 8
+HISTORY_TEXT_BYTES = 4096
 
 
 @dataclass
@@ -136,8 +195,18 @@ class _Invocation:
     wait_hints: int = 0  # wait-held-job hints spent
     turns: int = 0
     new_tokens: int = 0
+    prompt_tokens: int = 0
+    compactions: int = 0
+    completion_tokens: int = 0
     unread_announced: int = 0  # unread count in the last inbox notice
     changed: asyncio.Event = field(default_factory=asyncio.Event)
+    # Population mode
+    idle_since: float | None = None  # monotonic start of the current idle period
+    kernel_generation: int = 0
+    requesters: list[str] = field(default_factory=list)  # DM senders awaiting a reply
+    failure: BaseException | None = None
+    identity: ProcessIdentity | None = None  # per-agent process isolation
+    membership_seen: int = 0  # population events already announced to this agent
 
 
 @dataclass
@@ -272,11 +341,40 @@ class SessionTreeSupervisor:
         self._tool_stats: dict[str, ProgrammaticToolCallStats] = {}
         self._capabilities = {root.capability: root_id}
         self._inference = _InferencePool(runtime_config.policy.max_concurrent_subagents)
+        # Population mode: the root record stands for the episode, not a model agent.
+        self._population = runtime_config.policy.population
+        self._population_open = False
+        self._episode_task = ""
+        self._admitted = 0
+        self._reserved_births = 0
+        self._peak_live = 0
+        self._counters = {
+            key: 0
+            for key in (
+                "births_denied",
+                "retirements",
+                "revivals",
+                "dms",
+                "broadcasts",
+                "replies",
+                "answer_submissions",
+                "artifact_publications",
+            )
+        }
+        self._membership: list[dict] = []
+        self._receipts: dict[tuple[str, str], tuple[str, asyncio.Future]] = {}
+        self._deliveries: dict[str, dict[str, Any]] = {}  # message id -> receipt
+        self._artifacts: dict[Path, dict[str, Any]] = {}  # resolved path -> state
+        self._board: SharedBoard | None = None
+        self._answer: dict[str, Any] = {"text": "", "revision": 0, "author": None}
+        self._activity = asyncio.Event()
 
     @asynccontextmanager
     async def inference_slot(self, invocation_id: str) -> AsyncIterator[None]:
         agent = self._invocations[invocation_id]
-        await self._inference.acquire(agent.runtime_config.invocation.depth)
+        # Peers queue FIFO: depth priority would favor founders over their offspring.
+        depth = 0 if self._population else agent.runtime_config.invocation.depth
+        await self._inference.acquire(depth)
         try:
             yield
         finally:
@@ -296,20 +394,31 @@ class SessionTreeSupervisor:
         """Live tree-total NEW tokens (completion + uncached prompt, every engine)."""
         return self._total_tokens
 
-    def record_call(self, tokens: int, agent_id: str | None = None) -> None:
+    def record_call(
+        self, tokens: int, agent_id: str | None = None, usage: TokenUsage | None = None
+    ) -> None:
         """Count one work-loop model call: a tree turn plus its new tokens, and with the
         calling agent's id its own counters as well."""
         self._total_turns += 1
+        self.record_usage(tokens, agent_id, usage)
+        agent = self._invocations.get(agent_id) if agent_id else None
+        if agent is not None:
+            agent.turns += 1
+            agent.new_tokens += tokens
+
+    def record_compaction(self, agent_id: str) -> None:
+        self._invocations[agent_id].compactions += 1
+
+    def record_usage(
+        self, tokens: int, agent_id: str | None = None, usage: TokenUsage | None = None
+    ) -> None:
+        """Add new tokens without a turn (compaction/checkpoint calls); usage also
+        counts toward the calling agent's billed prompt and completion tokens."""
         self._total_tokens += tokens
         agent = self._invocations.get(agent_id) if agent_id else None
-        if agent is None:
-            return
-        agent.turns += 1
-        agent.new_tokens += tokens
-
-    def record_usage(self, tokens: int) -> None:
-        """Add new tokens without a turn (compaction/checkpoint calls)."""
-        self._total_tokens += tokens
+        if agent is not None and usage is not None:
+            agent.prompt_tokens += usage.prompt_tokens
+            agent.completion_tokens += usage.completion_tokens
 
     @property
     def active_calls(self) -> int:
@@ -329,6 +438,21 @@ class SessionTreeSupervisor:
             self._accept_connection, path=self._socket_path
         )
         os.chmod(self._socket_path, 0o600)
+        if self._population:
+            root = self._invocations[self.root_id]
+            if self._population.process_isolation == "per_agent":
+                require_root()
+                share_with_agents(Path(root.cwd))
+                # Agents connect as their own uids; their capabilities still authenticate.
+                os.chmod(self._broker_dir, 0o711)
+                os.chmod(self._socket_path, 0o666)
+            self._board = SharedBoard(root.session.dir / "board.md")
+            for path in self._population.artifacts:
+                self._artifacts[(Path(root.cwd) / path).resolve()] = {
+                    "path": path,
+                    "revision": 0,
+                    "author": None,
+                }
 
     def write_brokered_skill_modules(
         self, dest_dir: Path, reserved_names: Iterable[str] = ()
@@ -434,12 +558,23 @@ class SessionTreeSupervisor:
     def agent_context(self, invocation_id: str) -> dict[str, Any]:
         """Runtime identity for this agent's prompt, without broker credentials."""
         agent = self._invocations[invocation_id]
-        return {
+        context = {
             "id": agent.id,
             "parent_id": agent.parent_id,
             "name": agent.name,
             "persistent": agent.persistent,
         }
+        if self._population:
+            parent = self._invocations.get(agent.parent_id)
+            context["population"] = {
+                "founder": agent.parent_id is None,
+                "parent_name": parent.name if parent else None,
+                "task": self._episode_task,
+                "drafts": str(agent.session.dir / "drafts"),
+                "job_hold_seconds": agent.runtime_config.policy.exec_timeout,
+                **self._population.model_dump(),
+            }
+        return context
 
     def _info(self, agent: _Invocation) -> dict[str, Any]:
         return {
@@ -522,12 +657,821 @@ class SessionTreeSupervisor:
             parent_session_id=parent.id,
             spawned_by_request_id=child.spawned_by_request_id,
         )
-        child.runner = asyncio.create_task(self._run_child(child))
-        self._tasks.add(child.runner)
-        self._child_tasks.add(child.runner)
-        child.runner.add_done_callback(self._tasks.discard)
-        child.runner.add_done_callback(self._child_tasks.discard)
+        self._start_runner(child)
         return child
+
+    # --- Population mode ---------------------------------------------------------
+
+    def _peers(self) -> list[_Invocation]:
+        return [
+            agent for agent in self._invocations.values() if agent.id != self.root_id
+        ]
+
+    def _used_slots(self) -> int:
+        return sum(
+            agent.status in RESIDENT or agent.status == "retiring"
+            for agent in self._peers()
+        )
+
+    def _job_owners(self) -> set[str]:
+        return {
+            job.info.owner_id
+            for job in self._shell_jobs.jobs.values()
+            if job.finished is None
+        }
+
+    def _awaiting_replies(self) -> set[str]:
+        """Agents whose direct message to a live agent has not been answered yet."""
+        awaiting = set()
+        for agent in self._peers():
+            if agent.status in ENDED:
+                continue
+            awaiting.update(agent.requesters)
+            awaiting.update(
+                event["sender_id"]
+                for event in agent.instructions
+                if event["type"] == "dm"
+            )
+        return awaiting
+
+    def _lookup(self, name_or_id: str) -> _Invocation:
+        for agent in self._peers():
+            if name_or_id in (agent.id, agent.name):
+                return agent
+        raise ValueError(f"no agent named {name_or_id!r} in this population")
+
+    def population_counts(self) -> dict[str, Any]:
+        policy = self._population
+        peers = self._peers()
+        used = self._used_slots()
+        return {
+            "live": used,
+            "capacity": policy.max_live_agents,
+            "available_slots": max(policy.max_live_agents - used, 0),
+            "idle": sum(agent.status == "idle" for agent in peers),
+            "retired": sum(agent.status == "retired" for agent in peers),
+            "ended": sum(agent.status in ENDED for agent in peers),
+            "admitted": self._admitted,
+            "max_total_agents": policy.max_total_agents,
+            "remaining_total_agents": policy.max_total_agents
+            - self._admitted
+            - self._reserved_births,
+            "admission_open": self._population_open,
+        }
+
+    def _announce(self, kind: str, agent: _Invocation, **fields: Any) -> None:
+        """Record a membership change; peers see it as a notice at their next model call."""
+        event = {
+            "seq": len(self._membership) + 1,
+            "type": kind,
+            "agent": agent.name,
+            "agent_id": agent.id,
+            "time": time.time(),
+            **fields,
+            **self.population_counts(),
+        }
+        self._membership.append(event)
+        root_dir = self._invocations[self.root_id].session.dir
+        with (root_dir / "population.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event) + "\n")
+        self._activity.set()
+
+    def _membership_notice(self, agent: _Invocation) -> str | None:
+        events = [
+            event
+            for event in self._membership[agent.membership_seen :]
+            if event["agent_id"] != agent.id
+        ]
+        agent.membership_seen = len(self._membership)
+        if not events:
+            return None
+        shown = events[-MAX_NOTICE_EVENTS:]
+        parts = [_describe_membership(event) for event in shown]
+        if len(events) > len(shown):
+            parts.insert(
+                0,
+                f"{len(events) - len(shown)} earlier changes (see rlm.population.events())",
+            )
+        counts = self.population_counts()
+        return (
+            "Population: "
+            + "; ".join(parts)
+            + f". Now {counts['live']}/{counts['capacity']} live, "
+            f"{counts['admitted']}/{counts['max_total_agents']} admitted."
+        )
+
+    def _check_birth(self, name: str | None) -> None:
+        policy = self._population
+        if not self._population_open:
+            raise RuntimeError("population_closed: the episode is ending")
+        if self._budget_exhausted(self._invocations[self.root_id]):
+            raise RuntimeError(
+                "budget_exhausted: the episode's token or turn budget is spent"
+            )
+        if self._admitted + self._reserved_births >= policy.max_total_agents:
+            raise RuntimeError(
+                f"population_exhausted: all {policy.max_total_agents} admissions of "
+                "this episode are used, so no agent can be born. Continue with the "
+                "existing agents."
+            )
+        if name is not None:
+            if _AUTO_NAME_RE.fullmatch(name):
+                raise ValueError(
+                    "names of the form agent-<number> are assigned automatically"
+                )
+            if any(name in (agent.name, agent.id) for agent in self._peers()):
+                raise ValueError(f"agent name {name!r} is already taken")
+
+    def _claim_retiree(self, caller: _Invocation) -> _Invocation:
+        """Mark the longest-idle agent past its grace period as retiring, or fail at once."""
+        policy = self._population
+        now = time.monotonic()
+        busy = self._job_owners() | self._awaiting_replies()
+        idle = [
+            agent
+            for agent in self._peers()
+            if agent.status == "idle"
+            and agent is not caller
+            and not agent.instructions
+            and agent.id not in busy
+        ]
+        eligible = [
+            agent
+            for agent in idle
+            if now - agent.idle_since >= policy.idle_grace_seconds
+        ]
+        if eligible:
+            retiree = min(eligible, key=lambda agent: (agent.idle_since, agent.id))
+            retiree.status = "retiring"
+            return retiree
+        self._counters["births_denied"] += 1
+        counts = self.population_counts()
+        if idle:
+            wait = min(
+                policy.idle_grace_seconds - (now - agent.idle_since) for agent in idle
+            )
+            reason = (
+                f"every idle agent is within its {policy.idle_grace_seconds:g}s grace "
+                f"period; a slot can be reclaimed in about {math.ceil(wait)}s"
+            )
+        else:
+            reason = "no agent is idle"
+        raise RuntimeError(
+            f"population_full: {counts['live']}/{counts['capacity']} agents are live and "
+            f"{reason}. Continue the work yourself or retry after a membership change."
+        )
+
+    async def _retire(self, agent: _Invocation) -> None:
+        """Release a retiring agent's kernel, jobs and subscriptions; keep its conversation."""
+        self._capabilities.pop(agent.capability, None)
+        results = await asyncio.gather(
+            self._subscriptions.close(agent.id),
+            self._shell_jobs.close(agent.id),
+            return_exceptions=True,
+        )
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if agent.engine is not None:
+            try:
+                await agent.engine.release_kernel()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            # An agent whose resources could not be released cannot be revived safely.
+            agent.cleanup_error = "; ".join(str(e) or type(e).__name__ for e in errors)
+            agent.status = "failed"
+            agent.error = f"retirement cleanup failed: {agent.cleanup_error}"
+            agent.failure = errors[0]
+            self._announce("ended", agent, status=agent.status, error=agent.error)
+            raise errors[0]
+
+    def _finish_retirement(self, agent: _Invocation) -> bool:
+        """Free a retiring agent's slot once its cleanup succeeded; False if it ended meanwhile."""
+        if agent.status != "retiring":
+            return False
+        agent.status = "retired"
+        agent.idle_since = None
+        self._counters["retirements"] += 1
+        agent.session.write_meta(**self._info(agent))
+        return True
+
+    def _settle_retirement(self, agent: _Invocation, task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is None:
+            if self._finish_retirement(agent):
+                self._announce("retired", agent, reason="capacity")
+
+    async def _admit(
+        self, parent: _Invocation, task: str, name: str | None, request_id: str | None
+    ) -> _Invocation:
+        """Admit one spawned agent, retiring an idle peer first if the live cap is full."""
+        self._check_birth(name)
+        if self._used_slots() >= self._population.max_live_agents:
+            retiree = self._claim_retiree(parent)
+            self._reserved_births += 1
+            retirement = asyncio.create_task(self._retire(retiree))
+            self._tasks.add(retirement)
+            retirement.add_done_callback(self._tasks.discard)
+            try:
+                await asyncio.shield(retirement)
+            except asyncio.CancelledError:
+                # The caller left; the slot frees once cleanup finishes.
+                retirement.add_done_callback(partial(self._settle_retirement, retiree))
+                raise
+            finally:
+                self._reserved_births -= 1
+            # Hand the slot over without yielding, so no other spawn can take it, and
+            # announce the retirement with the counts after the handoff.
+            retired = self._finish_retirement(retiree)
+            try:
+                self._check_birth(name)
+                self._total_calls += 1
+                return self._create_agent(
+                    task, name, parent=parent, spawned_by_request_id=request_id
+                )
+            finally:
+                if retired:
+                    self._announce("retired", retiree, reason="capacity")
+        self._total_calls += 1
+        return self._create_agent(
+            task, name, parent=parent, spawned_by_request_id=request_id
+        )
+
+    def _create_agent(
+        self,
+        task: str,
+        name: str | None,
+        *,
+        parent: _Invocation | None,
+        spawned_by_request_id: str | None = None,
+    ) -> _Invocation:
+        root = self._invocations[self.root_id]
+        source = parent or root
+        agent = _Invocation(
+            id=uuid.uuid4().hex,
+            parent_id=parent.id if parent else None,
+            capability=secrets.token_urlsafe(32),
+            session=Session(Session.child_dir(root.session.dir)),
+            runtime_config=source.runtime_config.model_copy(
+                update={"invocation": source.runtime_config.invocation.child()}
+            )
+            if parent
+            else root.runtime_config,
+            cwd=source.cwd,
+            mcp_servers=source.mcp_servers,
+            spawned_by_request_id=spawned_by_request_id,
+            name=name or f"agent-{self._admitted + 1}",
+            task=task,
+            persistent=True,
+            requesters=[parent.id] if parent else [],
+            membership_seen=len(self._membership),
+        )
+        try:
+            agent.session.write_meta(**self._info(agent))
+            if self._artifacts:
+                (agent.session.dir / "drafts").mkdir()
+            if self._population.process_isolation == "per_agent":
+                agent.identity = agent_identity(self._admitted + 1, agent.session.dir)
+            if parent is not None:
+                parent.session.log_sub_spawn(
+                    agent.session.dir.name, "rlm.agent.spawn", prompt=task
+                )
+        except BaseException:
+            agent.session.close()
+            raise
+        self._admitted += 1
+        self._invocations[agent.id] = agent
+        self._parents[agent.id] = agent.parent_id
+        self._capabilities[agent.capability] = agent.id
+        self.semantic_edges.register_session(
+            agent.id,
+            parent_session_id=agent.parent_id,
+            spawned_by_request_id=spawned_by_request_id,
+        )
+        self._peak_live = max(self._peak_live, self._used_slots())
+        self._announce("joined", agent, parent=parent.name if parent else None)
+        self._start_runner(agent)
+        return agent
+
+    def admit_founders(self, task: str) -> None:
+        """Open the population on the episode task and admit every founder at once."""
+        if self._population_open or self._admitted:
+            raise RuntimeError("the population has already started")
+        self._episode_task = task
+        self._population_open = True
+        count = self._population.founders
+        founders = [
+            self._create_agent(
+                f"You are agent-{index + 1}, one of {count} founders admitted at the "
+                "start of this episode. Begin work on the episode task.",
+                None,
+                parent=None,
+            )
+            for index in range(count)
+        ]
+        # Founders know each other from their prompts; notices start after the cohort.
+        for founder in founders:
+            founder.membership_seen = len(self._membership)
+
+    def close_population(self) -> None:
+        """Close admission and stop waking agents; the episode is ending."""
+        self._population_open = False
+
+    async def stop_population(self) -> None:
+        """Stop every agent; afterwards no model call or tool of the episode runs."""
+        self.close_population()
+        peers = self._peers()
+        results = await asyncio.gather(
+            *(self._terminate(agent) for agent in peers), return_exceptions=True
+        )
+        for agent, result in zip(peers, results):
+            if isinstance(result, BaseException):
+                logger.warning("rlm: cleanup of %s failed: %s", agent.name, result)
+
+    def process_identity(self, invocation_id: str) -> ProcessIdentity | None:
+        return self._invocations[invocation_id].identity
+
+    def _process_env(self, agent: _Invocation, request: dict) -> dict[str, str]:
+        """Environment for an agent's shell command or service."""
+        return {
+            **build_kernel_env(dict(agent.runtime_config.kernel_env)),
+            **(agent.identity.env() if agent.identity else {}),
+            **agent.shell_env,
+            **(request.get("env") or {}),
+        }
+
+    def population_failures(self) -> list[BaseException]:
+        return [agent.failure for agent in self._peers() if agent.failure is not None]
+
+    @property
+    def activity(self) -> asyncio.Event:
+        """Set whenever an agent finishes a turn or membership changes."""
+        return self._activity
+
+    def _job_holds(self) -> dict[str, float]:
+        """Idle agents that an unfinished shell job of theirs may still wake, with the
+        monotonic time the hold ends: exec_timeout after the agent went idle."""
+        holds = {}
+        for agent_id in self._job_owners():
+            agent = self._invocations[agent_id]
+            if (
+                agent.status == "idle"
+                and not self._budget_exhausted(agent)
+                and not self.spent_agent_turns(agent_id)
+            ):
+                holds[agent_id] = (
+                    agent.idle_since + agent.runtime_config.policy.exec_timeout
+                )
+        return holds
+
+    def population_quiescent(self) -> bool:
+        """True when no agent can act again: none runs, starts, retires or has input
+        queued, and no idle agent's shell job may still wake it."""
+        now = time.monotonic()
+        held = {agent_id for agent_id, end in self._job_holds().items() if now < end}
+        return all(
+            agent.status not in ACTIVE
+            and (agent.runner is None or agent.runner.done())
+            and not (agent.status == "idle" and agent.instructions)
+            and agent.id not in held
+            for agent in self._peers()
+        )
+
+    def population_recheck_at(self) -> float | None:
+        """When the earliest job hold ends: quiescence can change then without activity."""
+        now = time.monotonic()
+        return min(
+            (end for end in self._job_holds().values() if end > now), default=None
+        )
+
+    def all_agents_turn_capped(self) -> bool:
+        return all(self.spent_agent_turns(agent.id) for agent in self._peers())
+
+    def _revive(self, agent: _Invocation) -> None:
+        """Give a retired agent a live slot again; its next turn starts a fresh kernel."""
+        policy = self._population
+        if agent.released:
+            raise RuntimeError(f"{agent.name} has ended")
+        if self._used_slots() >= policy.max_live_agents:
+            hint = (
+                " Its history is readable with rlm.population.history()."
+                if policy.allow_agent_lookup_agent_history
+                else ""
+            )
+            raise RuntimeError(
+                f"retired_no_capacity: {agent.name} is retired and no slot is free "
+                f"({self._used_slots()}/{policy.max_live_agents} live), so the message "
+                f"was not delivered. Retry after a membership change or continue without it.{hint}"
+            )
+        if self._budget_exhausted(agent):
+            raise RuntimeError(
+                "budget_exhausted: the episode's token or turn budget is spent"
+            )
+        agent.capability = secrets.token_urlsafe(32)
+        self._capabilities[agent.capability] = agent.id
+        agent.kernel_generation += 1
+        agent.status = "idle"
+        agent.idle_since = time.monotonic()
+        self._counters["revivals"] += 1
+        self._peak_live = max(self._peak_live, self._used_slots())
+        self._announce("revived", agent)
+
+    def _message(
+        self,
+        sender: _Invocation,
+        target: _Invocation,
+        kind: str,
+        text: str,
+        request_id: str | None,
+    ) -> dict:
+        """Queue a message for target's next model boundary, reviving it if retired."""
+        if not self._population_open:
+            raise RuntimeError("population_closed: the episode is ending")
+        if target is sender:
+            raise ValueError("an agent cannot message itself")
+        if target.status in ENDED:
+            raise RuntimeError(f"{target.name} has ended ({target.status})")
+        if target.status == "retiring":
+            raise RuntimeError(
+                f"agent_retiring: {target.name} is releasing its slot; retry shortly"
+            )
+        if self.spent_agent_turns(target.id):
+            raise RuntimeError(
+                f"agent_turns_exhausted: {target.name} made all its model calls and stopped"
+            )
+        if len(target.instructions) >= MAX_INBOX_EVENTS:
+            raise RuntimeError(f"{target.name}'s message queue is full")
+        event = self._event(sender, kind, text, request_id)
+        if target.status == "retired":
+            self._revive(target)
+        self._record_event(target, event)
+        target.instructions.append(event)
+        self._deliveries[event["id"]] = {
+            "message_id": event["id"],
+            "sender_id": sender.id,
+            "to": target.name,
+            "kind": kind,
+            "status": "accepted",
+            "reason": None,
+        }
+        self._wake_agent(target)
+        return event
+
+    def _delivery(self, sender: _Invocation, message_id: str) -> dict:
+        receipt = self._deliveries.get(message_id)
+        if receipt is None or receipt["sender_id"] != sender.id:
+            raise ValueError("no message with this id was sent by you")
+        return {key: value for key, value in receipt.items() if key != "sender_id"}
+
+    async def _once(
+        self, sender: _Invocation, request_id: str | None, payload: Any, operation
+    ) -> Any:
+        """Run operation() once per sender and request_id. A retry, even one racing the
+        first call, gets the first outcome, including its error."""
+        if request_id is None:
+            return await operation()
+        key = (sender.id, request_id)
+        fingerprint = json.dumps(payload, sort_keys=True)
+        if key in self._receipts:
+            previous, outcome = self._receipts[key]
+            if previous != fingerprint:
+                raise ValueError("this request id was already used for another request")
+        else:
+            outcome = asyncio.ensure_future(operation())
+            self._receipts[key] = (fingerprint, outcome)
+        return await asyncio.shield(outcome)
+
+    async def _dm(self, sender, scope_id, target_name, text, message_id) -> dict:
+        async def send() -> dict:
+            target = self._lookup(target_name)
+            revived = target.status == "retired"
+            event = self._message(
+                sender, target, "dm", text, self._scopes[scope_id].request_id
+            )
+            self._counters["dms"] += 1
+            return {
+                "message_id": event["id"],
+                "to": target.name,
+                "status": "accepted",
+                "revived": revived,
+            }
+
+        return await self._once(sender, message_id, ["dm", target_name, text], send)
+
+    async def _broadcast(self, sender, scope_id, text, message_id) -> dict:
+        async def send() -> dict:
+            delivered, rejected = [], []
+            for target in self._peers():
+                if target is sender or target.status not in RESIDENT:
+                    continue
+                try:
+                    event = self._message(
+                        sender,
+                        target,
+                        "broadcast",
+                        text,
+                        self._scopes[scope_id].request_id,
+                    )
+                    delivered.append({"to": target.name, "message_id": event["id"]})
+                except RuntimeError as exc:
+                    rejected.append({"to": target.name, "reason": str(exc)})
+            self._counters["broadcasts"] += 1
+            return {"delivered": delivered, "rejected": rejected}
+
+        return await self._once(sender, message_id, ["broadcast", text], send)
+
+    def _reply(self, agent: _Invocation) -> None:
+        """Push a finished turn's answer to the agents whose messages it answered."""
+        requesters, agent.requesters = agent.requesters, []
+        answer = agent.result.answer if agent.result is not None else ""
+        if not answer:
+            return
+        data = answer.encode()
+        if len(data) > MAX_MESSAGE_BYTES // 2:
+            answer = "[answer truncated to its end]\n" + data[
+                -(MAX_MESSAGE_BYTES // 2) :
+            ].decode(errors="ignore")
+        for requester_id in requesters:
+            target = self._invocations[requester_id]
+            try:
+                self._message(
+                    agent,
+                    target,
+                    "reply",
+                    answer,
+                    self.semantic_edges.last_request_id(agent.id),
+                )
+                self._counters["replies"] += 1
+            except (RuntimeError, ValueError) as exc:
+                self._record_event(
+                    agent,
+                    {
+                        "type": "reply_undelivered",
+                        "to": target.name,
+                        "reason": str(exc),
+                    },
+                )
+
+    def _submit_answer(
+        self, agent: _Invocation, text: str, expected_revision: int
+    ) -> dict:
+        if not self._population_open:
+            raise RuntimeError("population_closed: the episode answer is frozen")
+        current = self._answer
+        if expected_revision != current["revision"]:
+            raise RuntimeError(
+                f"answer_conflict: you expected revision {expected_revision} but the "
+                f"episode answer is at revision {current['revision']} (by "
+                f"{current['author']}). Read it with rlm.population.answer() and "
+                "resubmit only if yours is better."
+            )
+        if escaped := sorted({repr(c) for c in text if c in SWALLOWED_ESCAPES}):
+            raise ValueError(
+                f"the answer contains control characters {', '.join(escaped)}: Python read "
+                "a LaTeX backslash as an escape (\\b in \\boxed, \\f in \\frac, ...). "
+                'Pass the text as a raw string, e.g. r"\\boxed{\\frac{1}{2}}".'
+            )
+        if text == current["text"]:
+            return {"revision": current["revision"], "changed": False}
+        self._answer = {
+            "text": text,
+            "revision": current["revision"] + 1,
+            "author": agent.name,
+        }
+        self._counters["answer_submissions"] += 1
+        self._announce("answer", agent, revision=self._answer["revision"])
+        return {"revision": self._answer["revision"], "changed": True}
+
+    def _declared_artifact(self, path: str) -> tuple[Path, dict[str, Any]]:
+        root = self._invocations[self.root_id]
+        resolved = (Path(root.cwd) / path).resolve()
+        if resolved not in self._artifacts:
+            declared = [state["path"] for state in self._artifacts.values()]
+            raise ValueError(
+                f"{path!r} is not a final artifact of this episode: {declared}"
+            )
+        return resolved, self._artifacts[resolved]
+
+    def _artifact_status(self, path: str) -> dict:
+        resolved, state = self._declared_artifact(path)
+        data = resolved.read_bytes() if resolved.is_file() else None
+        return {
+            "path": state["path"],
+            "revision": state["revision"],
+            "author": state["author"],
+            "exists": data is not None,
+            "bytes": len(data) if data is not None else 0,
+            "sha256": hashlib.sha256(data).hexdigest() if data is not None else None,
+        }
+
+    async def _publish_artifact(
+        self, agent: _Invocation, path: str, candidate: str, expected_revision: int
+    ) -> dict:
+        """Copy a complete candidate over a final artifact if nobody published since
+        expected_revision. The bytes are read once, so later draft edits cannot leak in."""
+        if not self._population_open:
+            raise RuntimeError("population_closed: the final artifacts are frozen")
+        resolved, state = self._declared_artifact(path)
+        if expected_revision != state["revision"]:
+            raise RuntimeError(
+                f"artifact_conflict: you expected revision {expected_revision} of "
+                f"{state['path']} but it is at revision {state['revision']} (by "
+                f"{state['author']}). Read it again and publish only an improvement."
+            )
+        source = (Path(agent.cwd) / candidate).resolve()
+        if source == resolved:
+            raise ValueError("publish a draft, not the final path itself")
+        # The supervisor reads as root: an isolated agent publishes only its own drafts.
+        drafts = (agent.session.dir / "drafts").resolve()
+        if agent.identity is not None and not source.is_relative_to(drafts):
+            raise PermissionError(
+                f"publish a draft from your drafts directory {drafts}"
+            )
+        data = source.read_bytes()
+        if resolved.is_file() and resolved.read_bytes() == data:
+            return {"revision": state["revision"], "changed": False}
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        tmp = resolved.with_name(f".{resolved.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, resolved)
+        state["revision"] += 1
+        state["author"] = agent.name
+        self._counters["artifact_publications"] += 1
+        self._announce(
+            "published", agent, artifact=state["path"], revision=state["revision"]
+        )
+        return {"revision": state["revision"], "changed": True}
+
+    def episode_output_empty(self) -> bool:
+        """Nothing scored has been produced yet: no declared artifact was published or,
+        for an answer-scored task without artifacts, no episode answer was submitted."""
+        if self._artifacts:
+            return all(state["revision"] == 0 for state in self._artifacts.values())
+        return self._population.scored_on == "answer" and self._answer["revision"] == 0
+
+    def spent_agent_turns(self, invocation_id: str) -> bool:
+        """The agent made all the model calls the population allows one agent."""
+        cap = self._population.max_agent_turns if self._population else None
+        return cap is not None and self._invocations[invocation_id].turns >= cap
+
+    @property
+    def episode_answer(self) -> dict[str, Any]:
+        return dict(self._answer)
+
+    @property
+    def board_text(self) -> str:
+        return self._board.text if self._board else ""
+
+    def _peer_history(
+        self, name_or_id: str, start: int, limit: int, query: str | None
+    ) -> dict:
+        if not self._population.allow_agent_lookup_agent_history:
+            raise PermissionError("peer history lookup is disabled in this episode")
+        target = self._lookup(name_or_id)
+        records = []
+        for index, message in enumerate(History(target.session.dir).messages):
+            if message.get("role") == "system":
+                continue
+            text = _message_text(message)
+            if query is None or query in text:
+                records.append(
+                    {"index": index, "role": message.get("role"), "text": text}
+                )
+        page = records[start : start + limit]
+        for record in page:
+            data = record["text"].encode()
+            if len(data) > HISTORY_TEXT_BYTES:
+                record["text"] = data[:HISTORY_TEXT_BYTES].decode(errors="ignore")
+                record["truncated"] = True
+        end = start + len(page)
+        return {
+            "agent": target.name,
+            "status": target.status,
+            "task": target.task,
+            "last_answer": target.result.answer if target.result else None,
+            "total": len(records),
+            "next": end if end < len(records) else None,
+            "messages": page,
+        }
+
+    def _population_list(
+        self, caller: _Invocation, include_self: bool, include_ended: bool
+    ) -> list[dict]:
+        now = time.monotonic()
+        return [
+            {
+                "id": agent.id,
+                "name": agent.name,
+                "parent": self._invocations[agent.parent_id].name
+                if agent.parent_id
+                else None,
+                "founder": agent.parent_id is None,
+                "status": agent.status,
+                "messageable": agent.status in RESIDENT or agent.status == "retired",
+                "requires_revival": agent.status == "retired",
+                "idle_seconds": None
+                if agent.idle_since is None
+                else round(now - agent.idle_since, 1),
+                "turns": agent.turns,
+                "task": agent.task[:300],
+            }
+            for agent in self._peers()
+            if (include_self or agent is not caller)
+            and (include_ended or agent.status not in ENDED)
+        ]
+
+    def _population_operation(self, agent: _Invocation, request: dict) -> Any:
+        op = request["op"]
+        if op == "population.status":
+            policy = agent.runtime_config.policy
+            return {
+                **self.population_counts(),
+                "you": agent.name,
+                "board_revision": self._board.revision,
+                "answer_revision": self._answer["revision"],
+                "answer_author": self._answer["author"],
+                "turns": self._total_turns,
+                "max_total_turns": policy.max_total_turns,
+                "new_tokens": self._total_tokens,
+                "max_total_tokens": policy.max_total_tokens,
+            }
+        if op == "population.list":
+            return self._population_list(
+                agent, request["include_self"], request["include_ended"]
+            )
+        if op == "population.events":
+            start = request["after"]
+            return self._membership[start : start + request["limit"]]
+        if op == "population.answer":
+            return self.episode_answer
+        if op == "population.submit":
+            return self._submit_answer(
+                agent, request["text"], request["expected_revision"]
+            )
+        return self._peer_history(
+            request["agent"], request["start"], request["limit"], request.get("query")
+        )
+
+    def _board_operation(self, agent: _Invocation, request: dict) -> dict:
+        board = self._board
+        op = request["op"]
+        if op == "board.read":
+            return board.read(
+                request["start_line"], request["max_lines"], request.get("revision")
+            )
+        if op == "board.search":
+            return board.search(request["query"], request["limit"])
+        if not self._population_open:
+            raise RuntimeError("population_closed: the board is frozen")
+        if op == "board.append":
+            return board.append(agent.name, request["text"], request.get("request_id"))
+        return board.edit(
+            agent.name,
+            request["old"],
+            request["new"],
+            request["expected_revision"],
+            request.get("request_id"),
+        )
+
+    def population_snapshot(self) -> dict[str, Any]:
+        """Episode accounting: membership, communication, and per-agent usage."""
+        return {
+            **self.population_counts(),
+            "peak_live": self._peak_live,
+            "compactions": sum(agent.compactions for agent in self._peers()),
+            "agents_turn_capped": sum(
+                self.spent_agent_turns(agent.id) for agent in self._peers()
+            ),
+            **self._counters,
+            "board_revision": self._board.revision if self._board else 0,
+            "board_bytes": len(self._board.text.encode()) if self._board else 0,
+            "answer_revision": self._answer["revision"],
+            "answer_author": self._answer["author"],
+            "artifacts": {
+                state["path"]: {
+                    "revision": state["revision"],
+                    "author": state["author"],
+                }
+                for state in self._artifacts.values()
+            },
+            "agents": [
+                {
+                    "id": agent.id,
+                    "name": agent.name,
+                    "parent": self._invocations[agent.parent_id].name
+                    if agent.parent_id
+                    else None,
+                    "founder": agent.parent_id is None,
+                    "status": agent.status,
+                    "turns": agent.turns,
+                    "prompt_tokens": agent.prompt_tokens,
+                    "completion_tokens": agent.completion_tokens,
+                    "new_tokens": agent.new_tokens,
+                    "kernel_generation": agent.kernel_generation,
+                    "compactions": agent.compactions,
+                    "error": agent.error,
+                }
+                for agent in self._peers()
+            ],
+        }
 
     def _record_event(self, agent: _Invocation, record: dict) -> None:
         try:
@@ -565,18 +1509,30 @@ class SessionTreeSupervisor:
 
     def _wake_agent(self, agent: _Invocation) -> None:
         agent.changed.set()
-        if agent.parent_id is None or agent.status != "idle":
+        if agent.id == self.root_id or agent.status != "idle" or self._closed:
+            return
+        if self._population and not self._population_open:
             return
         if self._budget_exhausted(agent):
             self._fail_instructions(agent, "tree_budget_exhausted")
             return
+        if self.spent_agent_turns(agent.id):
+            self._fail_instructions(agent, "agent_turns_exhausted")
+            return
         agent.done.clear()
         agent.status = "starting"
+        agent.idle_since = None
+        # The new turn announces every completion so far.
+        agent.announced_quiet = len(agent.inbox)
+        self._start_runner(agent)
+
+    def _start_runner(self, agent: _Invocation) -> None:
         agent.runner = asyncio.create_task(self._run_child(agent))
         self._tasks.add(agent.runner)
         self._child_tasks.add(agent.runner)
         agent.runner.add_done_callback(self._tasks.discard)
         agent.runner.add_done_callback(self._child_tasks.discard)
+        agent.runner.add_done_callback(lambda _: self._activity.set())
 
     def _publish(self, target: _Invocation, event: dict) -> str:
         if event["type"] == "agent.message" and len(target.inbox) >= MAX_INBOX_EVENTS:
@@ -588,7 +1544,6 @@ class SessionTreeSupervisor:
 
     def _fail_instructions(self, agent: _Invocation, reason: str) -> None:
         pending, agent.instructions = agent.instructions, []
-        parent = self._invocations.get(agent.parent_id)
         for instruction in pending:
             self._record_event(
                 agent,
@@ -598,9 +1553,12 @@ class SessionTreeSupervisor:
                     "reason": reason,
                 },
             )
-            if parent is not None and parent.capability in self._capabilities:
+            if receipt := self._deliveries.get(instruction["id"]):
+                receipt.update(status="failed", reason=reason)
+            sender = self._invocations.get(instruction["sender_id"])
+            if sender is not None and sender.capability in self._capabilities:
                 self._publish(
-                    parent,
+                    sender,
                     self._event(
                         agent,
                         "agent.delivery_failed",
@@ -619,10 +1577,12 @@ class SessionTreeSupervisor:
         agent = self._invocations[invocation_id]
         if self._budget_exhausted(agent):
             return []
+        # Queued parent instructions wait for an answer boundary; the rest are pushed
+        # at the next model boundary.
         selected = [
             event
             for event in agent.instructions
-            if include_queue or event["type"] == "steer"
+            if include_queue or event["type"] != "queue"
         ]
         if selected:
             self._record_event(
@@ -636,12 +1596,34 @@ class SessionTreeSupervisor:
                 event for event in agent.instructions if event not in selected
             ]
             for event in selected:
+                if receipt := self._deliveries.get(event["id"]):
+                    receipt["status"] = "delivered"
                 self.semantic_edges.deliver_message(
                     agent.id,
                     event["source_request_id"],
-                    edge_type="agent_message",
+                    edge_type="agent_reply"
+                    if event["type"] == "reply"
+                    else "agent_message",
                 )
+                if event["type"] == "dm" and event["sender_id"] not in agent.requesters:
+                    agent.requesters.append(event["sender_id"])
         return selected
+
+    def render_input(self, event: dict) -> tuple[dict, dict]:
+        """The user-role message for one delivered agent input, plus its provenance."""
+        sender = self._invocations.get(event["sender_id"])
+        if event["type"] in PEER_INPUTS:
+            return agent_input(
+                event["content"],
+                agent=sender.name if sender else event["sender_id"],
+                kind=event["type"],
+                sender="peer",
+            )
+        return agent_input(
+            event["content"],
+            agent=event.get("sender_id"),
+            kind="steer" if event["type"] == "steer" else "instruction",
+        )
 
     def _note_env_prefixes(self, agent: _Invocation, command: str) -> None:
         """Suggest setenv() after repeated assignments to the same variable."""
@@ -719,6 +1701,8 @@ class SessionTreeSupervisor:
         error = bool(agent.inbox_error)
         if agent.inbox_error:
             notices.append(agent.inbox_error)
+        if self._population and (membership := self._membership_notice(agent)):
+            notices.append(membership)
         # Announce unread counts only on changes or new arrivals.
         unread = None
         if count and (new_events or count != agent.unread_announced):
@@ -741,6 +1725,14 @@ class SessionTreeSupervisor:
         notice = self.inbox_notice(invocation_id)
         return "Supervisor: " + notice["text"] if notice else None
 
+    @staticmethod
+    def _unseen_completions(agent: _Invocation) -> bool:
+        """Unread shell completions no wait has returned for: notices omit them."""
+        return any(
+            not event["read"] and event["type"] == "shell.completed"
+            for event in agent.inbox[agent.announced_quiet :]
+        )
+
     async def wait_for_events(self, invocation_id: str, timeout: float) -> str:
         agent = self._invocations[invocation_id]
         self._note_wait_with_held_jobs(agent)
@@ -748,10 +1740,7 @@ class SessionTreeSupervisor:
         def ready():
             return (
                 len(agent.inbox) > agent.announced
-                or any(
-                    not event["read"] and event["type"] == "shell.completed"
-                    for event in agent.inbox[agent.announced_quiet :]
-                )
+                or self._unseen_completions(agent)
                 or bool(agent.instructions)
             )
 
@@ -853,6 +1842,7 @@ class SessionTreeSupervisor:
 
     def _publish_job(self, job: JobRecord) -> None:
         self._subscriptions.finish("job", job.info.id)
+        self._activity.set()
         owner = self._invocations[job.info.owner_id]
         if self._closed or owner.capability not in self._capabilities or not job.notify:
             return
@@ -953,11 +1943,10 @@ class SessionTreeSupervisor:
                 command=command,
                 cwd=str(cwd.resolve()),
                 directory=parent.session.dir,
-                env={
-                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
-                    **parent.shell_env,
-                    **(request.get("env") or {}),
-                },
+                env=self._process_env(parent, request),
+                popen_kwargs=parent.identity.popen_kwargs()
+                if parent.identity
+                else None,
                 source_request_id=self._scopes[request["scope_id"]].request_id,
                 # yield_after= bounds how long run() blocks; timeout= is the kill deadline.
                 timeout=request.get("timeout"),
@@ -1067,12 +2056,11 @@ class SessionTreeSupervisor:
                 name=request["name"],
                 command=command,
                 cwd=str(cwd.resolve()),
-                env={
-                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
-                    **parent.shell_env,
-                    **(request.get("env") or {}),
-                },
+                env=self._process_env(parent, request),
                 owner_id=parent.id,
+                popen_kwargs=parent.identity.popen_kwargs()
+                if parent.identity
+                else None,
             )
         if op == "services.list":
             return self._services.list()
@@ -1119,6 +2107,49 @@ class SessionTreeSupervisor:
             return await self._shell_operation(parent, request)
         if op.startswith("services."):
             return await self._services_operation(parent, request)
+        if (
+            op.startswith(
+                ("board.", "population.", "artifact.", "agent.dm", "agent.broadcast")
+            )
+            or op == "agent.delivery"
+        ):
+            if not self._population:
+                raise RuntimeError(f"{op} is only available in a population episode")
+            if op.startswith("board."):
+                return self._board_operation(parent, request)
+            if op.startswith("population."):
+                return self._population_operation(parent, request)
+            if op == "artifact.read":
+                return self._artifact_status(request["path"])
+            if op == "artifact.publish":
+                return await self._once(
+                    parent,
+                    request.get("request_id"),
+                    ["publish", request["path"], request["candidate_path"]],
+                    partial(
+                        self._publish_artifact,
+                        parent,
+                        request["path"],
+                        request["candidate_path"],
+                        request["expected_revision"],
+                    ),
+                )
+            if op == "agent.delivery":
+                return self._delivery(parent, request["message_id"])
+            if op == "agent.dm":
+                return await self._dm(
+                    parent,
+                    request["scope_id"],
+                    request["agent_id"],
+                    request["message"],
+                    request.get("message_id"),
+                )
+            return await self._broadcast(
+                parent,
+                request["scope_id"],
+                request["message"],
+                request.get("message_id"),
+            )
         if op.startswith("hints."):
             tags = set(request.get("tags") or [])
             if op == "hints.mute":
@@ -1152,6 +2183,8 @@ class SessionTreeSupervisor:
                     edge_type="agent_message",
                 )
             return dict(event)
+        if self._population and op in {"agent.send", "agent.steer", "agent.report"}:
+            raise RuntimeError(f"{op} is not used in a population: use rlm.agent.dm")
         if op == "agent.report":
             if parent.parent_id is None:
                 raise PermissionError("root agent has no parent")
@@ -1172,14 +2205,36 @@ class SessionTreeSupervisor:
                 ),
             )
         if op == "agent.spawn":
-            return self._info(
-                self._spawn(
-                    parent,
-                    request["scope_id"],
-                    request["task"],
-                    request["name"],
-                    request["persistent"],
+
+            async def spawn() -> dict:
+                if self._population:
+                    return self._info(
+                        await self._admit(
+                            parent,
+                            request["task"],
+                            request["name"],
+                            self._scopes[request["scope_id"]].request_id,
+                        )
+                    )
+                return self._info(
+                    self._spawn(
+                        parent,
+                        request["scope_id"],
+                        request["task"],
+                        request["name"],
+                        request["persistent"],
+                    )
                 )
+
+            return await self._once(
+                parent,
+                request.get("request_id"),
+                ["spawn", request["task"], request["name"]],
+                spawn,
+            )
+        if op in {"agent.get", "agent.info"} and self._population:
+            return self._info(
+                self._lookup(request.get("name_or_id") or request["agent_id"])
             )
         if op == "agent.list":
             agents = []
@@ -1221,7 +2276,7 @@ class SessionTreeSupervisor:
                     pass
         elif op == "agent.cancel":
             await self._terminate(child)
-            if child.status == "cancelled":
+            if child.status == "cancelled" and not self._population:
                 self.semantic_edges.record_subagent_cancel(
                     self._scopes[request["scope_id"]].request_id, child.id
                 )
@@ -1238,9 +2293,10 @@ class SessionTreeSupervisor:
                 )
                 raise RuntimeError(child.error or "agent failed")
             if child.status == "cancelled":
-                self.semantic_edges.record_subagent_cancel(
-                    self._scopes[request["scope_id"]].request_id, child.id
-                )
+                if not self._population:
+                    self.semantic_edges.record_subagent_cancel(
+                        self._scopes[request["scope_id"]].request_id, child.id
+                    )
                 raise RuntimeError(child.error or "agent cancelled")
             if child.result is not None:
                 self.semantic_edges.finish_subagent(
@@ -1299,7 +2355,8 @@ class SessionTreeSupervisor:
                 from rlm.engine import RLMEngine
 
                 factory = RLMEngine
-            if child.engine is None:
+            first_turn = child.engine is None
+            if first_turn:
                 child.engine = factory(
                     cwd=child.cwd,
                     session=child.session,
@@ -1308,6 +2365,10 @@ class SessionTreeSupervisor:
                     supervisor=self,
                     invocation_id=child.id,
                 )
+            if self._population:
+                text, kwargs = self._population_turn(child, first_turn)
+                child.result = await child.engine.prompt(text, **kwargs)
+            elif first_turn:
                 child.result = await child.engine.prompt(child.task)
             else:
                 instructions = self.take_instructions(child.id, include_queue=True)
@@ -1326,12 +2387,14 @@ class SessionTreeSupervisor:
             child.result_request_id = self.semantic_edges.last_request_id(child.id)
             child.status = "idle" if child.persistent else "completed"
             if child.status == "idle":
+                child.idle_since = time.monotonic()
                 child.session.write_meta(**self._info(child))
         except asyncio.CancelledError:
             child.status = "cancelled"
         except BaseException as exc:
             child.status = "failed"
             child.error = str(exc) or type(exc).__name__
+            child.failure = exc
             if not isinstance(exc, Exception):
                 raise
         finally:
@@ -1345,7 +2408,10 @@ class SessionTreeSupervisor:
             finally:
                 child.done.set()
                 parent = self._invocations.get(child.parent_id)
-                if parent is not None and parent.capability in self._capabilities:
+                if self._population:
+                    if child.status == "idle":
+                        self._reply(child)
+                elif parent is not None and parent.capability in self._capabilities:
                     self._publish(
                         parent,
                         self._event(
@@ -1371,9 +2437,49 @@ class SessionTreeSupervisor:
                         ),
                     )
                 if child.status == "idle" and (
-                    child.instructions or len(child.inbox) > child.announced
+                    child.instructions
+                    or len(child.inbox) > child.announced
+                    or self._unseen_completions(child)
                 ):
                     self._wake_agent(child)
+
+    def _population_turn(
+        self, agent: _Invocation, first_turn: bool
+    ) -> tuple[str, dict[str, Any]]:
+        """The input that starts a population agent's turn, attributed to its source."""
+        if first_turn and agent.parent_id is None:
+            return agent.task, {
+                "message_type": "assignment",
+                "message": runtime_event("assignment", agent.task),
+            }
+        if first_turn:
+            parent = self._invocations[agent.parent_id]
+            return agent.task, {
+                "message_type": "parent_message",
+                "message": agent_input(
+                    agent.task, agent=parent.name, kind="assignment"
+                ),
+            }
+        events = self.take_instructions(agent.id, include_queue=True)
+        if not events:
+            text = "Supervisor: new inbox events are available."
+            return text, {
+                "message_type": "supervisor_notification",
+                "message": runtime_event("notice", text),
+            }
+        rendered = [self.render_input(event) for event in events]
+        text = "\n\n".join(message["content"] for message, _ in rendered)
+        return text, {
+            "message_type": "agent_message",
+            "message": (
+                {"role": "user", "content": text},
+                {
+                    "source": "agent",
+                    "inputs": [provenance for _, provenance in rendered],
+                },
+            ),
+            "event_ids": [event["id"] for event in events],
+        }
 
     async def _close_agent_subscriptions(self, agent_id: str) -> None:
         try:
@@ -1383,6 +2489,8 @@ class SessionTreeSupervisor:
             await self._subscriptions.close(agent_id)
 
     async def _release_agent(self, child: _Invocation) -> None:
+        if self._population and self._population_open:
+            self._announce("ended", child, status=child.status, error=child.error)
         self._fail_instructions(child, f"agent_{child.status}")
         self._capabilities.pop(child.capability, None)
         results = await asyncio.gather(
@@ -1393,10 +2501,11 @@ class SessionTreeSupervisor:
                 for scope_id, scope in list(self._scopes.items())
                 if scope.invocation_id == child.id
             ),
+            # Population descendants outlive their ancestors.
             *(
                 self._terminate(descendant)
                 for descendant in list(self._invocations.values())
-                if descendant.parent_id == child.id
+                if descendant.parent_id == child.id and not self._population
             ),
             return_exceptions=True,
         )
@@ -1420,6 +2529,8 @@ class SessionTreeSupervisor:
             child.cleanup_error = "; ".join(str(e) or type(e).__name__ for e in errors)
         child.released = not errors
         if errors:
+            if self._population and child.failure is None:
+                child.failure = errors[0]
             raise errors[0]
 
     async def _terminate(self, child: _Invocation) -> None:
@@ -1437,7 +2548,7 @@ class SessionTreeSupervisor:
                 child.runner.cancel()
             await asyncio.gather(child.runner, return_exceptions=True)
         if not child.released:
-            if child.status in {"starting", "running", "waiting", "idle"}:
+            if child.status in RESIDENT or child.status in {"retiring", "retired"}:
                 child.status = "cancelled"
             try:
                 await self._release_agent(child)
@@ -1531,6 +2642,7 @@ class SessionTreeSupervisor:
                     self._terminate(child)
                     for child in list(self._invocations.values())
                     if child.parent_id == self.root_id
+                    or (self._population and child.id != self.root_id)
                 ),
                 self._subscriptions.close(),
                 self._shell_jobs.close(),

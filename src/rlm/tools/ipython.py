@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rlm.isolation import ProcessIdentity, own_kernel_dir
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
 from rlm.tools.skills import discover_skills
@@ -269,6 +270,7 @@ class IPythonREPL:
         broker_endpoint: BrokerEndpoint | None = None,
         exec_timeout: int | None = None,
         allow_git: bool | None = None,
+        identity: ProcessIdentity | None = None,
     ):
         self.cwd = cwd
         self.session = session
@@ -278,6 +280,7 @@ class IPythonREPL:
         self.broker_endpoint = broker_endpoint
         self.exec_timeout = exec_timeout
         self.allow_git = allow_git
+        self.identity = identity
         self._km = None
         self._kc = None
         self._ipc_dir = None
@@ -331,11 +334,20 @@ class IPythonREPL:
         path_entries = kernel_env.get("PATH", "").split(os.pathsep)
         if launcher_dir not in path_entries:
             kernel_env["PATH"] = os.pathsep.join([launcher_dir, *path_entries])
+        launch = {}
+        if self.identity is not None:
+            # The kernel reads its connection file as the agent, so write it first.
+            kernel_env.update(self.identity.env())
+            self._km.connection_file = os.path.join(self._ipc_dir, "kernel.json")
+            self._km.write_connection_file()
+            own_kernel_dir(self._ipc_dir, self.identity)
+            launch = self.identity.popen_kwargs()
         self._km.start_kernel(
             cwd=self.cwd,
             env=kernel_env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **launch,
         )
         self._kc = self._km.client()
         self._kc.start_channels()

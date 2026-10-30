@@ -70,6 +70,7 @@ class ShellJobs:
         source_request_id: str | None,
         timeout: float | None = None,
         notify: bool = True,
+        popen_kwargs: dict | None = None,
     ) -> dict:
         if sum(job.finished is None for job in self.jobs.values()) >= MAX_ACTIVE_JOBS:
             raise RuntimeError("active shell job limit reached")
@@ -99,7 +100,7 @@ class ShellJobs:
             notify=notify,
         )
         self.jobs[job_id] = job
-        job.task = asyncio.create_task(self._run(job, env))
+        job.task = asyncio.create_task(self._run(job, env, popen_kwargs or {}))
         job.task.add_done_callback(self._observe_failure)
         return job.snapshot()
 
@@ -187,7 +188,9 @@ class ShellJobs:
         except ProcessLookupError:
             pass
 
-    async def _run(self, job: JobRecord, env: dict[str, str]) -> None:
+    async def _run(
+        self, job: JobRecord, env: dict[str, str], popen_kwargs: dict
+    ) -> None:
         process = None
         try:
             if job.cancel_requested:
@@ -210,6 +213,7 @@ class ShellJobs:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                **popen_kwargs,
             )
             os.set_blocking(process.stdout.fileno(), False)
             job.update(status="running")
