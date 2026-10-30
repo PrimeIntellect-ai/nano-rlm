@@ -442,12 +442,15 @@ async def test_inbox_notice_repeats_only_when_the_count_changes(session):
         )
         assert "Inbox: 1 unread" in supervisor.inbox_notification(owner.id)
         assert supervisor.inbox_notification(owner.id) is None
-        # shell.completed is quiet: it is listable and wakes wait, but not announced.
-        quiet = supervisor._event(owner, "shell.completed", {"job_id": "j"}, None)
-        supervisor._publish(owner, quiet)
-        assert supervisor.inbox_notification(owner.id) is None
-        assert sum(not e["read"] for e in owner.inbox) == 2
+        # shell.completed wakes wait, then the next notice reports it once, read.
+        done = {"job_id": "j", "status": "completed", "exit_code": 0, "text": "ok\n"}
+        finished = supervisor._event(owner, "shell.completed", done, None)
+        supervisor._publish(owner, finished)
         assert "available" in await supervisor.wait_for_events(owner.id, 0)
+        notice = supervisor.inbox_notification(owner.id)
+        assert "Job j finished (completed, exit code 0)" in notice and "ok" in notice
+        assert "Inbox" not in notice and finished["read"]
+        assert supervisor.inbox_notification(owner.id) is None
         assert "timed out" in await supervisor.wait_for_events(owner.id, 0)
     finally:
         await supervisor.aclose()
