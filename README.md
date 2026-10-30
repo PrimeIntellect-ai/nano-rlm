@@ -575,6 +575,8 @@ and `close()` independently of tool dispatch.
 
 For a trusted private TCP network, launch `python -m rlm.execution --listen
 0.0.0.0 --port 8765` with a random `RLM_EXECUTION_TOKEN` of at least 32 characters.
+With `--port 0` the kernel picks a free port, which the worker prints on stderr as
+`listening on HOST:PORT` once it accepts connections.
 Set `execution_tcp` to `{"host": "worker-address", "port": 8765, "token": "..."}`
 instead of `execution_command`. Each connection owns a separate execution session.
 The token authenticates connections; this transport does not encrypt traffic, so

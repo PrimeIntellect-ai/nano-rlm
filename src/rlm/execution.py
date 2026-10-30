@@ -448,6 +448,8 @@ def main():
         parser.error("TCP workers require RLM_EXECUTION_TOKEN (at least 32 characters)")
     slots = threading.BoundedSemaphore(32)
     with socket.create_server((args.listen, args.port)) as listener:
+        # With --port 0 the kernel picks the port; the orchestrator reads it here.
+        print(f"listening on {args.listen}:{listener.getsockname()[1]}", flush=True)
         while True:
             connection, _ = listener.accept()
             if not slots.acquire(blocking=False):
