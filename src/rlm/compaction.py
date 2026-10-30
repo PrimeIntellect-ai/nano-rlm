@@ -136,18 +136,28 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
     return default_threshold(window) if window is not None else None
 
 
-def truncate_tool_output(text: str, max_bytes: int = TOOL_OUTPUT_MAX_BYTES) -> str:
-    """Keep the head and tail of an oversized tool result and say what was cut."""
+def kept_spans(text: str, max_bytes: int = TOOL_OUTPUT_MAX_BYTES) -> tuple[int, int]:
+    """Characters of `text` kept at its start and at its end when it is cut to
+    `max_bytes`; the whole text (its length, 0) when it fits."""
     data = text.encode("utf-8")
     if len(data) <= max_bytes:
-        return text
+        return len(text), 0
     keep = max_bytes // 2
     head = data[:keep].decode("utf-8", errors="ignore")
     tail = data[-keep:].decode("utf-8", errors="ignore")
+    return len(head), len(tail)
+
+
+def truncate_tool_output(text: str, max_bytes: int = TOOL_OUTPUT_MAX_BYTES) -> str:
+    """Keep the head and tail of an oversized tool result and say what was cut."""
+    head, tail = kept_spans(text, max_bytes)
+    if head == len(text):
+        return text
+    cut = len(text.encode("utf-8")) - 2 * (max_bytes // 2)
     return (
         f"Warning: truncated output (original token count: {estimated_tokens(text)})\n"
         f"Total output lines: {text.count(chr(10)) + 1}\n\n"
-        f"{head}\n[... {len(data) - 2 * keep} bytes truncated ...]\n{tail}"
+        f"{text[:head]}\n[... {cut} bytes truncated ...]\n{text[len(text) - tail :]}"
     )
 
 
