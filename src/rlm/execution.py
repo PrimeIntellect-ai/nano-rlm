@@ -29,6 +29,7 @@ from rlm.tools.ipython import IPythonREPL, build_kernel_env
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.registry import get_builtin_tool
 from rlm.types import IpythonExecuted, RLMMetrics, TokenUsage
+from rlm.workspace_host import WorkspaceHost
 from rlm.execution_transport import ExecutionTransport, StdioTransport, TcpTransport
 
 logger = logging.getLogger(__name__)
@@ -208,13 +209,6 @@ class RemoteREPL(IPythonREPL):
             raise PermissionError("unknown execution callback")
         if request.get("capability") != self.broker_endpoint.capability:
             raise PermissionError("invalid execution capability")
-        # These operations currently launch jobs/services/watchers in the supervisor
-        # process. Refuse them until they have execution-session implementations.
-        op = request.get("op", "")
-        if op.startswith(("shell.", "services.")) or op == "watch.path":
-            raise ValueError(
-                "split execution does not support rlm.shell, rlm.services or watch.path; use bash/IPython in the task workspace"
-            )
         with socket.socket(socket.AF_UNIX) as connection:
             connection.connect(self.broker_endpoint.socket_path)
             with connection.makefile("rwb", buffering=0) as stream:
@@ -288,6 +282,11 @@ class RemoteREPL(IPythonREPL):
     def execute(self, code, timeout=None):
         return self.execute_tool("ipython", {"code": code, "timeout": timeout}).content
 
+    def host_call(self, method, params):
+        """Call the worker's WorkspaceHost: the supervisor's jobs, services and path
+        watches in the workspace."""
+        return self._peer.call(method, params)
+
     def interrupt(self):
         self._control_call("interrupt", 5)
 
@@ -323,6 +322,7 @@ class _Worker:
         self.listener = None
         self.closed = threading.Event()
         self._tool_log_sent = 0
+        self.host = None
 
     def _accept(self):
         while not self.closed.is_set():
@@ -392,6 +392,10 @@ class _Worker:
         if method == "history":
             self._write_history(params)
             return {}
+        if method.split(".", 1)[0] in ("host", "jobs", "services", "watch"):
+            if self.host is None:
+                self.host = WorkspaceHost(self.session_dir)
+            return self.host.handle(method, params)
         if method == "tool":
 
             def execute():
@@ -446,6 +450,8 @@ class _Worker:
         self.closed.set()
         if self.listener is not None:
             self.listener.close()
+        if self.host is not None:
+            self.host.close()
         if self.repl is not None:
             self.repl.interrupt()
             self.repl.shutdown()

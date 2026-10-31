@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import uuid
 
 import pytest
 
@@ -301,7 +303,8 @@ async def test_remote_execution_preserves_state_and_brokers_children(session, tm
     client = DummyClient(
         [
             _tool("value = 41; print(await bash('pwd'))"),
-            _tool("""
+            _tool(
+                """
 from pathlib import Path
 assert value == 41
 child = await rlm.agent.spawn('write child.txt')
@@ -311,14 +314,30 @@ assert 'write child.txt' in (await child.history()).user_messages()[0]['content'
 assert Path('child.txt').read_text() == 'child'
 h = await rlm.history()
 assert h.user_messages()[0]['content'] == 'run remotely'
-try:
-    await rlm.shell.run('touch escaped')
-except RuntimeError as e:
-    assert 'split execution' in str(e)
-else:
-    raise AssertionError('host shell must be unavailable')
+import asyncio
+# The supervisor's jobs, services and watches run in the workspace, beside this kernel.
+job = await rlm.shell.run('echo $PPID; touch from-shell')
+assert job.ok and int(job.text.split()[0]) != SUPERVISOR_PID, job.text
+assert Path('from-shell').exists()
+svc = await rlm.services.start(SERVICE, 'echo service-up; sleep 30')
+for _ in range(50):
+    if 'service-up' in await svc.tail():
+        break
+    await asyncio.sleep(0.1)
+assert 'service-up' in await svc.tail()
+assert not (await svc.stop(grace=1)).running
+await rlm.watch.path('.')
+Path('watched.txt').write_text('x')
+for _ in range(50):
+    if any(e['type'] == 'watch.path' for e in await rlm.inbox.list()):
+        break
+    await asyncio.sleep(0.1)
+assert any(e['type'] == 'watch.path' for e in await rlm.inbox.list())
 print('REMOTE_OK')
-"""),
+""".replace("SUPERVISOR_PID", str(os.getpid())).replace(
+                    "SERVICE", repr(f"split-{uuid.uuid4().hex[:8]}")
+                )
+            ),
             DummyMessage(content="done"),
         ]
     )
@@ -337,7 +356,6 @@ print('REMOTE_OK')
             and "REMOTE_OK" in record.get("content", "")
             for record in map(json.loads, logs.splitlines())
         )
-        assert not (tmp_path / "escaped").exists()
     finally:
         await engine.aclose()
         await supervisor.aclose()

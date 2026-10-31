@@ -616,6 +616,14 @@ class RLMEngine:
                     cancelled = True
             if cancelled:
                 raise asyncio.CancelledError
+            if (
+                self.runtime_config.split_execution
+                and self.depth == 0
+                and self._supervisor is not None
+            ):
+                # The root's worker lives for the session, so the session's jobs and
+                # services run through it, wherever an agent started them.
+                self._supervisor.attach_host(self._repl.host_call)
 
             system_prompt = self._load_system_prompt(self._active_tools)
 
@@ -1519,7 +1527,6 @@ class RLMEngine:
             if self.system_prompt_path
             else None,
             extra_instructions=self.append_to_system_prompt,
-            split_execution=self.runtime_config.split_execution,
             agent_info=self._supervisor.agent_context(self._invocation_id)
             if self._supervisor
             else None,
