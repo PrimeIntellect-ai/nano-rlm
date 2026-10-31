@@ -439,3 +439,41 @@ async def test_shell_tool_commands_stop_with_the_turn_and_the_session(
         assert not alive.exists()
     finally:
         subprocess.run(["pkill", "-f", f"touch {alive}"], check=False)
+
+
+async def test_remote_history_syncs_past_the_frame_limit(session, tmp_path):
+    """The worker gets only the ledger bytes it hasn't seen, in chunks that fit a frame,
+    so a ledger larger than one frame still reaches it whole."""
+    import sys
+
+    from rlm.execution import MAX_FRAME, RemoteREPL
+
+    ledger = session.dir / "messages.jsonl"
+    repl = RemoteREPL(
+        command=(sys.executable, "-m", "rlm.execution"),
+        cwd=str(tmp_path),
+        session=session,
+    )
+    try:
+        await repl.run_in_thread(repl.start)
+        count = (
+            "import hashlib, pathlib\n"
+            "data = (pathlib.Path(r'{}') / 'messages.jsonl').read_bytes()\n"
+            "print(len(data), hashlib.sha256(data).hexdigest())"
+        ).format(repl.session_dir)
+        line = '{"type": "note", "text": "' + "x" * 1000 + '"}\n'
+        with open(ledger, "a") as out:
+            out.write(line * (MAX_FRAME // len(line) + 1000))
+        first = await repl.run_in_thread(repl.execute, count, 60)
+        with open(ledger, "a") as out:
+            out.write('{"type": "note", "text": "after"}\n')
+        second = await repl.run_in_thread(repl.execute, count, 60)
+    finally:
+        await asyncio.to_thread(repl.shutdown)
+
+    import hashlib
+
+    assert ledger.stat().st_size > MAX_FRAME
+    data = ledger.read_bytes()
+    assert second.split() == [str(len(data)), hashlib.sha256(data).hexdigest()]
+    assert int(first.split()[0]) < len(data)

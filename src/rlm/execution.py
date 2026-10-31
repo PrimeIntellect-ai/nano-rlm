@@ -12,6 +12,7 @@ import json
 import socket
 import struct
 import argparse
+import base64
 import hmac
 import logging
 import os
@@ -42,6 +43,9 @@ def validate_tools(names):
 
 
 MAX_FRAME = 16 * 1024 * 1024
+HISTORY_CHUNK = 4 * 1024 * 1024
+"""Raw bytes of the session ledger per frame; base64 keeps a chunk well under
+MAX_FRAME, and a long session's ledger syncs as several."""
 
 
 def _read(stream, size):
@@ -176,6 +180,7 @@ class RemoteREPL(IPythonREPL):
         )
         self._peer = None
         self.session_dir = None
+        self._history_sent = 0
         # Interrupts and teardown run off the caller's thread, which can be the
         # supervisor's event loop, in order and without waiting on a slow worker.
         self._control = concurrent.futures.ThreadPoolExecutor(
@@ -219,6 +224,7 @@ class RemoteREPL(IPythonREPL):
     def start(self):
         reader, writer = self.transport.connect()
         self._peer = _Peer(reader, writer, self._broker)
+        self._history_sent = 0
         modules = {
             path.name: path.read_text() for path in self.session.dir.glob("*.py")
         }
@@ -244,25 +250,40 @@ class RemoteREPL(IPythonREPL):
         if self._control_done is not None:
             # A call must not overtake a pending interrupt or its release.
             self._control_done.result()
+        # The ledger only grows: the worker gets what it hasn't seen, in chunks
+        # that fit a frame however long the session runs.
+        with open(self.session.dir / "messages.jsonl", "rb") as ledger:
+            ledger.seek(self._history_sent)
+            new = ledger.read()
+        *head, last = [
+            new[start : start + HISTORY_CHUNK]
+            for start in range(0, len(new), HISTORY_CHUNK)
+        ] or [b""]
+        for chunk in head:
+            self._peer.call("history", self._history_chunk(chunk))
+            self._history_sent += len(chunk)
         result = self._peer.call(
             "tool",
             {
                 "name": name,
                 "args": args,
                 "scope_id": self._scope_id,
-                "history": (self.session.dir / "messages.jsonl").read_text(),
+                "history": self._history_chunk(last),
             },
         )
+        self._history_sent += len(last)
         self._recovery_notices.extend(result["notices"])
-        (self.session.dir / "programmatic_tool_calls.jsonl").write_text(
-            result["tool_log"]
-        )
+        with open(self.session.dir / "programmatic_tool_calls.jsonl", "ab") as log:
+            log.write(base64.b64decode(result["tool_log"]))
         return ToolOutcome(
             content=result["output"],
             metric_events=[
                 IpythonExecuted(**event) for event in result["metric_events"]
             ],
         )
+
+    def _history_chunk(self, data: bytes) -> dict:
+        return {"offset": self._history_sent, "data": base64.b64encode(data).decode()}
 
     def execute(self, code, timeout=None):
         return self.execute_tool("ipython", {"code": code, "timeout": timeout}).content
@@ -301,6 +322,7 @@ class _Worker:
         self.session_dir = Path(self.directory.name)
         self.listener = None
         self.closed = threading.Event()
+        self._tool_log_sent = 0
 
     def _accept(self):
         while not self.closed.is_set():
@@ -367,21 +389,23 @@ class _Worker:
             return str(self.session_dir)
         if self.repl is None:
             raise ValueError("execution session has not started")
+        if method == "history":
+            self._write_history(params)
+            return {}
         if method == "tool":
 
             def execute():
-                (self.session_dir / "messages.jsonl").write_text(params["history"])
+                self._write_history(params["history"])
                 self.repl.set_broker_scope(params["scope_id"])
                 tool = get_builtin_tool(params["name"], self.tools)
                 if tool is None:
                     raise ValueError("tool is not enabled for this execution session")
                 outcome = tool.execute(params["args"], self.context)
-                log = self.session_dir / "programmatic_tool_calls.jsonl"
                 return {
                     "output": outcome.content,
                     "metric_events": [asdict(event) for event in outcome.metric_events],
                     "notices": self.repl.take_recovery_notices(),
-                    "tool_log": log.read_text() if log.exists() else "",
+                    "tool_log": base64.b64encode(self._new_tool_log()).decode(),
                 }
 
             return self.repl._executor.submit(execute).result()
@@ -394,6 +418,29 @@ class _Worker:
             self.repl = None
         else:
             raise ValueError(f"unknown execution method: {method}")
+
+    def _write_history(self, chunk):
+        """Write a chunk of the harness's ledger at its offset. Rewriting the same
+        bytes is harmless, so a retried chunk can't duplicate history."""
+        path = self.session_dir / "messages.jsonl"
+        path.touch()
+        with path.open("r+b") as ledger:
+            if chunk["offset"] > ledger.seek(0, os.SEEK_END):
+                raise ValueError("execution history is out of sync")
+            ledger.seek(chunk["offset"])
+            ledger.write(base64.b64decode(chunk["data"]))
+            ledger.truncate()
+
+    def _new_tool_log(self) -> bytes:
+        """The programmatic tool calls logged since the last tool call returned."""
+        path = self.session_dir / "programmatic_tool_calls.jsonl"
+        if not path.exists():
+            return b""
+        with path.open("rb") as log:
+            log.seek(self._tool_log_sent)
+            new = log.read()
+        self._tool_log_sent += len(new)
+        return new
 
     def close(self):
         self.closed.set()
