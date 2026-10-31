@@ -393,87 +393,73 @@ async def test_output_flood_is_bounded_and_kernel_can_continue(session):
         await repl.run_in_thread(repl.shutdown)
 
 
-async def test_shell_tool_commands_stop_with_the_turn_and_the_session(
+async def test_bash_commands_stop_with_a_cancelled_turn_and_the_session(
     session, tmp_path
 ):
-    """A native bash command stops when its turn is cancelled, and a background job it
-    leaves behind stops when the session's kernel shuts down."""
-    import subprocess
-    from types import SimpleNamespace
-
-    from rlm.tools.bash import BashTool
-
-    repl = IPythonREPL(session=session, cwd=str(tmp_path))
-    engine = SimpleNamespace(
-        _repl=repl,
-        _metrics=None,
-        _total_usage=None,
-        _last_prompt_tokens=0,
-        exec_timeout=60,
-        allow_git=False,
-        _tool_state={},
+    """A cancelled turn stops its running bash command at once, and closing the engine
+    stops a background job an earlier command left behind."""
+    alive = tmp_path / "alive"
+    loop = f"(while :; do touch {alive}; sleep 0.1; done) >/dev/null 2>&1 &"
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("bash", {"command": loop})]),
+            DummyMessage(tool_calls=[DummyToolCall("bash", {"command": "sleep 60"})]),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config().model_copy(
+            update={"builtin_tools": ("ipython", "bash")}
+        ),
         cwd=str(tmp_path),
     )
-    context = RLMEngine._tool_context(engine, [])
-    alive = tmp_path / "alive"
-    await repl.run_in_thread(repl.start)
     try:
-        running = asyncio.create_task(
-            asyncio.to_thread(BashTool().execute, {"command": "sleep 60"}, context)
-        )
+        turn = asyncio.create_task(engine.prompt("run the commands"))
+        while len(client.calls) < 2:
+            await asyncio.sleep(0.1)
         await asyncio.sleep(0.5)
-        repl.interrupt()
-        outcome = await asyncio.wait_for(running, 5)
-        repl.finish_interrupt()
-        assert "interrupted" in outcome.content
-
-        loop = f"(while :; do touch {alive}; sleep 0.1; done) >/dev/null 2>&1 &"
-        BashTool().execute({"command": loop}, context)
-        await asyncio.sleep(0.5)
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, 5)
         assert alive.exists()
     finally:
-        await repl.run_in_thread(repl.shutdown)
-    try:
-        alive.unlink()
-        await asyncio.sleep(0.5)
-        assert not alive.exists()
-    finally:
-        subprocess.run(["pkill", "-f", f"touch {alive}"], check=False)
+        await engine.aclose()
+    alive.unlink()
+    await asyncio.sleep(0.5)
+    assert not alive.exists()
 
 
-async def test_remote_history_syncs_past_the_frame_limit(session, tmp_path):
-    """The worker gets only the ledger bytes it hasn't seen, in chunks that fit a frame,
-    so a ledger larger than one frame still reaches it whole."""
+async def test_split_history_reaches_the_worker_past_the_frame_limit(session, tmp_path):
+    """The worker gets the ledger in frame-sized chunks: a prompt larger than one frame
+    still reaches the kernel's history whole."""
     import sys
 
-    from rlm.execution import MAX_FRAME, RemoteREPL
+    from rlm.execution import MAX_FRAME
 
-    ledger = session.dir / "messages.jsonl"
-    repl = RemoteREPL(
-        command=(sys.executable, "-m", "rlm.execution"),
-        cwd=str(tmp_path),
-        session=session,
+    prompt = "x" * (MAX_FRAME + 1024)
+    config = _config().model_copy(
+        update={
+            "execution_command": (sys.executable, "-m", "rlm.execution"),
+            "builtin_tools": ("ipython",),
+        }
+    )
+    client = DummyClient(
+        [
+            _tool(
+                "from rlm import history\n"
+                "h = await history()\n"
+                f"assert len(h.user_messages()[0]['content']) == {len(prompt)}\n"
+                "print('SYNCED')"
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=config, cwd=str(tmp_path)
     )
     try:
-        await repl.run_in_thread(repl.start)
-        count = (
-            "import hashlib, pathlib\n"
-            "data = (pathlib.Path(r'{}') / 'messages.jsonl').read_bytes()\n"
-            "print(len(data), hashlib.sha256(data).hexdigest())"
-        ).format(repl.session_dir)
-        line = '{"type": "note", "text": "' + "x" * 1000 + '"}\n'
-        with open(ledger, "a") as out:
-            out.write(line * (MAX_FRAME // len(line) + 1000))
-        first = await repl.run_in_thread(repl.execute, count, 60)
-        with open(ledger, "a") as out:
-            out.write('{"type": "note", "text": "after"}\n')
-        second = await repl.run_in_thread(repl.execute, count, 60)
+        await engine.prompt(prompt)
     finally:
-        await asyncio.to_thread(repl.shutdown)
-
-    import hashlib
-
-    assert ledger.stat().st_size > MAX_FRAME
-    data = ledger.read_bytes()
-    assert second.split() == [str(len(data)), hashlib.sha256(data).hexdigest()]
-    assert int(first.split()[0]) < len(data)
+        await engine.aclose()
+    assert "SYNCED" in client.calls[1]["messages"][-1]["content"]

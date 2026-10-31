@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
+import sys
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -256,7 +259,18 @@ async def test_compaction_retries_reasoning_without_final_content(session, conte
         engine.close()
 
 
-async def test_tool_result_overflow_compacts_and_retries(session):
+@pytest.mark.parametrize("split", [False, True])
+async def test_tool_result_overflow_compacts_and_retries(session, tmp_path, split):
+    """Under split execution the kernel reads the worker's synced copy of the history,
+    and the compaction notice names that copy."""
+    config = _config()
+    if split:
+        config = config.model_copy(
+            update={
+                "execution_command": (sys.executable, "-m", "rlm.execution"),
+                "builtin_tools": ("ipython",),
+            }
+        )
     client = _ScriptedClient(
         [
             _response(
@@ -294,13 +308,14 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        runtime_config=_config(),
+        runtime_config=config,
+        cwd=str(tmp_path),
     )
 
     try:
         result = await engine.run("produce a large tool result")
     finally:
-        engine.close()
+        await engine.aclose()
 
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 1
@@ -310,7 +325,9 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert retry_messages[1]["content"].startswith(
         '<runtime_event kind="compaction">\n' + SUMMARY_FRAMING
     )
-    assert str(session.dir / "messages.jsonl") in retry_messages[1]["content"]
+    named = re.search(r"available in (\S+)\. ", retry_messages[1]["content"])
+    assert named is not None
+    assert (Path(named.group(1)) != session.dir / "messages.jsonl") is split
     records = [
         json.loads(line)
         for line in (session.dir / "messages.jsonl").read_text().splitlines()
@@ -676,18 +693,3 @@ async def test_hollowed_input_falls_back_to_last_good_snapshot(session):
         assert len(client.calls) == 3
     finally:
         engine.close()
-
-
-def test_compaction_names_the_history_where_the_kernel_runs(tmp_path):
-    """In split execution the kernel runs beside the worker, whose session directory
-    holds the history snapshot; the harness's own directory is on another machine."""
-    from types import SimpleNamespace
-
-    harness = SimpleNamespace(dir=tmp_path / "harness")
-    local = SimpleNamespace(_repl=SimpleNamespace(), session=harness)
-    split = SimpleNamespace(
-        _repl=SimpleNamespace(session_dir="/worker/s"), session=harness
-    )
-
-    assert RLMEngine._kernel_session_dir(local) == str(harness.dir)
-    assert RLMEngine._kernel_session_dir(split) == "/worker/s"
