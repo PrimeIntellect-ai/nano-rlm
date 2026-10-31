@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import uuid
 
 import pytest
 
@@ -263,3 +265,232 @@ async def test_cancel_interrupts_pending_scope_setup(session, monkeypatch):
         repl._interrupt_requested.set()
         await pending
         await asyncio.to_thread(repl.shutdown)
+
+
+async def test_remote_execution_preserves_state_and_brokers_children(session, tmp_path):
+    import sys
+
+    # One CPU, like a sandbox VM: a fast job then finishes before the worker
+    # acknowledges its start, which is when its events used to get lost.
+    cpu = str(min(os.sched_getaffinity(0)))
+    config = _config(max_depth=1).model_copy(
+        update={
+            "execution_command": (
+                "taskset",
+                "-c",
+                cpu,
+                sys.executable,
+                "-m",
+                "rlm.execution",
+            ),
+            "skills": ("bash", "edit"),
+            "builtin_tools": ("ipython",),
+            "policy": _config(max_depth=1).policy.model_copy(
+                update={"compaction": False}
+            ),
+        }
+    )
+
+    def factory(**kwargs):
+        return RLMEngine(
+            client=DummyClient(
+                [
+                    _tool(
+                        "from pathlib import Path; Path('child.txt').write_text('child'); print('CHILD')"
+                    ),
+                    DummyMessage(content="child complete"),
+                ]
+            ),
+            **kwargs,
+        )
+
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        engine_factory=factory,
+    )
+    client = DummyClient(
+        [
+            _tool("value = 41; print(await bash('pwd'))"),
+            _tool(
+                """
+from pathlib import Path
+assert value == 41
+child = await rlm.agent.spawn('write child.txt')
+await child.wait(timeout=30)
+assert (await child.result()).answer == 'child complete'
+assert 'write child.txt' in (await child.history()).user_messages()[0]['content']
+assert Path('child.txt').read_text() == 'child'
+h = await rlm.history()
+assert h.user_messages()[0]['content'] == 'run remotely'
+import asyncio
+# The supervisor's jobs, services and watches run in the workspace, beside this kernel.
+job = await rlm.shell.run('echo $PPID; touch from-shell')
+assert job.ok and int(job.text.split()[0]) != SUPERVISOR_PID, job.text
+assert Path('from-shell').exists()
+import time
+started = time.monotonic()
+assert (await rlm.shell.run('true')).ok and time.monotonic() - started < 5
+svc = await rlm.services.start(SERVICE, 'echo service-up; sleep 30')
+for _ in range(50):
+    if 'service-up' in await svc.tail():
+        break
+    await asyncio.sleep(0.1)
+assert 'service-up' in await svc.tail()
+assert not (await svc.stop(grace=1)).running
+await rlm.watch.path('.')
+Path('watched.txt').write_text('x')
+for _ in range(50):
+    if any(e['type'] == 'watch.path' for e in await rlm.inbox.list()):
+        break
+    await asyncio.sleep(0.1)
+assert any(e['type'] == 'watch.path' for e in await rlm.inbox.list())
+print('REMOTE_OK')
+""".replace("SUPERVISOR_PID", str(os.getpid())).replace(
+                    "SERVICE", repr(f"split-{uuid.uuid4().hex[:8]}")
+                )
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        supervisor=supervisor,
+    )
+    try:
+        await engine.prompt("run remotely")
+        logs = (session.dir / "messages.jsonl").read_text()
+        assert any(
+            record.get("type") == "tool_result"
+            and "REMOTE_OK" in record.get("content", "")
+            for record in map(json.loads, logs.splitlines())
+        )
+    finally:
+        await engine.aclose()
+        await supervisor.aclose()
+
+
+async def test_remote_execution_interrupt_and_recovery(session, tmp_path):
+    import sys
+    from rlm.execution import RemoteREPL
+
+    repl = RemoteREPL(
+        command=(sys.executable, "-m", "rlm.execution"),
+        cwd=str(tmp_path),
+        session=session,
+    )
+    try:
+        await repl.run_in_thread(repl.start)
+        task = asyncio.create_task(
+            repl.run_in_thread(repl.execute, "import time; time.sleep(60)", 120)
+        )
+        await asyncio.sleep(1)
+        await asyncio.to_thread(repl.interrupt)
+        await asyncio.wait_for(task, 10)
+        repl.finish_interrupt()
+        result = await repl.run_in_thread(repl.execute, "print('STILL_ALIVE')", 10)
+        assert "STILL_ALIVE" in result
+        await repl.run_in_thread(repl.execute, "import os; os._exit(7)", 10)
+        assert repl.take_recovery_notices()
+        assert "RECOVERED" in await repl.run_in_thread(
+            repl.execute, "print('RECOVERED')", 10
+        )
+    finally:
+        await asyncio.to_thread(repl.shutdown)
+
+
+async def test_output_flood_is_bounded_and_kernel_can_continue(session):
+    import asyncio
+    from rlm.tools.ipython import MAX_CELL_OUTPUT_BYTES
+
+    repl = IPythonREPL(session=session, cwd=str(session.dir))
+    try:
+        await repl.run_in_thread(repl.start)
+        output = await asyncio.wait_for(
+            repl.run_in_thread(
+                repl.execute, "while True: print('x' * 65536, flush=True)", 15
+            ),
+            timeout=25,
+        )
+        assert len(output.encode()) < MAX_CELL_OUTPUT_BYTES + 256
+        assert "output exceeded" in output
+        continued = await repl.run_in_thread(repl.execute, "print('STILL_ALIVE')", 10)
+        assert "STILL_ALIVE" in continued
+    finally:
+        await repl.run_in_thread(repl.shutdown)
+
+
+async def test_bash_commands_stop_with_a_cancelled_turn_and_the_session(
+    session, tmp_path
+):
+    """A cancelled turn stops its running bash command at once, and closing the engine
+    stops a background job an earlier command left behind."""
+    alive = tmp_path / "alive"
+    loop = f"(while :; do touch {alive}; sleep 0.1; done) >/dev/null 2>&1 &"
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("bash", {"command": loop})]),
+            DummyMessage(tool_calls=[DummyToolCall("bash", {"command": "sleep 60"})]),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config().model_copy(
+            update={"builtin_tools": ("ipython", "bash")}
+        ),
+        cwd=str(tmp_path),
+    )
+    try:
+        turn = asyncio.create_task(engine.prompt("run the commands"))
+        while len(client.calls) < 2:
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, 5)
+        assert alive.exists()
+    finally:
+        await engine.aclose()
+    alive.unlink()
+    await asyncio.sleep(0.5)
+    assert not alive.exists()
+
+
+async def test_split_history_reaches_the_worker_past_the_frame_limit(session, tmp_path):
+    """The worker gets the ledger in frame-sized chunks: a prompt larger than one frame
+    still reaches the kernel's history whole."""
+    import sys
+
+    from rlm.execution import MAX_FRAME
+
+    prompt = "x" * (MAX_FRAME + 1024)
+    config = _config().model_copy(
+        update={
+            "execution_command": (sys.executable, "-m", "rlm.execution"),
+            "builtin_tools": ("ipython",),
+        }
+    )
+    client = DummyClient(
+        [
+            _tool(
+                "from rlm import history\n"
+                "h = await history()\n"
+                f"assert len(h.user_messages()[0]['content']) == {len(prompt)}\n"
+                "print('SYNCED')"
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=config, cwd=str(tmp_path)
+    )
+    try:
+        await engine.prompt(prompt)
+    finally:
+        await engine.aclose()
+    assert "SYNCED" in client.calls[1]["messages"][-1]["content"]

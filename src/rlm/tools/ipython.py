@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import functools
 import os
 from queue import Empty
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -254,9 +257,40 @@ class _KernelDied(RuntimeError):
 
 
 MAX_RECOVERY_ATTEMPTS = 3
+MAX_CELL_OUTPUT_BYTES = 1024 * 1024
+
+
+def kill_marked_groups(marker: str) -> None:
+    """SIGKILL the process group of every process whose environment holds `marker`,
+    read from /proc; a no-op where there is none. Reparented and detached processes
+    keep their environment, so this also reaches the commands of a dead kernel. The
+    caller's own group is spared."""
+    try:
+        entries = [entry for entry in os.listdir("/proc") if entry.isdigit()]
+    except FileNotFoundError:
+        return
+    needle = marker.encode()
+    groups = set()
+    for entry in entries:
+        try:
+            with open(f"/proc/{entry}/environ", "rb") as environ:
+                if needle not in environ.read().split(b"\0"):
+                    continue
+            groups.add(os.getpgid(int(entry)))
+        except OSError:
+            continue
+    groups -= {0, 1, os.getpgrp()}
+    for group in groups:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, signal.SIGKILL)
+
+
+KERNEL_TOKEN_ENV = "RLM_KERNEL_TOKEN"
 
 
 class IPythonREPL:
+    _kernel_token: str | None = None
+
     """Persistent IPython kernel communicating via Jupyter protocol."""
 
     def __init__(
@@ -283,6 +317,9 @@ class IPythonREPL:
         self._ipc_dir = None
         self._lock = threading.Lock()
         self._interrupt_requested = threading.Event()
+        # Marks every process the kernel and the shell tools start, wherever it is
+        # reparented: restart and shutdown kill what carries it.
+        self._kernel_token = uuid.uuid4().hex
         self._scope_id: str | None = None
         self._recovery_attempts = 0
         self._recovery_failed = False
@@ -326,6 +363,7 @@ class IPythonREPL:
             self.kernel_env,
             private_dir=self._ipc_dir,
         )
+        kernel_env[KERNEL_TOKEN_ENV] = self._kernel_token
         launcher = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
         launcher_dir = os.path.dirname(os.path.abspath(launcher))
         path_entries = kernel_env.get("PATH", "").split(os.pathsep)
@@ -522,10 +560,22 @@ import rlm
             ):
                 return True
 
+    def _kill_kernel_commands(self):
+        """Kill the process groups the kernel's commands run in. Shell commands start
+        sessions of their own, so killing the kernel's process group misses them."""
+        if self._kernel_token is not None:
+            kill_marked_groups(f"{KERNEL_TOKEN_ENV}={self._kernel_token}")
+
+    def command_env(self, env: Mapping[str, str]) -> dict[str, str]:
+        """`env` marked like the kernel's own commands, for a shell command a tool runs
+        beside the kernel, so that restart and shutdown stop it too."""
+        return {**env, KERNEL_TOKEN_ENV: self._kernel_token}
+
     def restart_kernel(self):
         """Restart the kernel and restore the initial REPL state."""
         if self._kc:
             self._kc.stop_channels()
+        self._kill_kernel_commands()
         self._km.restart_kernel(now=True)
         self._kc = self._km.client()
         self._kc.start_channels()
@@ -593,6 +643,7 @@ import rlm
         deadline = None if timeout is None else time.monotonic() + timeout
 
         outputs: list[str] = []
+        output_bytes = 0
         try:
             while True:
                 if not self._km.is_alive():
@@ -622,18 +673,30 @@ import rlm
                 msg_type = msg["msg_type"]
                 content = msg["content"]
 
+                text = ""
                 if msg_type == "stream":
-                    outputs.append(content["text"])
+                    text = content["text"]
                 elif msg_type == "execute_result":
                     text = content.get("data", {}).get("text/plain", "")
                     if text:
-                        outputs.append(text + "\n")
+                        text += "\n"
                 elif msg_type == "error":
                     tb = "\n".join(content.get("traceback", []))
                     tb = _ANSI_RE.sub("", tb)
-                    outputs.append(tb)
+                    text = tb
                 elif msg_type == "status" and content["execution_state"] == "idle":
                     break
+                if text:
+                    data = text.encode("utf-8", errors="replace")
+                    remaining = MAX_CELL_OUTPUT_BYTES - output_bytes
+                    outputs.append(data[:remaining].decode("utf-8", errors="replace"))
+                    output_bytes += min(len(data), remaining)
+                    if len(data) >= remaining:
+                        self._interrupt_and_recover(msg_id)
+                        outputs.append(
+                            "\n[cell output exceeded 1 MiB; execution interrupted]"
+                        )
+                        break
         finally:
             try:
                 timeout = 0.1 if self._interrupt_requested.is_set() else 5
@@ -649,6 +712,7 @@ import rlm
         if self._kc:
             self._kc.stop_channels()
             self._kc = None
+        self._kill_kernel_commands()
         if self._km and self._km.has_kernel:
             self._km.shutdown_kernel(now=True)
         if self._km:

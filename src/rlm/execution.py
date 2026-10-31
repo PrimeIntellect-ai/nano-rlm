@@ -1,0 +1,518 @@
+"""Tool-call execution sessions over orchestrator-supplied transports.
+
+The command is supplied by the orchestrator (for example docker exec -i). Only
+kernel configuration and generated skills cross into the worker; model credentials,
+conversation ownership, and recursive agent loops stay in the calling process.
+"""
+
+from __future__ import annotations
+
+import concurrent.futures
+import json
+import socket
+import struct
+import argparse
+import base64
+import hmac
+import logging
+import os
+from dataclasses import asdict
+import sys
+import tempfile
+import threading
+import uuid
+from pathlib import Path
+from types import SimpleNamespace
+
+from rlm.broker import BrokerEndpoint
+from rlm.tools.ipython import IPythonREPL, build_kernel_env
+from rlm.tools.base import ToolContext, ToolOutcome
+from rlm.tools.registry import get_builtin_tool
+from rlm.types import IpythonExecuted, RLMMetrics, TokenUsage
+from rlm.workspace_host import WorkspaceHost
+from rlm.execution_transport import ExecutionTransport, StdioTransport, TcpTransport
+
+logger = logging.getLogger(__name__)
+
+WORKSPACE_TOOLS = ("ipython", "bash", "edit", "fetch")
+
+
+def validate_tools(names):
+    unknown = set(names) - set(WORKSPACE_TOOLS)
+    if unknown:
+        raise ValueError(f"split execution does not support tools: {sorted(unknown)}")
+
+
+MAX_FRAME = 16 * 1024 * 1024
+HISTORY_CHUNK = 4 * 1024 * 1024
+"""Raw bytes of the session ledger per frame; base64 keeps a chunk well under
+MAX_FRAME, and a long session's ledger syncs as several."""
+
+
+def _read(stream, size):
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = stream.read(size - len(chunks))
+        if not chunk:
+            raise EOFError("execution worker disconnected")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def _receive(stream):
+    size = struct.unpack("!I", _read(stream, 4))[0]
+    if size > MAX_FRAME:
+        raise ValueError("execution frame exceeds 16 MiB")
+    value = json.loads(_read(stream, size))
+    if not isinstance(value, dict):
+        raise ValueError("execution frame must be an object")
+    return value
+
+
+def _send(stream, value):
+    data = json.dumps(value).encode()
+    if len(data) > MAX_FRAME:
+        raise ValueError("execution frame exceeds 16 MiB")
+    stream.write(struct.pack("!I", len(data)) + data)
+    stream.flush()
+
+
+class _Peer:
+    """Bidirectional RPC: callbacks must keep flowing during a running cell."""
+
+    def __init__(self, reader, writer, handler):
+        self.reader, self.writer, self.handler = reader, writer, handler
+        self.lock = threading.Lock()
+        self.pending = {}
+        self.closed = threading.Event()
+        self.error = None
+        self.slots = threading.BoundedSemaphore(32)
+        self.thread = threading.Thread(target=self._listen, daemon=True)
+        self.thread.start()
+
+    def send(self, message):
+        with self.lock:
+            if self.closed.is_set():
+                raise RuntimeError("execution connection closed") from self.error
+            _send(self.writer, message)
+
+    def call(self, method, params=None, timeout=None):
+        key = uuid.uuid4().hex
+        future = concurrent.futures.Future()
+        with self.lock:
+            if self.closed.is_set():
+                raise RuntimeError("execution connection closed") from self.error
+            self.pending[key] = future
+        try:
+            self.send({"id": key, "method": method, "params": params})
+            return future.result(timeout=timeout)
+        finally:
+            with self.lock:
+                self.pending.pop(key, None)
+
+    def _answer(self, message):
+        try:
+            result = self.handler(message["method"], message.get("params"))
+            reply = {"id": message["id"], "result": result}
+        except Exception as exc:
+            reply = {"id": message["id"], "error": str(exc)}
+        try:
+            try:
+                self.send(reply)
+            except ValueError as exc:
+                self.send({"id": message["id"], "error": str(exc)})
+        except (OSError, RuntimeError):
+            pass  # the caller disconnected while its operation was settling
+        finally:
+            self.slots.release()
+
+    def _listen(self):
+        try:
+            while True:
+                message = _receive(self.reader)
+                if "method" in message:
+                    if not self.slots.acquire(blocking=False):
+                        self.send(
+                            {
+                                "id": message["id"],
+                                "error": "execution request limit reached",
+                            }
+                        )
+                        continue
+                    threading.Thread(
+                        target=self._answer, args=(message,), daemon=True
+                    ).start()
+                else:
+                    with self.lock:
+                        future = self.pending.get(message["id"])
+                    if future is not None:
+                        if "error" in message:
+                            future.set_exception(RuntimeError(message["error"]))
+                        else:
+                            future.set_result(message["result"])
+        except Exception as exc:
+            with self.lock:
+                self.error = exc
+                self.closed.set()
+                for future in self.pending.values():
+                    if not future.done():
+                        future.set_exception(exc)
+
+
+class RemoteREPL(IPythonREPL):
+    """The IPython execution-session interface backed by a separate worker."""
+
+    def __init__(
+        self,
+        *,
+        command=None,
+        tcp=None,
+        transport: ExecutionTransport | None = None,
+        tools=("ipython",),
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        if sum(option is not None for option in (command, tcp, transport)) != 1:
+            raise ValueError("choose one execution transport")
+        validate_tools(tools)
+        self.tools = list(tools)
+        self.transport = transport or (
+            TcpTransport(tcp) if tcp else StdioTransport(command)
+        )
+        self._peer = None
+        self.session_dir = None
+        self._history_sent = 0
+        # Interrupts and teardown run off the caller's thread, which can be the
+        # supervisor's event loop, in order and without waiting on a slow worker.
+        self._control = concurrent.futures.ThreadPoolExecutor(
+            1, thread_name_prefix="rlm-control"
+        )
+        self._control_done: concurrent.futures.Future | None = None
+        self._control_closed = False
+
+    def _control_call(self, method, timeout):
+        if self._control_closed:
+            return
+        peer = self._peer
+
+        def call():
+            if peer is not None and not peer.closed.is_set():
+                try:
+                    peer.call(method, timeout=timeout)
+                except Exception:
+                    logger.warning("execution worker %s failed", method, exc_info=True)
+
+        self._control_done = self._control.submit(call)
+
+    def _broker(self, method, request):
+        if method != "broker" or self.broker_endpoint is None:
+            raise PermissionError("unknown execution callback")
+        if request.get("capability") != self.broker_endpoint.capability:
+            raise PermissionError("invalid execution capability")
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.connect(self.broker_endpoint.socket_path)
+            with connection.makefile("rwb", buffering=0) as stream:
+                _send(stream, request)
+                return _receive(stream)
+
+    def start(self):
+        reader, writer = self.transport.connect()
+        self._peer = _Peer(reader, writer, self._broker)
+        self._history_sent = 0
+        modules = {
+            path.name: path.read_text() for path in self.session.dir.glob("*.py")
+        }
+        self.session_dir = self._peer.call(
+            "start",
+            {
+                "tools": self.tools,
+                "cwd": self.cwd,
+                "kernel_env": self.kernel_env,
+                "depth": self.depth,
+                "max_depth": self.max_depth,
+                "exec_timeout": self.exec_timeout,
+                "allow_git": self.allow_git,
+                "capability": self.broker_endpoint.capability
+                if self.broker_endpoint
+                else None,
+                "modules": modules,
+            },
+            timeout=120,
+        )
+
+    def execute_tool(self, name, args):
+        if self._control_done is not None:
+            # A call must not overtake a pending interrupt or its release.
+            self._control_done.result()
+        # The ledger only grows: the worker gets what it hasn't seen, in chunks
+        # that fit a frame however long the session runs.
+        with open(self.session.dir / "messages.jsonl", "rb") as ledger:
+            ledger.seek(self._history_sent)
+            new = ledger.read()
+        *head, last = [
+            new[start : start + HISTORY_CHUNK]
+            for start in range(0, len(new), HISTORY_CHUNK)
+        ] or [b""]
+        for chunk in head:
+            self._peer.call("history", self._history_chunk(chunk))
+            self._history_sent += len(chunk)
+        result = self._peer.call(
+            "tool",
+            {
+                "name": name,
+                "args": args,
+                "scope_id": self._scope_id,
+                "history": self._history_chunk(last),
+            },
+        )
+        self._history_sent += len(last)
+        self._recovery_notices.extend(result["notices"])
+        with open(self.session.dir / "programmatic_tool_calls.jsonl", "ab") as log:
+            log.write(base64.b64decode(result["tool_log"]))
+        return ToolOutcome(
+            content=result["output"],
+            metric_events=[
+                IpythonExecuted(**event) for event in result["metric_events"]
+            ],
+        )
+
+    def _history_chunk(self, data: bytes) -> dict:
+        return {"offset": self._history_sent, "data": base64.b64encode(data).decode()}
+
+    def execute(self, code, timeout=None):
+        return self.execute_tool("ipython", {"code": code, "timeout": timeout}).content
+
+    def host_call(self, method, params):
+        """Call the worker's WorkspaceHost: the supervisor's jobs, services and path
+        watches in the workspace."""
+        return self._peer.call(method, params)
+
+    def interrupt(self):
+        self._control_call("interrupt", 5)
+
+    def finish_interrupt(self):
+        self._control_call("finish_interrupt", 5)
+
+    def shutdown(self):
+        def close():
+            try:
+                if self._peer is not None and not self._peer.closed.is_set():
+                    self._peer.call("close", timeout=30)
+            except Exception:
+                logger.warning("execution worker close failed", exc_info=True)
+            finally:
+                self.transport.close()
+                self._executor.shutdown(wait=False)
+
+        if self._control_closed:
+            return
+        self._control_closed = True
+        self._control.submit(close)
+        self._control.shutdown(wait=False)
+
+
+class _Worker:
+    def __init__(self):
+        self.repl = None
+        self.tools = []
+        self.context = None
+        self.peer = None
+        self.directory = tempfile.TemporaryDirectory(prefix="rlm-execution-")
+        self.session_dir = Path(self.directory.name)
+        self.listener = None
+        self.closed = threading.Event()
+        self._tool_log_sent = 0
+        self.host = None
+
+    def _accept(self):
+        while not self.closed.is_set():
+            try:
+                connection, _ = self.listener.accept()
+            except OSError:
+                return
+            threading.Thread(
+                target=self._proxy, args=(connection,), daemon=True
+            ).start()
+
+    def _proxy(self, connection):
+        with connection, connection.makefile("rwb", buffering=0) as stream:
+            try:
+                request = _receive(stream)
+                result = self.peer.call("broker", request)
+            except Exception as exc:
+                result = {"error": str(exc)}
+            try:
+                _send(stream, result)
+            except OSError:
+                pass  # interrupted kernels close their pending callbacks
+
+    def handle(self, method, params):
+        if method == "start":
+            if self.repl is not None:
+                raise ValueError("execution session already started")
+            params = dict(params)
+            self.tools = params.pop("tools")
+            validate_tools(self.tools)
+            modules = params.pop("modules")
+            for name, source in modules.items():
+                if Path(name).name != name or not name.endswith(".py"):
+                    raise ValueError("invalid generated skill name")
+                (self.session_dir / name).write_text(source)
+            capability = params.pop("capability")
+            endpoint = None
+            if capability:
+                path = str(self.session_dir / "broker.sock")
+                self.listener = socket.socket(socket.AF_UNIX)
+                self.listener.bind(path)
+                self.listener.listen(32)
+                threading.Thread(target=self._accept, daemon=True).start()
+                endpoint = BrokerEndpoint(path, capability)
+            self.repl = IPythonREPL(
+                session=SimpleNamespace(dir=self.session_dir),
+                broker_endpoint=endpoint,
+                **params,
+            )
+            self.context = ToolContext(
+                messages=[],
+                metrics=RLMMetrics(),
+                total_usage=TokenUsage(),
+                last_prompt_tokens=0,
+                exec_timeout=self.repl.exec_timeout or 300,
+                allow_git=self.repl.allow_git,
+                repl=self.repl,
+                cwd=self.repl.cwd,
+                env=self.repl.command_env(build_kernel_env(self.repl.kernel_env)),
+                interrupt_event=self.repl._interrupt_requested,
+            )
+            # All Jupyter operations use the same dedicated thread.
+            self.repl._executor.submit(self.repl.start).result()
+            return str(self.session_dir)
+        if self.repl is None:
+            raise ValueError("execution session has not started")
+        if method == "history":
+            self._write_history(params)
+            return {}
+        if method.split(".", 1)[0] in ("host", "jobs", "services", "watch"):
+            if self.host is None:
+                self.host = WorkspaceHost(self.session_dir)
+            return self.host.handle(method, params)
+        if method == "tool":
+
+            def execute():
+                self._write_history(params["history"])
+                self.repl.set_broker_scope(params["scope_id"])
+                tool = get_builtin_tool(params["name"], self.tools)
+                if tool is None:
+                    raise ValueError("tool is not enabled for this execution session")
+                outcome = tool.execute(params["args"], self.context)
+                return {
+                    "output": outcome.content,
+                    "metric_events": [asdict(event) for event in outcome.metric_events],
+                    "notices": self.repl.take_recovery_notices(),
+                    "tool_log": base64.b64encode(self._new_tool_log()).decode(),
+                }
+
+            return self.repl._executor.submit(execute).result()
+        if method == "interrupt":
+            self.repl.interrupt()
+        elif method == "finish_interrupt":
+            self.repl.finish_interrupt()
+        elif method == "close":
+            self.repl.shutdown()
+            self.repl = None
+        else:
+            raise ValueError(f"unknown execution method: {method}")
+
+    def _write_history(self, chunk):
+        """Write a chunk of the harness's ledger at its offset. Rewriting the same
+        bytes is harmless, so a retried chunk can't duplicate history."""
+        path = self.session_dir / "messages.jsonl"
+        path.touch()
+        with path.open("r+b") as ledger:
+            if chunk["offset"] > ledger.seek(0, os.SEEK_END):
+                raise ValueError("execution history is out of sync")
+            ledger.seek(chunk["offset"])
+            ledger.write(base64.b64decode(chunk["data"]))
+            ledger.truncate()
+
+    def _new_tool_log(self) -> bytes:
+        """The programmatic tool calls logged since the last tool call returned."""
+        path = self.session_dir / "programmatic_tool_calls.jsonl"
+        if not path.exists():
+            return b""
+        with path.open("rb") as log:
+            log.seek(self._tool_log_sent)
+            new = log.read()
+        self._tool_log_sent += len(new)
+        return new
+
+    def close(self):
+        self.closed.set()
+        if self.listener is not None:
+            self.listener.close()
+        if self.host is not None:
+            self.host.close()
+        if self.repl is not None:
+            self.repl.interrupt()
+            self.repl.shutdown()
+        self.directory.cleanup()
+
+
+def _serve(reader, writer):
+    worker = _Worker()
+    worker.peer = _Peer(reader, writer, worker.handle)
+    try:
+        worker.peer.closed.wait()
+    finally:
+        worker.close()
+
+
+def _serve_tcp(connection, token, slots):
+    try:
+        with connection, connection.makefile("rwb", buffering=0) as stream:
+            connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            connection.settimeout(10)
+            supplied = _receive(stream).get("token")
+            if not isinstance(supplied, str) or not hmac.compare_digest(
+                supplied, token
+            ):
+                _send(stream, {"authenticated": False})
+                return
+            _send(stream, {"authenticated": True})
+            connection.settimeout(None)
+            _serve(stream, stream)
+    except (OSError, EOFError, ValueError):
+        pass  # unauthenticated or disconnected clients have no remaining session
+    finally:
+        slots.release()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Tool execution worker")
+    parser.add_argument("--listen", metavar="HOST")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+    output = sys.stdout.buffer
+    sys.stdout = sys.stderr  # dependency diagnostics must not corrupt the wire
+    if args.listen is None:
+        _serve(sys.stdin.buffer, output)
+        return
+    token = os.environ.pop("RLM_EXECUTION_TOKEN", "")
+    if len(token) < 32:
+        parser.error("TCP workers require RLM_EXECUTION_TOKEN (at least 32 characters)")
+    slots = threading.BoundedSemaphore(32)
+    with socket.create_server((args.listen, args.port)) as listener:
+        # With --port 0 the kernel picks the port; the orchestrator reads it here.
+        print(f"listening on {args.listen}:{listener.getsockname()[1]}", flush=True)
+        while True:
+            connection, _ = listener.accept()
+            if not slots.acquire(blocking=False):
+                connection.close()
+                continue
+            threading.Thread(
+                target=_serve_tcp, args=(connection, token, slots), daemon=True
+            ).start()
+
+
+if __name__ == "__main__":
+    main()

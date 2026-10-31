@@ -201,7 +201,7 @@ class RLMEngine:
         self.runtime_config = runtime_config
         config = self.runtime_config
         self.model = config.model
-        self.cwd = cwd or os.getcwd()
+        self.cwd = config.execution_cwd or cwd or os.getcwd()
         self.exec_timeout = config.policy.exec_timeout
         self.max_total_turns = config.policy.max_total_turns
         self.max_tool_output_bytes = config.policy.max_tool_output_bytes
@@ -520,6 +520,10 @@ class RLMEngine:
         self._active_tools = get_active_builtin_tools(
             self.exec_timeout, self.builtin_tools
         )
+        if self.runtime_config.split_execution:
+            from rlm.execution import validate_tools
+
+            validate_tools(tool.name for tool in self._active_tools)
         self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
 
         if self.compaction and self.summarize_at_tokens is None:
@@ -579,7 +583,17 @@ class RLMEngine:
                     self._owns_supervisor = False
                 raise
 
-        self._repl = IPythonREPL(
+        repl_type = IPythonREPL
+        repl_options = {}
+        if self.runtime_config.split_execution:
+            from rlm.execution import RemoteREPL
+
+            repl_type = RemoteREPL
+            repl_options["command"] = self.runtime_config.execution_command
+            repl_options["tcp"] = self.runtime_config.execution_tcp
+            repl_options["tools"] = [tool.name for tool in self._active_tools]
+        self._repl = repl_type(
+            **repl_options,
             cwd=self.cwd,
             session=self.session,
             kernel_env=self.kernel_env,
@@ -602,6 +616,14 @@ class RLMEngine:
                     cancelled = True
             if cancelled:
                 raise asyncio.CancelledError
+            if (
+                self.runtime_config.split_execution
+                and self.depth == 0
+                and self._supervisor is not None
+            ):
+                # The root's worker lives for the session, so the session's jobs and
+                # services run through it, wherever an agent started them.
+                self._supervisor.attach_host(self._repl.host_call)
 
             system_prompt = self._load_system_prompt(self._active_tools)
 
@@ -924,9 +946,14 @@ class RLMEngine:
                     if scope_id is not None:
                         repl.set_broker_scope(scope_id)
                     run = repl.run_in_thread if repl is not None else asyncio.to_thread
-                    tool_task = asyncio.create_task(
-                        run(tool.execute, tool_args, self._tool_context(messages))
-                    )
+                    if self.runtime_config.split_execution:
+                        tool_task = asyncio.create_task(
+                            run(repl.execute_tool, tool.name, tool_args)
+                        )
+                    else:
+                        tool_task = asyncio.create_task(
+                            run(tool.execute, tool_args, self._tool_context(messages))
+                        )
                     try:
                         tool_result = await asyncio.shield(tool_task)
                     except asyncio.CancelledError:
@@ -1378,7 +1405,7 @@ class RLMEngine:
             + "\n\n"
             + summary_text
             + "\n\nFull conversation history is available in "
-            + str(self.session.dir / "messages.jsonl")
+            + str(Path(self._kernel_session_dir()) / "messages.jsonl")
             + ". Use `from rlm import history; h = await history()` to inspect "
             "`h.windows[w].messages[i]`, `h.messages[i]`, or `h.user_messages()`. "
             "Search or read relevant records with Python when the summary lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
@@ -1476,12 +1503,17 @@ class RLMEngine:
         }
         return snapshot
 
+    def _kernel_session_dir(self) -> str:
+        """The session directory as the kernel sees it: in split execution, the
+        worker's, since the harness's own is on another machine."""
+        return getattr(self._repl, "session_dir", None) or str(self.session.dir)
+
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         return build_system_prompt(
             self.cwd,
             discover_skills(self.session.dir),
             depth=self.depth,
-            session_dir=str(self.session.dir),
+            session_dir=self._kernel_session_dir(),
             allow_recursion=self.depth < self.max_depth,
             delegation_prompt=self.runtime_config.policy.delegation_prompt,
             allow_git=self.allow_git,
@@ -1501,6 +1533,7 @@ class RLMEngine:
         )
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:
+        repl = self._repl if isinstance(self._repl, IPythonREPL) else None
         return ToolContext(
             messages=messages,
             metrics=self._metrics,
@@ -1511,6 +1544,10 @@ class RLMEngine:
             repl=self._repl,
             state=self._tool_state,
             cwd=self.cwd,
+            # A shell command stops with a cancelled turn, and with the session's
+            # kernel like the kernel's own commands.
+            env=repl.command_env(os.environ) if repl else None,
+            interrupt_event=repl._interrupt_requested if repl else None,
         )
 
 
