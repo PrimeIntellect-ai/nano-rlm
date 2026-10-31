@@ -56,6 +56,9 @@ class TcpTransport:
         self.connection = socket.create_connection(
             (self.endpoint.host, self.endpoint.port), timeout=10
         )
+        # Each frame is one write, and calls overlap (the event long-poll, kernel
+        # callbacks): Nagle would hold a frame until the previous one is acknowledged.
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.stream = self.connection.makefile("rwb", buffering=0)
         try:
             _send(self.stream, {"token": self.endpoint.token})

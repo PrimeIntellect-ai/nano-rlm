@@ -470,6 +470,7 @@ def _serve(reader, writer):
 def _serve_tcp(connection, token, slots):
     try:
         with connection, connection.makefile("rwb", buffering=0) as stream:
+            connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             connection.settimeout(10)
             supplied = _receive(stream).get("token")
             if not isinstance(supplied, str) or not hmac.compare_digest(
