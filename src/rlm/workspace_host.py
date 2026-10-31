@@ -216,6 +216,7 @@ class RemoteShellJobs(ShellJobs):
         self.host = host
         self._done: dict[str, asyncio.Future] = {}
         self._copies: dict[str, Path] = {}
+        self._early: dict[str, list[dict]] = {}
 
     async def start_remote(
         self,
@@ -253,6 +254,8 @@ class RemoteShellJobs(ShellJobs):
         self.jobs[job.info.id] = job
         job.task = asyncio.create_task(self._follow(job))
         job.task.add_done_callback(self._observe_failure)
+        for event in self._early.pop(job.info.id, []):
+            self.apply(event)
         return job.snapshot()
 
     def output_file(self, job: JobRecord) -> str:
@@ -285,7 +288,11 @@ class RemoteShellJobs(ShellJobs):
 
     def apply(self, event: dict) -> None:
         job = self.jobs.get(event["job"]["id"])
-        if job is None or job.finished is not None:
+        if job is None:
+            # A fast job's events can arrive before the reply that registers it.
+            self._early.setdefault(event["job"]["id"], []).append(event)
+            return
+        if job.finished is not None:
             return
         data = base64.b64decode(event["data"])
         start = job.info.output_bytes

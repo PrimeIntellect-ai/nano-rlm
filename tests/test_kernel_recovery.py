@@ -270,9 +270,19 @@ async def test_cancel_interrupts_pending_scope_setup(session, monkeypatch):
 async def test_remote_execution_preserves_state_and_brokers_children(session, tmp_path):
     import sys
 
+    # One CPU, like a sandbox VM: a fast job then finishes before the worker
+    # acknowledges its start, which is when its events used to get lost.
+    cpu = str(min(os.sched_getaffinity(0)))
     config = _config(max_depth=1).model_copy(
         update={
-            "execution_command": (sys.executable, "-m", "rlm.execution"),
+            "execution_command": (
+                "taskset",
+                "-c",
+                cpu,
+                sys.executable,
+                "-m",
+                "rlm.execution",
+            ),
             "skills": ("bash", "edit"),
             "builtin_tools": ("ipython",),
             "policy": _config(max_depth=1).policy.model_copy(
@@ -319,6 +329,9 @@ import asyncio
 job = await rlm.shell.run('echo $PPID; touch from-shell')
 assert job.ok and int(job.text.split()[0]) != SUPERVISOR_PID, job.text
 assert Path('from-shell').exists()
+import time
+started = time.monotonic()
+assert (await rlm.shell.run('true')).ok and time.monotonic() - started < 5
 svc = await rlm.services.start(SERVICE, 'echo service-up; sleep 30')
 for _ in range(50):
     if 'service-up' in await svc.tail():
