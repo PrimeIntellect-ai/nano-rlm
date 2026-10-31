@@ -317,6 +317,9 @@ class IPythonREPL:
         self._ipc_dir = None
         self._lock = threading.Lock()
         self._interrupt_requested = threading.Event()
+        # Marks every process the kernel and the shell tools start, wherever it is
+        # reparented: restart and shutdown kill what carries it.
+        self._kernel_token = uuid.uuid4().hex
         self._scope_id: str | None = None
         self._recovery_attempts = 0
         self._recovery_failed = False
@@ -360,8 +363,6 @@ class IPythonREPL:
             self.kernel_env,
             private_dir=self._ipc_dir,
         )
-        # Marks every process the kernel starts, wherever it is reparented.
-        self._kernel_token = uuid.uuid4().hex
         kernel_env[KERNEL_TOKEN_ENV] = self._kernel_token
         launcher = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
         launcher_dir = os.path.dirname(os.path.abspath(launcher))
@@ -565,6 +566,11 @@ import rlm
         if self._kernel_token is not None:
             kill_marked_groups(f"{KERNEL_TOKEN_ENV}={self._kernel_token}")
 
+    def command_env(self, env: Mapping[str, str]) -> dict[str, str]:
+        """`env` marked like the kernel's own commands, for a shell command a tool runs
+        beside the kernel, so that restart and shutdown stop it too."""
+        return {**env, KERNEL_TOKEN_ENV: self._kernel_token}
+
     def restart_kernel(self):
         """Restart the kernel and restore the initial REPL state."""
         if self._kc:
@@ -706,8 +712,8 @@ import rlm
         if self._kc:
             self._kc.stop_channels()
             self._kc = None
+        self._kill_kernel_commands()
         if self._km and self._km.has_kernel:
-            self._kill_kernel_commands()
             self._km.shutdown_kernel(now=True)
         if self._km:
             self._km = None

@@ -1397,7 +1397,7 @@ class RLMEngine:
             + "\n\n"
             + summary_text
             + "\n\nFull conversation history is available in "
-            + str(self.session.dir / "messages.jsonl")
+            + str(Path(self._kernel_session_dir()) / "messages.jsonl")
             + ". Use `from rlm import history; h = await history()` to inspect "
             "`h.windows[w].messages[i]`, `h.messages[i]`, or `h.user_messages()`. "
             "Search or read relevant records with Python when the summary lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
@@ -1495,13 +1495,17 @@ class RLMEngine:
         }
         return snapshot
 
+    def _kernel_session_dir(self) -> str:
+        """The session directory as the kernel sees it: in split execution, the
+        worker's, since the harness's own is on another machine."""
+        return getattr(self._repl, "session_dir", None) or str(self.session.dir)
+
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         return build_system_prompt(
             self.cwd,
             discover_skills(self.session.dir),
             depth=self.depth,
-            session_dir=getattr(self._repl, "session_dir", None)
-            or str(self.session.dir),
+            session_dir=self._kernel_session_dir(),
             allow_recursion=self.depth < self.max_depth,
             delegation_prompt=self.runtime_config.policy.delegation_prompt,
             allow_git=self.allow_git,
@@ -1522,6 +1526,7 @@ class RLMEngine:
         )
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:
+        repl = self._repl if isinstance(self._repl, IPythonREPL) else None
         return ToolContext(
             messages=messages,
             metrics=self._metrics,
@@ -1532,6 +1537,10 @@ class RLMEngine:
             repl=self._repl,
             state=self._tool_state,
             cwd=self.cwd,
+            # A shell command stops with a cancelled turn, and with the session's
+            # kernel like the kernel's own commands.
+            env=repl.command_env(os.environ) if repl else None,
+            interrupt_event=repl._interrupt_requested if repl else None,
         )
 
 

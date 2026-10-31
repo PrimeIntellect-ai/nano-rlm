@@ -391,3 +391,51 @@ async def test_output_flood_is_bounded_and_kernel_can_continue(session):
         assert "STILL_ALIVE" in continued
     finally:
         await repl.run_in_thread(repl.shutdown)
+
+
+async def test_shell_tool_commands_stop_with_the_turn_and_the_session(
+    session, tmp_path
+):
+    """A native bash command stops when its turn is cancelled, and a background job it
+    leaves behind stops when the session's kernel shuts down."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from rlm.tools.bash import BashTool
+
+    repl = IPythonREPL(session=session, cwd=str(tmp_path))
+    engine = SimpleNamespace(
+        _repl=repl,
+        _metrics=None,
+        _total_usage=None,
+        _last_prompt_tokens=0,
+        exec_timeout=60,
+        allow_git=False,
+        _tool_state={},
+        cwd=str(tmp_path),
+    )
+    context = RLMEngine._tool_context(engine, [])
+    alive = tmp_path / "alive"
+    await repl.run_in_thread(repl.start)
+    try:
+        running = asyncio.create_task(
+            asyncio.to_thread(BashTool().execute, {"command": "sleep 60"}, context)
+        )
+        await asyncio.sleep(0.5)
+        repl.interrupt()
+        outcome = await asyncio.wait_for(running, 5)
+        repl.finish_interrupt()
+        assert "interrupted" in outcome.content
+
+        loop = f"(while :; do touch {alive}; sleep 0.1; done) >/dev/null 2>&1 &"
+        BashTool().execute({"command": loop}, context)
+        await asyncio.sleep(0.5)
+        assert alive.exists()
+    finally:
+        await repl.run_in_thread(repl.shutdown)
+    try:
+        alive.unlink()
+        await asyncio.sleep(0.5)
+        assert not alive.exists()
+    finally:
+        subprocess.run(["pkill", "-f", f"touch {alive}"], check=False)

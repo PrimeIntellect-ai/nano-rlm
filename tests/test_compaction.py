@@ -676,3 +676,18 @@ async def test_hollowed_input_falls_back_to_last_good_snapshot(session):
         assert len(client.calls) == 3
     finally:
         engine.close()
+
+
+def test_compaction_names_the_history_where_the_kernel_runs(tmp_path):
+    """In split execution the kernel runs beside the worker, whose session directory
+    holds the history snapshot; the harness's own directory is on another machine."""
+    from types import SimpleNamespace
+
+    harness = SimpleNamespace(dir=tmp_path / "harness")
+    local = SimpleNamespace(_repl=SimpleNamespace(), session=harness)
+    split = SimpleNamespace(
+        _repl=SimpleNamespace(session_dir="/worker/s"), session=harness
+    )
+
+    assert RLMEngine._kernel_session_dir(local) == str(harness.dir)
+    assert RLMEngine._kernel_session_dir(split) == "/worker/s"
