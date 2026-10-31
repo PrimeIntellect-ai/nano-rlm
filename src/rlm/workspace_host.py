@@ -30,6 +30,9 @@ EVENT_BYTES = 4 * 1024 * 1024
 """Job output one events call carries, so its reply stays well under a frame."""
 EVENT_WAIT = 1.0
 """Seconds an events call waits for something to report."""
+EVENT_LINGER = 0.05
+"""Seconds an events call holds a running job's new output for the job to finish, so
+a short command's output and exit cost the supervisor one round trip, not two."""
 _JOB_FIELDS = [field.name for field in dataclasses.fields(JobInfo)]
 
 
@@ -137,6 +140,9 @@ class WorkspaceHost:
         with self._changed:
             self._changed.wait_for(
                 lambda: self._jobs_changed or self._paths, timeout=wait
+            )
+            self._changed.wait_for(
+                lambda: all(self._jobs_changed.values()), timeout=EVENT_LINGER
             )
             changed, self._jobs_changed = self._jobs_changed, {}
             paths, self._paths = self._paths, []
