@@ -340,7 +340,7 @@ def _blocked_option_from_python_call(
     return None
 
 
-class _GitCallFinder(ast.NodeVisitor):
+class _GitCallFinder:
     """Single-pass AST walker tracking simple aliases for blocked callees.
 
     Tracks three alias sources:
@@ -362,11 +362,21 @@ class _GitCallFinder(ast.NodeVisitor):
         self.found: str | None = None
         self.allow_git = allow_git
 
+    def scan(self, tree: ast.AST) -> None:
+        # Iterative pre-order walk in ``ast.NodeVisitor`` order: a recursive visit overflows the
+        # stack on long operator chains (``'a' + 'a' + ...``) that the kernel compiles fine.
+        stack = [tree]
+        while stack:
+            node = stack.pop()
+            handler = getattr(self, f"visit_{type(node).__name__}", None)
+            if handler is not None:
+                handler(node)
+            stack.extend(reversed(list(ast.iter_child_nodes(node))))
+
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             if alias.name in {"subprocess", "os"}:
                 self.module_aliases[alias.asname or alias.name] = alias.name
-        self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module in {"subprocess", "os"}:
@@ -374,7 +384,6 @@ class _GitCallFinder(ast.NodeVisitor):
                 fqn = f"{node.module}.{alias.name}"
                 if fqn in _BLOCKED_PY_CALLS:
                     self.callable_aliases[alias.asname or alias.name] = fqn
-        self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         # Only track single-hop aliases: ``r = subprocess.run``. Chained
@@ -390,7 +399,6 @@ class _GitCallFinder(ast.NodeVisitor):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     self.callable_aliases[target.id] = fqn
-        self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         fqn = self._resolve_callee(node.func)
@@ -398,7 +406,6 @@ class _GitCallFinder(ast.NodeVisitor):
             blocked = _blocked_option_from_python_call(node, allow_git=self.allow_git)
             if blocked is not None:
                 self.found = blocked
-        self.generic_visit(node)
 
     def _resolve_callee(self, expr: ast.AST) -> str | None:
         """Return ``module.attr`` if ``expr`` resolves to a tracked callee."""
@@ -442,15 +449,16 @@ def find_blocked_python(code: str, *, allow_git: bool | None = None) -> str | No
     else ``None``. Honors the resolved git policy. Ipython-only syntax
     (``!cmd``, ``%magic``, ``obj?``) is stripped before parsing so
     cells mixing ipython and Python still get scanned. Returns ``None``
-    on unparseable source (``SyntaxError``, or ``ValueError`` for null bytes
-    before Python 3.12) so the normal exec path surfaces the error.
+    on unparseable source (``SyntaxError``, ``ValueError`` for null bytes
+    before Python 3.12, or ``RecursionError`` for nesting too deep to parse)
+    so the normal exec path surfaces the error.
     """
     if _git_allowed(allow_git):
         return None
     try:
         tree = ast.parse(_strip_ipython_only(code))
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError):
         return None
     finder = _GitCallFinder(allow_git)
-    finder.visit(tree)
+    finder.scan(tree)
     return finder.found
