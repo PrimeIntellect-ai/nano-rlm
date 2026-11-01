@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [local, split, tcp]
+        mode: [local, stdio, tcp]
     env:
       PRIME_API_KEY: ${{ secrets.PRIME_API_KEY }}
       PRIME_TEAM_ID: ${{ secrets.PRIME_TEAM_ID }}

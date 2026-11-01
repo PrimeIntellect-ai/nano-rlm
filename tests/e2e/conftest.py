@@ -6,8 +6,9 @@ throwaway workspace, and checks what the agent left there. The suite runs only w
 without it. `RLM_E2E_MODEL` and `RLM_E2E_BASE_URL` choose the model.
 
 Every test runs in three placements: `local` (tools in the agent's process tree),
-`split` (a worker over stdio) and `tcp` (a worker over TCP, started on its own
-with no credentials in its environment).
+`stdio` (a worker the agent starts, over its stdin and stdout) and `tcp` (a worker
+over TCP, started on its own with no credentials in its environment). The last two
+are split execution.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from rlm.acp import RUNTIME_METADATA_KEY, SESSION_METADATA_KEY
 
 MODEL = os.environ.get("RLM_E2E_MODEL") or "internal/glm-5.3-fast"
 BASE_URL = os.environ.get("RLM_E2E_BASE_URL") or "https://api.pinference.ai/api/v1"
-MODES = ("local", "split", "tcp")
+MODES = ("local", "stdio", "tcp")
 PROMPT_TIMEOUT = 600
 
 
@@ -158,7 +159,7 @@ def run_agent(tmp_path, mode):
             "kernel_env": {},
             "search_api_key": None,
         }
-        if mode == "split":
+        if mode == "stdio":
             runtime["execution_command"] = [sys.executable, "-m", "rlm.execution"]
             runtime["execution_cwd"] = str(workspace)
         elif mode == "tcp":
