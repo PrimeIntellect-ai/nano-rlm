@@ -53,6 +53,8 @@ jobs:
         run: uv sync
       - name: Check credentials
         if: env.PRIME_API_KEY == ''
-        run: echo "::warning::PRIME_API_KEY is not set, so the end-to-end tests skip"
+        run: |
+          echo "::error::PRIME_API_KEY is not set; add it under Settings → Secrets and variables → Actions"
+          exit 1
       - name: Run end-to-end tests
         run: uv run pytest tests/e2e -m e2e -k ${{ matrix.mode }} -v --durations=0
