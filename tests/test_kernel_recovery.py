@@ -504,7 +504,8 @@ async def test_long_output_runs_to_its_end_and_reads_as_whole(
 async def test_processes_live_as_on_a_terminal(session, tmp_path, split):
     """A cancelled turn stops its running bash command at once. The session's end stops
     what is attached to the kernel, like a closing terminal, and leaves a daemon and a
-    bash command's background job running."""
+    bash command's background jobs running, among them one that held the command's
+    output until its timeout."""
     import signal
     import sys
 
@@ -517,14 +518,22 @@ async def test_processes_live_as_on_a_terminal(session, tmp_path, split):
         f"subprocess.Popen(['sh', '-c', {loop('daemon')!r}], start_new_session=True)\n"
     )
     background = f"(sh -c {loop('job')!r}) >/dev/null 2>&1 &"
+    held = f"sh -c {loop('held')!r} &"
     client = DummyClient(
         [
             _tool(cell),
             DummyMessage(tool_calls=[DummyToolCall("bash", {"command": background})]),
+            DummyMessage(tool_calls=[DummyToolCall("bash", {"command": held})]),
             DummyMessage(tool_calls=[DummyToolCall("bash", {"command": "sleep 60"})]),
         ]
     )
-    config = _config().model_copy(update={"builtin_tools": ("ipython", "bash")})
+    config = _config()
+    config = config.model_copy(
+        update={
+            "builtin_tools": ("ipython", "bash"),
+            "policy": config.policy.model_copy(update={"exec_timeout": 2}),
+        }
+    )
     if split:
         config = config.model_copy(
             update={"execution_command": (sys.executable, "-m", "rlm.execution")}
@@ -532,11 +541,11 @@ async def test_processes_live_as_on_a_terminal(session, tmp_path, split):
     engine = RLMEngine(
         client=client, session=session, runtime_config=config, cwd=str(tmp_path)
     )
-    names = ("attached", "daemon", "job")
+    names = ("attached", "daemon", "job", "held")
     try:
         try:
             turn = asyncio.create_task(engine.prompt("run the commands"))
-            while len(client.calls) < 3:
+            while len(client.calls) < 4:
                 await asyncio.sleep(0.1)
             await asyncio.sleep(0.5)
             turn.cancel()
@@ -551,6 +560,7 @@ async def test_processes_live_as_on_a_terminal(session, tmp_path, split):
         assert not (tmp_path / "attached.alive").exists()
         assert (tmp_path / "daemon.alive").exists()
         assert (tmp_path / "job.alive").exists()
+        assert (tmp_path / "held.alive").exists()
     finally:
         for name in names:
             pid = tmp_path / f"{name}.pid"

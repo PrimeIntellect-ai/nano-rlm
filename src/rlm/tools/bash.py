@@ -128,7 +128,7 @@ def bash_outcome(
         try:
             while selector.get_map():
                 if interrupt_event is not None and interrupt_event.is_set():
-                    reason = "[command interrupted; process group terminated]"
+                    reason = "[command interrupted]"
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -146,7 +146,9 @@ def bash_outcome(
                 except subprocess.TimeoutExpired:
                     reason = f"Error: command timed out after {timeout}s"
         finally:
-            if reason or proc.poll() is None:
+            # Once bash itself has exited, what still holds its output is a job it put in
+            # the background, and that job outlives the call.
+            if proc.poll() is None:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
