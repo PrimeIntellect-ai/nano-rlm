@@ -112,6 +112,9 @@ def bash_outcome(
     with (
         subprocess.Popen(
             ["bash", "-c", command],
+            # The caller's stdin may be its terminal, where a background group stops on
+            # a read, or its own protocol stream; a command reads end-of-file instead.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd or None,
