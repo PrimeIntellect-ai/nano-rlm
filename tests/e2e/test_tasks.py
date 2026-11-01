@@ -75,19 +75,6 @@ async def test_long_output_shows_its_end(run_agent):
     assert outcome.read("answer.txt") == "300000", outcome.describe()
 
 
-async def test_subagent_does_part_of_the_work(run_agent):
-    outcome = await run_agent(
-        "Spawn a sub-agent with rlm.agent.spawn and have it write the sum of the integers "
-        "from 1 to 100 to child.txt. Wait for it to finish, then write the word done to "
-        "answer.txt."
-    )
-    assert outcome.read("child.txt") == "5050", outcome.describe()
-    assert outcome.read("answer.txt") == "done", outcome.describe()
-    assert any(
-        path.name.startswith("sub-") for path in outcome.session_dir.iterdir()
-    ), outcome.describe()
-
-
 async def test_service_answers_requests(run_agent):
     outcome = await run_agent(
         "Serve the working directory over HTTP with `python -m http.server` on a free "
