@@ -73,11 +73,11 @@ The `session/close` response carries one authoritative, credential-free
 snapshot of cumulative usage, metrics, tool-call stats, supervisor counters,
 and limits under `ai.prime.rlm/session-v1`.
 
-A prompt that a limit cuts short ends with ACP stop reason `max_turn_requests`
-(`max_total_turns`) or `max_tokens` (`max_total_tokens`, the policy's
-`max_tokens`, or a compaction that failed with the context full); any other
-prompt ends with `end_turn`. The snapshot's `last_stop_reason` names the exact
-cause.
+When a limit cuts a prompt short, its ACP stop reason says so:
+`max_turn_requests` when the snapshot's `last_stop_reason` is
+`max_total_turns`, and `max_tokens` when it is `max_total_tokens`,
+`token_budget` (the policy's `max_tokens`) or `compaction_failed`. Every other
+prompt ends with `end_turn`.
 
 Every actual model call carries a standard HTTP `Idempotency-Key` header that
 stays stable across SDK and outer retries (retry attempts are distinguished by
