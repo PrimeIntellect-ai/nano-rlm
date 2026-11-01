@@ -5,6 +5,8 @@ from typing import Any
 
 from openai import APIError, APIStatusError, AsyncOpenAI
 
+from rlm.tools.output import OutputSize
+
 CHECKPOINT_PROMPT = """Create a concise continuation summary for the current task.
 Preserve what is needed to resume accurately:
 - The user's objective, exact requirements, constraints, and unresolved decisions.
@@ -136,24 +138,31 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
     return default_threshold(window) if window is not None else None
 
 
-def truncate_tool_output(text: str, max_bytes: int = TOOL_OUTPUT_MAX_BYTES) -> str:
-    """Keep the head and tail of an oversized tool result and say what was cut."""
+def truncate_tool_output(
+    text: str,
+    max_bytes: int = TOOL_OUTPUT_MAX_BYTES,
+    omitted: OutputSize = OutputSize(),
+) -> str:
+    """Keep the head and tail of an oversized tool result and say what was cut.
+    `omitted` is how much more the whole result measures than `text`, which kept only
+    its start and end; the note describes the whole result."""
     data = text.encode("utf-8")
-    if len(data) <= max_bytes:
+    size = OutputSize.of(text) + omitted
+    if size.nbytes <= max_bytes:
         return text
     keep = max_bytes // 2
     head = data[:keep].decode("utf-8", errors="ignore")
     tail = data[-keep:].decode("utf-8", errors="ignore")
     return (
-        f"Warning: truncated output (original token count: {estimated_tokens(text)})\n"
-        f"Total output lines: {text.count(chr(10)) + 1}\n\n"
-        f"{head}\n[... {len(data) - 2 * keep} bytes truncated ...]\n{tail}"
+        f"Warning: truncated output (original token count: {estimated_tokens(size.nchars)})\n"
+        f"Total output lines: {size.newlines + 1}\n\n"
+        f"{head}\n[... {size.nbytes - 2 * keep} bytes truncated ...]\n{tail}"
     )
 
 
-def estimated_tokens(chars: str) -> int:
-    """Rough token count at four characters per token."""
-    return (len(chars) + 3) // 4
+def estimated_tokens(chars: str | int) -> int:
+    """Rough token count at four characters per token, of text or a character count."""
+    return ((chars if isinstance(chars, int) else len(chars)) + 3) // 4
 
 
 def compactable(messages: list[dict]) -> bool:

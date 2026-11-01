@@ -1001,7 +1001,9 @@ class RLMEngine:
             result = tool_result.content
 
             content = truncate_tool_output(
-                result, self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
+                result,
+                self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES,
+                tool_result.omitted,
             )
             self.session.log_tool_result(
                 turn,

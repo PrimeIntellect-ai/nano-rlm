@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from threading import Event
 
+from rlm.tools.output import OutputSize
 from rlm.types import BuiltinMetricEvent, RLMMetrics, TokenUsage
 
 
@@ -15,6 +16,9 @@ class ToolOutcome:
 
     content: str
     metric_events: list[BuiltinMetricEvent] = field(default_factory=list)
+    omitted: OutputSize = OutputSize()
+    """How much more the whole output measures than `content`, which kept only its
+    start and end of a long output."""
 
 
 @dataclass

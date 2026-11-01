@@ -7,6 +7,8 @@ ipython alone).
 
 from __future__ import annotations
 
+import codecs
+import io
 import os
 import selectors
 import signal
@@ -18,6 +20,7 @@ from typing import Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_command, refusal
+from rlm.tools.output import OUTPUT_KEEP_BYTES, OutputCapture
 
 BASH_SCHEMA = {
     "type": "function",
@@ -70,14 +73,33 @@ def run_bash(
     interrupt_event: Event | None = None,
 ) -> str:
     """Guarded ``bash -c`` execution shared by the bash tool and the bash skill."""
+    return bash_outcome(command, timeout, cwd, allow_git, env, interrupt_event).content
+
+
+def bash_outcome(
+    command: str,
+    timeout: int,
+    cwd: str | None = None,
+    allow_git: bool | None = None,
+    env: dict[str, str] | None = None,
+    interrupt_event: Event | None = None,
+) -> ToolOutcome:
+    """`run_bash`, with how much of a long output its content left out."""
     if not isinstance(command, str) or not command.strip():
-        return "Error: empty command"
+        return ToolOutcome(content="Error: empty command")
     blocked = find_blocked_command(command, allow_git=allow_git)
     if blocked:
-        return refusal(blocked)
-    limit = 1024 * 1024
+        return ToolOutcome(content=refusal(blocked))
     deadline = time.monotonic() + timeout
-    parts = {"stdout": bytearray(), "stderr": bytearray()}
+    streams = ("stdout", "stderr")
+    # stdout and stderr each keep half of one result's bound.
+    captures = {name: OutputCapture(OUTPUT_KEEP_BYTES // 2) for name in streams}
+    decoders = {
+        name: io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")(errors="replace"), translate=True
+        )
+        for name in streams
+    }
     reason = ""
     with (
         subprocess.Popen(
@@ -106,15 +128,7 @@ def run_bash(
                     if not data:
                         selector.unregister(key.fileobj)
                         continue
-                    available = limit - sum(map(len, parts.values()))
-                    parts[key.data].extend(data[:available])
-                    if len(data) >= available:
-                        reason = (
-                            "[command output exceeded 1 MiB; process group terminated]"
-                        )
-                        break
-                if reason:
-                    break
+                    captures[key.data].add(decoders[key.data].decode(data))
             if not reason:
                 try:
                     proc.wait(timeout=max(0.01, deadline - time.monotonic()))
@@ -125,15 +139,19 @@ def run_bash(
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
-    stdout, stderr = (
-        parts[key].decode(errors="replace") for key in ("stdout", "stderr")
+    for name in streams:
+        captures[name].add(decoders[name].decode(b"", final=True))
+    (stdout, stdout_omitted), (stderr, stderr_omitted) = (
+        captures[name].result() for name in streams
     )
     out = stdout + (("\n" + stderr) if stderr else "")
     if reason:
         out += "\n" + reason
     elif proc.returncode != 0:
         out += f"\n[exit code {proc.returncode}]"
-    return out.strip() or "(no output)"
+    return ToolOutcome(
+        content=out.strip() or "(no output)", omitted=stdout_omitted + stderr_omitted
+    )
 
 
 class BashTool:
@@ -145,15 +163,13 @@ class BashTool:
         return BASH_SCHEMA
 
     def execute(self, args: dict[str, Any], context: ToolContext) -> ToolOutcome:
-        return ToolOutcome(
-            content=run_bash(
-                args.get("command", ""),
-                context.exec_timeout,
-                cwd=context.cwd,
-                allow_git=context.allow_git,
-                env=context.env,
-                interrupt_event=context.interrupt_event,
-            )
+        return bash_outcome(
+            args.get("command", ""),
+            context.exec_timeout,
+            cwd=context.cwd,
+            allow_git=context.allow_git,
+            env=context.env,
+            interrupt_event=context.interrupt_event,
         )
 
 

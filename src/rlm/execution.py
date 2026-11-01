@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from rlm.broker import BrokerEndpoint
 from rlm.tools.ipython import IPythonREPL, build_kernel_env
 from rlm.tools.base import ToolContext, ToolOutcome
+from rlm.tools.output import OutputSize
 from rlm.tools.registry import get_builtin_tool
 from rlm.types import IpythonExecuted, RLMMetrics, TokenUsage
 from rlm.workspace_host import WorkspaceHost
@@ -274,13 +275,16 @@ class RemoteREPL(IPythonREPL):
             metric_events=[
                 IpythonExecuted(**event) for event in result["metric_events"]
             ],
+            omitted=OutputSize(**result["omitted"]),
         )
 
     def _history_chunk(self, data: bytes) -> dict:
         return {"offset": self._history_sent, "data": base64.b64encode(data).decode()}
 
     def execute(self, code, timeout=None):
-        return self.execute_tool("ipython", {"code": code, "timeout": timeout}).content
+        outcome = self.execute_tool("ipython", {"code": code, "timeout": timeout})
+        self.omitted = outcome.omitted
+        return outcome.content
 
     def host_call(self, method, params):
         """Call the worker's WorkspaceHost: the supervisor's jobs, services and path
@@ -407,6 +411,7 @@ class _Worker:
                 outcome = tool.execute(params["args"], self.context)
                 return {
                     "output": outcome.content,
+                    "omitted": asdict(outcome.omitted),
                     "metric_events": [asdict(event) for event in outcome.metric_events],
                     "notices": self.repl.take_recovery_notices(),
                     "tool_log": base64.b64encode(self._new_tool_log()).decode(),

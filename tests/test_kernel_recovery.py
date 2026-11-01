@@ -403,25 +403,85 @@ async def test_remote_execution_interrupt_and_recovery(session, tmp_path):
         await asyncio.to_thread(repl.shutdown)
 
 
-async def test_output_flood_is_bounded_and_kernel_can_continue(session):
-    import asyncio
-    from rlm.tools.ipython import MAX_CELL_OUTPUT_BYTES
+async def test_endless_output_is_bounded_until_the_timeout(session):
+    from rlm.tools.bash import run_bash
+    from rlm.tools.output import OUTPUT_KEEP_BYTES
 
     repl = IPythonREPL(session=session, cwd=str(session.dir))
     try:
         await repl.run_in_thread(repl.start)
         output = await asyncio.wait_for(
             repl.run_in_thread(
-                repl.execute, "while True: print('x' * 65536, flush=True)", 15
+                repl.execute, "while True: print('x' * 65536, flush=True)", 5
             ),
             timeout=25,
         )
-        assert len(output.encode()) < MAX_CELL_OUTPUT_BYTES + 256
-        assert "output exceeded" in output
+        assert len(output.encode()) < OUTPUT_KEEP_BYTES + 256
+        assert output.endswith("[execution timed out after 5s and was interrupted]")
+        assert repl.omitted.nbytes > 0
         continued = await repl.run_in_thread(repl.execute, "print('STILL_ALIVE')", 10)
         assert "STILL_ALIVE" in continued
     finally:
         await repl.run_in_thread(repl.shutdown)
+    output = await asyncio.to_thread(run_bash, "yes", 3)
+    assert len(output.encode()) < OUTPUT_KEEP_BYTES + 256
+    assert output.endswith("Error: command timed out after 3s")
+
+
+@pytest.mark.parametrize("split", [False, True], ids=["local", "split"])
+@pytest.mark.parametrize("tool", ["bash", "ipython"])
+async def test_long_output_runs_to_its_end_and_reads_as_whole(
+    session, tmp_path, split, tool
+):
+    """A command that prints far more than a tool result keeps runs to its end, and the
+    model sees the truncation of its whole output: the same start, end and counts."""
+    import sys
+
+    from rlm.compaction import truncate_tool_output
+    from rlm.tools.output import OUTPUT_KEEP_BYTES
+
+    lines = "".join(f"{i}\n" for i in range(1, 300001))
+    if tool == "bash":
+        call = DummyToolCall(
+            "bash",
+            {
+                "command": "printf 'a\\r\\nb\\rc\\n'; seq 300000; echo DONE; "
+                "seq 200000 >&2; echo ERR_END >&2"
+            },
+        )
+        errors = "".join(f"{i}\n" for i in range(1, 200001))
+        whole = f"a\nb\nc\n{lines}DONE\n\n{errors}ERR_END\n".strip()
+    else:
+        call = DummyToolCall(
+            "ipython", {"code": "for i in range(1, 300001): print(i)\nprint('DONE')"}
+        )
+        whole = f"{lines}DONE\n"
+    config = _config().model_copy(update={"builtin_tools": ("ipython", "bash")})
+    if split:
+        config = config.model_copy(
+            update={"execution_command": (sys.executable, "-m", "rlm.execution")}
+        )
+    client = DummyClient(
+        [DummyMessage(tool_calls=[call]), DummyMessage(content="done")]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=config, cwd=str(tmp_path)
+    )
+    try:
+        await engine.prompt("print a lot")
+    finally:
+        await engine.aclose()
+    seen = [m for m in client.calls[1]["messages"] if m["role"] == "tool"][-1]
+    assert seen["content"] == truncate_tool_output(whole)
+    logged = [
+        record["content"]
+        for record in map(json.loads, (session.dir / "messages.jsonl").open())
+        if record.get("type") == "tool_result"
+    ][-1]
+    assert "bytes of output omitted" in logged
+    assert len(logged.encode()) < OUTPUT_KEEP_BYTES + 512
+    assert logged[:10_000] == whole[:10_000]
+    assert logged[-10_000:] == whole[-10_000:]
 
 
 async def test_bash_commands_stop_with_a_cancelled_turn_and_the_session(

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
+from rlm.tools.output import OutputCapture, OutputSize
 from rlm.tools.skills import discover_skills
 from rlm.types import IpythonExecuted
 
@@ -240,8 +241,10 @@ class IpythonTool:
                 metric_events=metric_events,
             )
 
+        content = context.repl.execute(code, timeout=timeout)
         return ToolOutcome(
-            content=context.repl.execute(code, timeout=timeout),
+            content=content,
+            omitted=getattr(context.repl, "omitted", OutputSize()),
             metric_events=metric_events,
         )
 
@@ -257,7 +260,6 @@ class _KernelDied(RuntimeError):
 
 
 MAX_RECOVERY_ATTEMPTS = 3
-MAX_CELL_OUTPUT_BYTES = 1024 * 1024
 
 
 def kill_marked_groups(marker: str) -> None:
@@ -324,6 +326,9 @@ class IPythonREPL:
         self._recovery_attempts = 0
         self._recovery_failed = False
         self._cell_submitted = False
+        self.omitted = OutputSize()
+        """How much more the last cell's whole output measured than what `execute`
+        returned, which kept only its start and end of a long output."""
         self._recovery_notices: list[str] = []
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="rlm-repl"
@@ -605,6 +610,7 @@ import rlm
         """Execute once; a lost kernel is recovered without replaying the cell."""
         with self._lock:
             self._cell_submitted = False
+            self.omitted = OutputSize()
             try:
                 if self._interrupt_requested.is_set():
                     return ""
@@ -642,12 +648,12 @@ import rlm
         self._cell_submitted = True
         deadline = None if timeout is None else time.monotonic() + timeout
 
-        outputs: list[str] = []
-        output_bytes = 0
+        capture = OutputCapture()
         try:
             while True:
                 if not self._km.is_alive():
-                    raise _KernelDied("".join(outputs))
+                    text, self.omitted = capture.result()
+                    raise _KernelDied(text)
                 if self._interrupt_requested.is_set():
                     self._interrupt_and_recover(msg_id)
                     break
@@ -657,7 +663,7 @@ import rlm
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         self._interrupt_and_recover(msg_id)
-                        outputs.append(
+                        capture.add(
                             f"\n[execution timed out after {timeout}s and was interrupted]"
                         )
                         break
@@ -686,17 +692,7 @@ import rlm
                     text = tb
                 elif msg_type == "status" and content["execution_state"] == "idle":
                     break
-                if text:
-                    data = text.encode("utf-8", errors="replace")
-                    remaining = MAX_CELL_OUTPUT_BYTES - output_bytes
-                    outputs.append(data[:remaining].decode("utf-8", errors="replace"))
-                    output_bytes += min(len(data), remaining)
-                    if len(data) >= remaining:
-                        self._interrupt_and_recover(msg_id)
-                        outputs.append(
-                            "\n[cell output exceeded 1 MiB; execution interrupted]"
-                        )
-                        break
+                capture.add(text)
         finally:
             try:
                 timeout = 0.1 if self._interrupt_requested.is_set() else 5
@@ -705,7 +701,8 @@ import rlm
             except Exception:
                 pass
 
-        return "".join(outputs)
+        text, self.omitted = capture.result()
+        return text
 
     def shutdown(self):
         """Stop the kernel."""
