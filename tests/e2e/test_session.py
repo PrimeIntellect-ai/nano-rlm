@@ -38,20 +38,20 @@ async def test_steering_wakes_a_waiting_agent(agent):
 
 
 async def test_cancelled_turn_leaves_the_session_usable(agent):
-    async with agent() as session:
+    async with agent(policy={"exec_timeout": 300}) as session:
         running = session.start(
             "Run `import time; time.sleep(300)` in one ipython call."
         )
         await session.called("ipython")
         await asyncio.sleep(3)  # let the cell start sleeping
+        started = time.monotonic()
         await session.cancel()
         assert (await running).stop_reason == "cancelled"
-        # The kernel is free again only if the cancel interrupted the cell.
-        started = time.monotonic()
         await session.prompt("Write the word ok to answer.txt.")
         elapsed = time.monotonic() - started
     assert session.read("answer.txt") == "ok", session.describe()
-    assert elapsed < 120, f"second prompt took {elapsed:.0f}s"
+    # Left to run, the cell would hold the kernel for the rest of its 300 s.
+    assert elapsed < 120, f"cancel and second prompt took {elapsed:.0f}s"
 
 
 async def test_tool_timeout_is_reported_and_work_goes_on(run_agent):

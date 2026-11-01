@@ -243,9 +243,7 @@ def _provider() -> dict[str, Any]:
     }
 
 
-async def _start_tcp_worker(
-    workspace: Path, token: str
-) -> tuple[subprocess.Popen, int]:
+def _start_tcp_worker(workspace: Path, token: str) -> subprocess.Popen:
     """A worker the way a remote workspace runs one: its own process, its own
     environment, none of the agent's credentials."""
     env = {
@@ -254,19 +252,21 @@ async def _start_tcp_worker(
         if not key.startswith(("PRIME_", "RLM_E2E_"))
     }
     env["RLM_EXECUTION_TOKEN"] = token
-    worker = subprocess.Popen(
+    return subprocess.Popen(
         [sys.executable, "-m", "rlm.execution", "--listen", "127.0.0.1", "--port", "0"],
         cwd=workspace,
         env=env,
         stderr=subprocess.PIPE,
         text=True,
     )
+
+
+async def _listening_port(worker: subprocess.Popen) -> int:
     line = await asyncio.wait_for(asyncio.to_thread(worker.stderr.readline), 60)
     match = re.search(r"listening on \S+:(\d+)", line)
     if not match:
-        worker.kill()
         raise RuntimeError(f"execution worker did not start: {line!r}")
-    return worker, int(match.group(1))
+    return int(match.group(1))
 
 
 @pytest.fixture
@@ -312,8 +312,9 @@ def agent(tmp_path, mode):
             runtime["execution_cwd"] = str(workspace)
         elif mode == "tcp":
             token = secrets.token_hex(32)
-            worker, port = await _start_tcp_worker(workspace, token)
+            worker = _start_tcp_worker(workspace, token)
             workers.append(worker)
+            port = await _listening_port(worker)
             runtime["execution_tcp"] = {
                 "host": "127.0.0.1",
                 "port": port,
