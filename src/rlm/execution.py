@@ -385,7 +385,7 @@ class _Worker:
                 allow_git=self.repl.allow_git,
                 repl=self.repl,
                 cwd=self.repl.cwd,
-                env=self.repl.command_env(build_kernel_env(self.repl.kernel_env)),
+                env=build_kernel_env(self.repl.kernel_env),
                 interrupt_event=self.repl._interrupt_requested,
             )
             # All Jupyter operations use the same dedicated thread.

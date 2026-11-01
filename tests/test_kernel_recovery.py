@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import uuid
@@ -499,41 +500,63 @@ async def test_long_output_runs_to_its_end_and_reads_as_whole(
     assert logged[-10_000:] == whole[-10_000:]
 
 
-async def test_bash_commands_stop_with_a_cancelled_turn_and_the_session(
-    session, tmp_path
-):
-    """A cancelled turn stops its running bash command at once, and closing the engine
-    stops a background job an earlier command left behind."""
-    alive = tmp_path / "alive"
-    loop = f"(while :; do touch {alive}; sleep 0.1; done) >/dev/null 2>&1 &"
+@pytest.mark.parametrize("split", [False, True], ids=["local", "split"])
+async def test_processes_live_as_on_a_terminal(session, tmp_path, split):
+    """A cancelled turn stops its running bash command at once. The session's end stops
+    what is attached to the kernel, like a closing terminal, and leaves a daemon and a
+    bash command's background job running."""
+    import signal
+    import sys
+
+    def loop(name):
+        return f"echo $$ > {name}.pid; while :; do touch {name}.alive; sleep 0.1; done"
+
+    cell = (
+        "import subprocess\n"
+        f"subprocess.Popen(['sh', '-c', {loop('attached')!r}])\n"
+        f"subprocess.Popen(['sh', '-c', {loop('daemon')!r}], start_new_session=True)\n"
+    )
+    background = f"(sh -c {loop('job')!r}) >/dev/null 2>&1 &"
     client = DummyClient(
         [
-            DummyMessage(tool_calls=[DummyToolCall("bash", {"command": loop})]),
+            _tool(cell),
+            DummyMessage(tool_calls=[DummyToolCall("bash", {"command": background})]),
             DummyMessage(tool_calls=[DummyToolCall("bash", {"command": "sleep 60"})]),
         ]
     )
+    config = _config().model_copy(update={"builtin_tools": ("ipython", "bash")})
+    if split:
+        config = config.model_copy(
+            update={"execution_command": (sys.executable, "-m", "rlm.execution")}
+        )
     engine = RLMEngine(
-        client=client,
-        session=session,
-        runtime_config=_config().model_copy(
-            update={"builtin_tools": ("ipython", "bash")}
-        ),
-        cwd=str(tmp_path),
+        client=client, session=session, runtime_config=config, cwd=str(tmp_path)
     )
+    names = ("attached", "daemon", "job")
     try:
-        turn = asyncio.create_task(engine.prompt("run the commands"))
-        while len(client.calls) < 2:
-            await asyncio.sleep(0.1)
+        try:
+            turn = asyncio.create_task(engine.prompt("run the commands"))
+            while len(client.calls) < 3:
+                await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(turn, 5)
+            assert all((tmp_path / f"{name}.alive").exists() for name in names)
+        finally:
+            await engine.aclose()
+        for name in names:
+            (tmp_path / f"{name}.alive").unlink(missing_ok=True)
         await asyncio.sleep(0.5)
-        turn.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(turn, 5)
-        assert alive.exists()
+        assert not (tmp_path / "attached.alive").exists()
+        assert (tmp_path / "daemon.alive").exists()
+        assert (tmp_path / "job.alive").exists()
     finally:
-        await engine.aclose()
-    alive.unlink()
-    await asyncio.sleep(0.5)
-    assert not alive.exists()
+        for name in names:
+            pid = tmp_path / f"{name}.pid"
+            if pid.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pid.read_text()), signal.SIGKILL)
 
 
 async def test_split_history_reaches_the_worker_past_the_frame_limit(session, tmp_path):

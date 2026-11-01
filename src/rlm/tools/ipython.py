@@ -16,7 +16,6 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -262,36 +261,28 @@ class _KernelDied(RuntimeError):
 MAX_RECOVERY_ATTEMPTS = 3
 
 
-def kill_marked_groups(marker: str) -> None:
-    """SIGKILL the process group of every process whose environment holds `marker`,
-    read from /proc; a no-op where there is none. Reparented and detached processes
-    keep their environment, so this also reaches the commands of a dead kernel. The
-    caller's own group is spared."""
+def kill_session(session: int) -> None:
+    """SIGKILL the process group of every process in `session`, read from /proc; a no-op
+    where there is none. Reparented processes stay in their session, so this also
+    reaches the commands of a dead kernel, while a daemon, in a session of its own, is
+    left running. The caller's own group is spared."""
     try:
         entries = [entry for entry in os.listdir("/proc") if entry.isdigit()]
     except FileNotFoundError:
         return
-    needle = marker.encode()
     groups = set()
     for entry in entries:
-        try:
-            with open(f"/proc/{entry}/environ", "rb") as environ:
-                if needle not in environ.read().split(b"\0"):
-                    continue
-            groups.add(os.getpgid(int(entry)))
-        except OSError:
-            continue
+        with contextlib.suppress(OSError):
+            if os.getsid(int(entry)) == session:
+                groups.add(os.getpgid(int(entry)))
     groups -= {0, 1, os.getpgrp()}
     for group in groups:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(group, signal.SIGKILL)
 
 
-KERNEL_TOKEN_ENV = "RLM_KERNEL_TOKEN"
-
-
 class IPythonREPL:
-    _kernel_token: str | None = None
+    _kernel_session: int | None = None
 
     """Persistent IPython kernel communicating via Jupyter protocol."""
 
@@ -319,9 +310,6 @@ class IPythonREPL:
         self._ipc_dir = None
         self._lock = threading.Lock()
         self._interrupt_requested = threading.Event()
-        # Marks every process the kernel and the shell tools start, wherever it is
-        # reparented: restart and shutdown kill what carries it.
-        self._kernel_token = uuid.uuid4().hex
         self._scope_id: str | None = None
         self._recovery_attempts = 0
         self._recovery_failed = False
@@ -368,7 +356,6 @@ class IPythonREPL:
             self.kernel_env,
             private_dir=self._ipc_dir,
         )
-        kernel_env[KERNEL_TOKEN_ENV] = self._kernel_token
         launcher = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
         launcher_dir = os.path.dirname(os.path.abspath(launcher))
         path_entries = kernel_env.get("PATH", "").split(os.pathsep)
@@ -380,6 +367,7 @@ class IPythonREPL:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        self._kernel_session = self._km.provisioner.pid
         self._kc = self._km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)
@@ -566,15 +554,11 @@ import rlm
                 return True
 
     def _kill_kernel_commands(self):
-        """Kill the process groups the kernel's commands run in. Shell commands start
-        sessions of their own, so killing the kernel's process group misses them."""
-        if self._kernel_token is not None:
-            kill_marked_groups(f"{KERNEL_TOKEN_ENV}={self._kernel_token}")
-
-    def command_env(self, env: Mapping[str, str]) -> dict[str, str]:
-        """`env` marked like the kernel's own commands, for a shell command a tool runs
-        beside the kernel, so that restart and shutdown stop it too."""
-        return {**env, KERNEL_TOKEN_ENV: self._kernel_token}
+        """Kill what the kernel started that is still attached to it, the way a closing
+        terminal does: everything in the kernel's session. The kernel leads a session
+        of its own, and a shell command leads a process group in it."""
+        if self._kernel_session:
+            kill_session(self._kernel_session)
 
     def restart_kernel(self):
         """Restart the kernel and restore the initial REPL state."""
@@ -582,6 +566,7 @@ import rlm
             self._kc.stop_channels()
         self._kill_kernel_commands()
         self._km.restart_kernel(now=True)
+        self._kernel_session = self._km.provisioner.pid
         self._kc = self._km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)

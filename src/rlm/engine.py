@@ -1546,9 +1546,7 @@ class RLMEngine:
             repl=self._repl,
             state=self._tool_state,
             cwd=self.cwd,
-            # A shell command stops with a cancelled turn, and with the session's
-            # kernel like the kernel's own commands.
-            env=repl.command_env(os.environ) if repl else None,
+            # A shell command stops with a cancelled turn.
             interrupt_event=repl._interrupt_requested if repl else None,
         )
 

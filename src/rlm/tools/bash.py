@@ -12,6 +12,7 @@ import io
 import os
 import selectors
 import signal
+import sys
 import time
 import contextlib
 import subprocess
@@ -21,6 +22,13 @@ from typing import Any
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.tools.output import OUTPUT_KEEP_BYTES, OutputCapture, OutputSize
+
+_OWN_GROUP = (
+    {"process_group": 0} if sys.version_info >= (3, 11) else {"preexec_fn": os.setpgrp}
+)
+"""A command leads a process group in its caller's session: a timeout or a cancel stops
+the command and what it started, a kernel restart or shutdown stops a command the kernel
+ran, and a daemon, in a session of its own, outlives both."""
 
 BASH_SCHEMA = {
     "type": "function",
@@ -108,7 +116,7 @@ def bash_outcome(
             stderr=subprocess.PIPE,
             cwd=cwd or None,
             env=env,
-            start_new_session=True,
+            **_OWN_GROUP,
         ) as proc,
         selectors.DefaultSelector() as selector,
     ):
