@@ -79,10 +79,19 @@ class BrokerAgentListRequest(TypedDict):
 
 class BrokerAgentHandleRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
-    op: Literal["agent.info", "agent.cancel", "agent.history"]
+    op: Literal["agent.info", "agent.cancel"]
     capability: Annotated[str, Field(min_length=1)]
     scope_id: Annotated[str, Field(min_length=1)]
     agent_id: Annotated[str, Field(min_length=1)]
+
+
+class BrokerAgentHistoryRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.history"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+    offset: Annotated[int, Field(ge=0)]
 
 
 class BrokerAgentResultRequest(TypedDict):
@@ -324,6 +333,7 @@ BrokerRequest = Annotated[
     | BrokerAgentGetRequest
     | BrokerAgentListRequest
     | BrokerAgentHandleRequest
+    | BrokerAgentHistoryRequest
     | BrokerAgentResultRequest
     | BrokerAgentWaitRequest
     | BrokerSkillRequest

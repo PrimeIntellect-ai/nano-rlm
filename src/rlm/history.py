@@ -9,6 +9,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+HISTORY_PAGE_BYTES = 8 * 1024 * 1024
+"""JSON bytes of ledger records one page of another agent's history holds, beyond its
+first record: half a frame, so a page always crosses the broker and execution wire."""
+
+
 def read_records(path: Path) -> Iterator[dict]:
     with path.open("rb") as stream:
         for line in stream:
@@ -16,6 +21,27 @@ def read_records(path: Path) -> Iterator[dict]:
             if not line.endswith(b"\n"):
                 break
             yield json.loads(line)
+
+
+def read_page(
+    path: Path, offset: int, limit: int = HISTORY_PAGE_BYTES
+) -> tuple[list[dict], int | None]:
+    """The complete records from byte `offset` that fit `limit` bytes of JSON, at least
+    one, and the offset of the record after them, or None at the ledger's end."""
+    records: list[dict] = []
+    size = 0
+    with path.open("rb") as stream:
+        stream.seek(offset)
+        for line in stream:
+            if not line.endswith(b"\n"):
+                break
+            record = json.loads(line)
+            size += len(json.dumps(record))
+            if records and size > limit:
+                return records, offset
+            records.append(record)
+            offset += len(line)
+    return records, None
 
 
 @dataclass

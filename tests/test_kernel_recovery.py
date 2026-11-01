@@ -569,36 +569,62 @@ async def test_processes_live_as_on_a_terminal(session, tmp_path, split):
                     os.kill(int(pid.read_text()), signal.SIGKILL)
 
 
-async def test_split_history_reaches_the_worker_past_the_frame_limit(session, tmp_path):
-    """The worker gets the ledger in frame-sized chunks: a prompt larger than one frame
-    still reaches the kernel's history whole."""
+@pytest.mark.parametrize("split", [False, True], ids=["local", "split"])
+async def test_history_past_the_frame_limit_reads_whole(session, tmp_path, split):
+    """A history larger than one frame reads whole: the agent's own, which reaches a
+    worker in frame-sized chunks, and a child's, which the supervisor returns in pages."""
     import sys
 
     from rlm.execution import MAX_FRAME
 
     prompt = "x" * (MAX_FRAME + 1024)
-    config = _config().model_copy(
-        update={
-            "execution_command": (sys.executable, "-m", "rlm.execution"),
-            "builtin_tools": ("ipython",),
-        }
+    config = _config(max_depth=1).model_copy(update={"builtin_tools": ("ipython",)})
+    if split:
+        config = config.model_copy(
+            update={"execution_command": (sys.executable, "-m", "rlm.execution")}
+        )
+
+    def factory(**kwargs):
+        return RLMEngine(client=DummyClient([DummyMessage(content="ok")]), **kwargs)
+
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        engine_factory=factory,
     )
     client = DummyClient(
         [
             _tool(
-                "from rlm import history\n"
-                "h = await history()\n"
-                f"assert len(h.user_messages()[0]['content']) == {len(prompt)}\n"
-                "print('SYNCED')"
+                f"""
+import json
+from rlm import history
+assert len((await history()).user_messages()[0]['content']) == {len(prompt)}
+child = await rlm.agent.spawn('answer')
+await child.wait(timeout=30)
+# A long child conversation: five records of a quarter frame each.
+with (child.session_dir / 'messages.jsonl').open('a') as stream:
+    for _ in range(5):
+        stream.write(json.dumps({{'type': 'padding', 'text': 'y' * {MAX_FRAME // 4}}}) + '\\n')
+h = await child.history()
+assert 'answer' in h.user_messages()[0]['content']
+print(f"PADDED {{sum(event['type'] == 'padding' for event in h.events)}}")
+"""
             ),
             DummyMessage(content="done"),
         ]
     )
     engine = RLMEngine(
-        client=client, session=session, runtime_config=config, cwd=str(tmp_path)
+        client=client,
+        session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        supervisor=supervisor,
     )
     try:
         await engine.prompt(prompt)
     finally:
         await engine.aclose()
-    assert "SYNCED" in client.calls[1]["messages"][-1]["content"]
+    tool = [m for m in client.calls[1]["messages"] if m["role"] == "tool"][-1]
+    # Printed, not asserted in the cell: a traceback would show the cell's source.
+    assert "PADDED 5" in tool["content"], tool["content"][-2000:]
