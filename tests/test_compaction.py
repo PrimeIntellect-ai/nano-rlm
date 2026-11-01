@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import sys
@@ -83,6 +84,11 @@ def test_overflow_detection_is_status_gated():
     assert is_context_overflow(error)
 
 
+# Discovered context windows are cached per base URL for the whole process, and an
+# id() can be reused once its object is freed, so each client gets a fresh number.
+_client_numbers = itertools.count()
+
+
 class _ScriptedClient(DummyClient):
     def __init__(
         self,
@@ -93,7 +99,7 @@ class _ScriptedClient(DummyClient):
         super().__init__([])
         self.actions = list(actions)
         self.max_model_len = max_model_len
-        self.base_url = f"http://scripted-{id(self)}"
+        self.base_url = f"http://scripted-{next(_client_numbers)}"
 
     @property
     def models(self):
