@@ -20,7 +20,7 @@ from typing import Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_command, refusal
-from rlm.tools.output import OUTPUT_KEEP_BYTES, OutputCapture
+from rlm.tools.output import OUTPUT_KEEP_BYTES, OutputCapture, OutputSize
 
 BASH_SCHEMA = {
     "type": "function",
@@ -149,8 +149,10 @@ def bash_outcome(
         out += "\n" + reason
     elif proc.returncode != 0:
         out += f"\n[exit code {proc.returncode}]"
+    omitted = [size for size in (stdout_omitted, stderr_omitted) if size is not None]
     return ToolOutcome(
-        content=out.strip() or "(no output)", omitted=stdout_omitted + stderr_omitted
+        content=out.strip() or "(no output)",
+        omitted=sum(omitted, OutputSize()) if omitted else None,
     )
 
 

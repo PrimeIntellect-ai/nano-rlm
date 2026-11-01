@@ -9,6 +9,11 @@ OUTPUT_KEEP_BYTES = 1024 * 1024
 its end. The conversation shows far less of it; the rest stays in the session log, and
 a tool result always fits one execution frame."""
 
+KEPT_PER_END = OUTPUT_KEEP_BYTES // 4 - 4096
+"""Bytes of a long output's start, and of its end, that a tool result holds at least:
+bash keeps a quarter of the bound from each end of each stream, less what a cut at a
+character boundary or stripped whitespace takes."""
+
 
 @dataclass(frozen=True)
 class OutputSize:
@@ -80,13 +85,13 @@ class OutputCapture:
             del self._tail[: _char_start(self._tail, len(self._tail) - self._half)]
             self._dropped = True
 
-    def result(self) -> tuple[str, OutputSize]:
-        """The kept text, and how much more the whole output measures than it: when
-        its middle was dropped, the middle less the note that replaces it."""
+    def result(self) -> tuple[str, OutputSize | None]:
+        """The kept text and, when its middle was dropped, how much more the whole
+        output measures than the text: the middle, less the note that replaces it."""
         head = self._head.decode("utf-8", "surrogatepass")
         tail = self._tail.decode("utf-8", "surrogatepass")
         if not self._dropped:
-            return head + tail, OutputSize()
+            return head + tail, None
         dropped = self.size.nbytes - len(self._head) - len(self._tail)
         text = f"{head}\n[... {dropped} bytes of output omitted ...]\n{tail}"
         return text, self.size - OutputSize.of(text)

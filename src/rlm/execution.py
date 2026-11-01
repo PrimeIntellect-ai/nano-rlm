@@ -275,7 +275,7 @@ class RemoteREPL(IPythonREPL):
             metric_events=[
                 IpythonExecuted(**event) for event in result["metric_events"]
             ],
-            omitted=OutputSize(**result["omitted"]),
+            omitted=result["omitted"] and OutputSize(**result["omitted"]),
         )
 
     def _history_chunk(self, data: bytes) -> dict:
@@ -411,7 +411,7 @@ class _Worker:
                 outcome = tool.execute(params["args"], self.context)
                 return {
                     "output": outcome.content,
-                    "omitted": asdict(outcome.omitted),
+                    "omitted": outcome.omitted and asdict(outcome.omitted),
                     "metric_events": [asdict(event) for event in outcome.metric_events],
                     "notices": self.repl.take_recovery_notices(),
                     "tool_log": base64.b64encode(self._new_tool_log()).decode(),

@@ -5,7 +5,7 @@ from typing import Any
 
 from openai import APIError, APIStatusError, AsyncOpenAI
 
-from rlm.tools.output import OutputSize
+from rlm.tools.output import KEPT_PER_END, OutputSize
 
 CHECKPOINT_PROMPT = """Create a concise continuation summary for the current task.
 Preserve what is needed to resume accurately:
@@ -141,16 +141,18 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
 def truncate_tool_output(
     text: str,
     max_bytes: int = TOOL_OUTPUT_MAX_BYTES,
-    omitted: OutputSize = OutputSize(),
+    omitted: OutputSize | None = None,
 ) -> str:
     """Keep the head and tail of an oversized tool result and say what was cut.
     `omitted` is how much more the whole result measures than `text`, which kept only
     its start and end; the note describes the whole result."""
     data = text.encode("utf-8")
-    size = OutputSize.of(text) + omitted
+    size = OutputSize.of(text) + (omitted or OutputSize())
     if size.nbytes <= max_bytes:
         return text
     keep = max_bytes // 2
+    if omitted is not None:
+        keep = min(keep, KEPT_PER_END)
     head = data[:keep].decode("utf-8", errors="ignore")
     tail = data[-keep:].decode("utf-8", errors="ignore")
     return (

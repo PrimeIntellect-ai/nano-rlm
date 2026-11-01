@@ -428,13 +428,15 @@ async def test_endless_output_is_bounded_until_the_timeout(session):
     assert output.endswith("Error: command timed out after 3s")
 
 
+@pytest.mark.parametrize("budget", [None, 3 << 20], ids=["default", "large"])
 @pytest.mark.parametrize("split", [False, True], ids=["local", "split"])
 @pytest.mark.parametrize("tool", ["bash", "ipython"])
 async def test_long_output_runs_to_its_end_and_reads_as_whole(
-    session, tmp_path, split, tool
+    session, tmp_path, split, tool, budget
 ):
     """A command that prints far more than a tool result keeps runs to its end, and the
-    model sees the truncation of its whole output: the same start, end and counts."""
+    model sees the truncation of its whole output: the same start, end and counts. A
+    budget larger than what was kept shows no more of either end than that, once."""
     import sys
 
     from rlm.compaction import truncate_tool_output
@@ -456,7 +458,15 @@ async def test_long_output_runs_to_its_end_and_reads_as_whole(
             "ipython", {"code": "for i in range(1, 300001): print(i)\nprint('DONE')"}
         )
         whole = f"{lines}DONE\n"
-    config = _config().model_copy(update={"builtin_tools": ("ipython", "bash")})
+    config = _config()
+    config = config.model_copy(
+        update={
+            "builtin_tools": ("ipython", "bash"),
+            "policy": config.policy.model_copy(
+                update={"max_tool_output_bytes": budget}
+            ),
+        }
+    )
     if split:
         config = config.model_copy(
             update={"execution_command": (sys.executable, "-m", "rlm.execution")}
@@ -472,7 +482,12 @@ async def test_long_output_runs_to_its_end_and_reads_as_whole(
     finally:
         await engine.aclose()
     seen = [m for m in client.calls[1]["messages"] if m["role"] == "tool"][-1]
-    assert seen["content"] == truncate_tool_output(whole)
+    if budget is None:
+        assert seen["content"] == truncate_tool_output(whole)
+    else:
+        assert seen["content"].count(whole[:200]) == 1
+        assert seen["content"].count(whole[-200:]) == 1
+        assert len(seen["content"].encode()) <= budget
     logged = [
         record["content"]
         for record in map(json.loads, (session.dir / "messages.jsonl").open())

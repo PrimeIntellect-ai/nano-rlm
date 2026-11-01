@@ -16,9 +16,9 @@ class ToolOutcome:
 
     content: str
     metric_events: list[BuiltinMetricEvent] = field(default_factory=list)
-    omitted: OutputSize = OutputSize()
-    """How much more the whole output measures than `content`, which kept only its
-    start and end of a long output."""
+    omitted: OutputSize | None = None
+    """How much more the whole output measures than `content`, when `content` kept
+    only its start and end."""
 
 
 @dataclass

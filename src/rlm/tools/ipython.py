@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
-from rlm.tools.output import OutputCapture, OutputSize
+from rlm.tools.output import OutputCapture
 from rlm.tools.skills import discover_skills
 from rlm.types import IpythonExecuted
 
@@ -244,7 +244,7 @@ class IpythonTool:
         content = context.repl.execute(code, timeout=timeout)
         return ToolOutcome(
             content=content,
-            omitted=getattr(context.repl, "omitted", OutputSize()),
+            omitted=getattr(context.repl, "omitted", None),
             metric_events=metric_events,
         )
 
@@ -326,9 +326,9 @@ class IPythonREPL:
         self._recovery_attempts = 0
         self._recovery_failed = False
         self._cell_submitted = False
-        self.omitted = OutputSize()
+        self.omitted = None
         """How much more the last cell's whole output measured than what `execute`
-        returned, which kept only its start and end of a long output."""
+        returned, when that kept only its start and end."""
         self._recovery_notices: list[str] = []
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="rlm-repl"
@@ -610,7 +610,7 @@ import rlm
         """Execute once; a lost kernel is recovered without replaying the cell."""
         with self._lock:
             self._cell_submitted = False
-            self.omitted = OutputSize()
+            self.omitted = None
             try:
                 if self._interrupt_requested.is_set():
                     return ""
