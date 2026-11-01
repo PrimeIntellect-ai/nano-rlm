@@ -553,6 +553,11 @@ Activity subscriptions become `completed` after their target permanently termina
 
 ### Separate tool execution
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/split-execution-dark.svg">
+  <img alt="Colocated, the agent loop, model credentials and the agent's tools share one machine. Split, the harness keeps the loop, credentials, supervisor and ledger, and a worker in the workspace runs the tools over one authenticated connection." src="docs/images/split-execution.svg">
+</picture>
+
 The ACP runtime metadata accepts `execution_command` (a trusted argv launching
 `python -m rlm.execution`) and `execution_cwd` (the task workspace). For example,
 an orchestrator can start the worker with `docker exec -i <task-container>
@@ -562,8 +567,9 @@ version installed. The orchestrator owns container provisioning and teardown.
 The engine, model credentials, supervisor, and authoritative conversation logs
 remain in the harness process. Native tools, persistent IPython kernels, and builtin skills run
 in the worker environment. Recursive agents inherit the execution destination,
-keep separate kernels, and share the task workspace. Communication and recursive
-callbacks use worker stdio, so a task container can have networking disabled.
+keep separate kernels, and share the task workspace. With the stdio transport,
+communication and recursive callbacks use the worker's stdio, so a task container
+can have networking disabled.
 The command itself defines the isolation boundary; launching a local Python
 worker alone provides process separation, not filesystem isolation.
 
@@ -583,10 +589,24 @@ The token authenticates connections; this transport does not encrypt traffic, so
 use a private network or an encrypted tunnel. The worker removes its token from
 the environment before starting tools. The orchestrator owns listener teardown.
 
-Supervisor shell jobs
-(`rlm.shell`), services (`rlm.services`) and filesystem watchers
-(`rlm.watch.path`) return explicit errors in this mode. `await child.history()` uses the supervisor; the current agent's local
-history is a snapshot refreshed before each cell. Worker frames, including history
-snapshots and outputs, are limited to 16 MiB. Kernel recovery preserves the existing
-no-replay behavior. Worker disconnects fail the session; the orchestrator must stop
-remaining task processes when the rollout ends.
+Supervisor shell jobs (`rlm.shell`), services (`rlm.services`) and path watches
+(`rlm.watch.path`) run in the worker's environment, beside the kernels; the
+supervisor keeps their records and inbox events, so the agent gets the same
+runtime prompt and API as in local execution. The current agent's history is a
+local snapshot refreshed before each cell; `await child.history()` reads a child's
+ledger from the supervisor in pages. Frames are limited to 16 MiB: a command or
+cell keeps the first and last 512 KiB of its output, and a long ledger syncs in
+chunks. Kernel recovery preserves the existing no-replay behavior. Worker
+disconnects fail the session.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/split-execution-step-dark.svg">
+  <img alt="One agent step in split mode: the harness sends the tool call with the new ledger records, the cell runs in the workspace and calls back for rlm.* operations, and the result returns to the harness. A tool call costs one round trip, each rlm.* call one more." src="docs/images/split-execution-step.svg">
+</picture>
+
+Each tool call costs one round trip between harness and worker, each `rlm.*`
+call one more, and `rlm.shell.run` two.
+
+A session that closes stops what is still attached to its kernels, as a closing
+terminal does; daemons and bash background jobs keep running, as they do in local
+execution, so the orchestrator stops what remains when the rollout ends.
