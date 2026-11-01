@@ -67,20 +67,28 @@ async def test_tool_timeout_is_reported_and_work_goes_on(run_agent):
 
 
 CAPS = [
-    pytest.param({"max_total_turns": 1}, "max_total_turns", id="max-total-turns"),
-    pytest.param({"max_total_tokens": 1}, "max_total_tokens", id="max-total-tokens"),
-    pytest.param({"max_tokens": 1}, "token_budget", id="max-tokens"),
+    pytest.param(
+        {"max_total_turns": 1},
+        "max_total_turns",
+        "max_turn_requests",
+        id="max-total-turns",
+    ),
+    pytest.param(
+        {"max_total_tokens": 1}, "max_total_tokens", "max_tokens", id="max-total-tokens"
+    ),
+    pytest.param({"max_tokens": 1}, "token_budget", "max_tokens", id="max-tokens"),
 ]
 
 
-@pytest.mark.parametrize("cap,stop_reason", CAPS)
-async def test_budget_stops_the_run(run_agent, cap, stop_reason):
+@pytest.mark.parametrize("cap,last_stop_reason,acp_stop_reason", CAPS)
+async def test_budget_stops_the_run(run_agent, cap, last_stop_reason, acp_stop_reason):
     """Each budget ends a task that wants three model calls after the first."""
     outcome = await run_agent(
         "Use three separate ipython calls: write 1 to a.txt, then 2 to b.txt, then 3 "
         "to c.txt.",
         policy=cap,
     )
-    assert outcome.snapshot["last_stop_reason"] == stop_reason, outcome.describe()
+    assert outcome.snapshot["last_stop_reason"] == last_stop_reason, outcome.describe()
+    assert outcome.stop_reason == acp_stop_reason, outcome.describe()
     assert outcome.snapshot["turns"] == 1, outcome.snapshot
     assert not outcome.read("b.txt"), outcome.describe()
