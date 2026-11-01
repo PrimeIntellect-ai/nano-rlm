@@ -926,6 +926,54 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert engine.closed is True
 
 
+@pytest.mark.parametrize(
+    "policy,stop_reason,last_stop_reason",
+    [
+        pytest.param({}, "end_turn", "done", id="answered"),
+        pytest.param(
+            {"max_total_turns": 1},
+            "max_turn_requests",
+            "max_total_turns",
+            id="max-total-turns",
+        ),
+        pytest.param(
+            {"max_total_tokens": 1},
+            "max_tokens",
+            "max_total_tokens",
+            id="max-total-tokens",
+        ),
+        pytest.param({"max_tokens": 1}, "max_tokens", "token_budget", id="max-tokens"),
+    ],
+)
+async def test_acp_stop_reason_names_the_spent_limit(
+    monkeypatch, tmp_path, policy, stop_reason, last_stop_reason
+):
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
+            DummyMessage(content="done"),
+        ]
+    )
+    monkeypatch.setattr(
+        "rlm.acp.RLMEngine", lambda **kwargs: RLMEngine(client=client, **kwargs)
+    )
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    await _initialize(agent)
+    metadata = _runtime_metadata()
+    metadata[RUNTIME_METADATA_KEY]["policy"].update(policy)
+    created = await agent.new_session(str(tmp_path), mcp_servers=[], **metadata)
+    try:
+        response = await agent.prompt(created.session_id, [text_block("count")])
+    finally:
+        await agent.close_session(created.session_id)
+
+    assert response.stop_reason == stop_reason
+    snapshot = response.field_meta[SESSION_METADATA_KEY]
+    assert snapshot["last_stop_reason"] == last_stop_reason
+
+
 async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path):
     client = DummyClient(
         [

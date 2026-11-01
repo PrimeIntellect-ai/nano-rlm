@@ -36,6 +36,7 @@ from acp.schema import (
     SessionCapabilities,
     SessionCloseCapabilities,
     SseMcpServer,
+    StopReason,
     TextContentBlock,
     Usage,
 )
@@ -57,6 +58,14 @@ CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
 ACP_SEMANTIC_EDGES_METADATA_KEY = "ai.prime.acp/semantic-edges-v1"
+# A run cut short by a limit reports that limit; any other ending is `end_turn`. The
+# exact cause stays in the snapshot's `last_stop_reason`.
+_ACP_STOP_REASONS: dict[str, StopReason] = {
+    "max_total_turns": "max_turn_requests",
+    "max_total_tokens": "max_tokens",
+    "token_budget": "max_tokens",
+    "compaction_failed": "max_tokens",
+}
 
 
 class _ContractModel(BaseModel):
@@ -389,11 +398,7 @@ class RLMACPAgent(Agent):
             finally:
                 state.prompt_task = None
 
-            stop_reason = (
-                "max_tokens"
-                if state.engine.stop_reason == "token_budget"
-                else "end_turn"
-            )
+            stop_reason = _ACP_STOP_REASONS.get(state.engine.stop_reason, "end_turn")
             state.last_stop_reason = state.engine.stop_reason or stop_reason
             if state.closing:
                 return PromptResponse(
