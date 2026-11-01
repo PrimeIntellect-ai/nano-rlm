@@ -123,7 +123,7 @@ class ShellJobs:
         # A cursor past the retained output is not an error: it returns an empty
         # chunk positioned at the end, so "read until done" loops terminate.
         cursor = min(cursor, job.info.output_bytes)
-        with open(job.info.output_path, "rb") as stream:
+        with open(self.output_file(job), "rb") as stream:
             stream.seek(cursor)
             data = stream.read(max_bytes)
         return {
@@ -133,6 +133,10 @@ class ShellJobs:
             and cursor + len(data) == job.info.output_bytes,
             "truncated": job.info.output_truncated,
         }
+
+    def output_file(self, job: JobRecord) -> str:
+        """Where this supervisor reads the job's output."""
+        return job.info.output_path
 
     def run_text(self, job: JobRecord) -> dict:
         """Text for a finished run(): the whole output when it fits RUN_TEXT_BYTES,

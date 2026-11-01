@@ -85,6 +85,15 @@ class BrokerAgentHandleRequest(TypedDict):
     agent_id: Annotated[str, Field(min_length=1)]
 
 
+class BrokerAgentHistoryRequest(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+    op: Literal["agent.history"]
+    capability: Annotated[str, Field(min_length=1)]
+    scope_id: Annotated[str, Field(min_length=1)]
+    agent_id: Annotated[str, Field(min_length=1)]
+    offset: Annotated[int, Field(ge=0)]
+
+
 class BrokerAgentResultRequest(TypedDict):
     __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
     op: Literal["agent.result"]
@@ -324,6 +333,7 @@ BrokerRequest = Annotated[
     | BrokerAgentGetRequest
     | BrokerAgentListRequest
     | BrokerAgentHandleRequest
+    | BrokerAgentHistoryRequest
     | BrokerAgentResultRequest
     | BrokerAgentWaitRequest
     | BrokerSkillRequest
@@ -401,6 +411,11 @@ def result_from_payload(value: dict[str, Any]) -> AgentResult:
         return _AGENT_RESULT_ADAPTER.validate_python(value)
     except ValidationError:
         raise RuntimeError("invalid response from RLM supervisor") from None
+
+
+def is_active() -> bool:
+    """Whether the current process is inside a brokered execution scope."""
+    return _endpoint is not None and _scope_id is not None
 
 
 def configure(endpoint: BrokerEndpoint | None) -> None:
