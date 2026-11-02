@@ -59,7 +59,7 @@ class ProgrammaticToolCallStats:
         """
         stats = cls()
         try:
-            f = open(log_path)
+            f = open(log_path, encoding="utf-8", errors="replace")
         except FileNotFoundError:
             return stats
         with f:

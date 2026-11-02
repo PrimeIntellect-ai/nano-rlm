@@ -35,9 +35,11 @@ def test_aggregate_counts_child_with_no_calls(tmp_path):
     assert agg.tool_call_stats.python_total == 0
 
 
-def test_ptc_log_skips_non_object_json(tmp_path):
+def test_ptc_log_skips_malformed_entries(tmp_path):
     log = tmp_path / "programmatic_tool_calls.jsonl"
-    log.write_text('null\n[]\n"text"\n{"tool": "search", "source": "python"}\n')
+    log.write_bytes(
+        b'null\n[]\n"text"\n\xf8 not utf-8\n{"tool": "search", "source": "python"}\n'
+    )
 
     stats = ProgrammaticToolCallStats.from_log(log)
 
