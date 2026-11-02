@@ -1,0 +1,60 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/e2e.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/e2e.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: E2E (${{ matrix.mode }})
+    # Secrets do not reach pull requests from forks.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [local, stdio, tcp]
+    env:
+      PRIME_API_KEY: ${{ secrets.PRIME_API_KEY }}
+      PRIME_TEAM_ID: ${{ secrets.PRIME_TEAM_ID }}
+      RLM_E2E_MODEL: ${{ vars.RLM_E2E_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync
+      - name: Check credentials
+        if: env.PRIME_API_KEY == ''
+        run: |
+          echo "::error::PRIME_API_KEY is not set; add it under Settings → Secrets and variables → Actions"
+          exit 1
+      - name: Run end-to-end tests
+        run: uv run pytest tests/e2e -m e2e -k ${{ matrix.mode }} -v --durations=0

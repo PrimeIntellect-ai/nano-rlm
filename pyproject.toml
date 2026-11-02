@@ -45,6 +45,8 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m 'not e2e'"
+markers = ["e2e: runs a hosted model end to end (opt in with -m e2e)"]
 
 [build-system]
 requires = ["hatchling"]

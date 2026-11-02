@@ -94,3 +94,16 @@ uv run pre-commit install
 uv run ruff check --fix . && uv run ruff format .
 uv run pytest tests/
 ```
+
+The end-to-end suite in `tests/e2e` gives a hosted model real tasks through `rlm --acp`
+and checks what the agent leaves in its workspace, with tools in the agent's process
+tree, in a [split-execution](docs/split-execution.md) worker over stdio, and in one
+over TCP. It runs only when asked for and needs a Prime Inference key (`PRIME_TEAM_ID`
+too for a team's models):
+
+```bash
+PRIME_API_KEY=... uv run pytest tests/e2e -m e2e
+```
+
+`RLM_E2E_MODEL` picks the model (default `internal/glm-5.3-fast`) and `RLM_E2E_BASE_URL`
+the endpoint.
