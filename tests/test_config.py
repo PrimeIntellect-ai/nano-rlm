@@ -63,6 +63,14 @@ def test_policy_accepts_shared_pool_and_rejects_reserved_headers():
         make_client(provider)
 
 
+def test_model_client_bounds_connect_but_not_read():
+    client = make_client(ProviderConfig(base_url="http://interceptor", api_key="k"))
+    assert client.timeout.connect == 5.0
+    assert client.timeout.read is None
+    assert client.timeout.write is None
+    assert client.timeout.pool is None
+
+
 def test_default_policy_enables_recursion_and_compaction():
     policy = ExecutionPolicy()
     assert policy.compaction is True
