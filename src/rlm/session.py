@@ -11,21 +11,63 @@ from pathlib import Path
 from rlm.types import ChildSessionAggregate, ProgrammaticToolCallStats
 
 
+def sessions_dir() -> Path:
+    rlm_home = Path(os.environ.get("RLM_HOME") or Path.home() / ".rlm")
+    return rlm_home / "sessions"
+
+
 class Session:
-    def __init__(self, session_dir: Path | None = None):
+    def __init__(self, session_dir: Path | None = None, *, load: bool = False):
+        """Start a session ledger in `session_dir`, or with `load`, reopen the
+        existing one to continue it."""
         if session_dir is None:
-            sid = uuid.uuid4().hex[:12]
-            rlm_home = Path(os.environ.get("RLM_HOME") or Path.home() / ".rlm")
-            session_dir = rlm_home / "sessions" / sid
+            session_dir = sessions_dir() / uuid.uuid4().hex[:12]
         # Session writes must remain valid if the working directory changes.
         self.dir = Path(session_dir).resolve()
-        self.dir.mkdir(parents=True, exist_ok=True)
-        self._msg_file = open(self.dir / "messages.jsonl", "x", encoding="utf-8")
         self._write_error: OSError | None = None
         self._message_count = 0
         self._window = -1
         self._context: list[tuple[int, dict]] = []
         self._context_started = False
+        self.recorded_turns = 0
+        """Model turns the ledger held when the session was loaded."""
+        path = self.dir / "messages.jsonl"
+        if load:
+            self._replay(path)
+            self._msg_file = open(path, "a", encoding="utf-8")
+        else:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            self._msg_file = open(path, "x", encoding="utf-8")
+
+    def _replay(self, path: Path) -> None:
+        """Rebuild the active context from the ledger: the newest context window plus
+        the in-context entries logged after it."""
+        data = path.read_bytes()
+        # A process killed mid-write leaves a partial last line; drop it so appends
+        # start on a line of their own.
+        complete = data[: data.rfind(b"\n") + 1]
+        if len(complete) != len(data):
+            with open(path, "r+b") as file:
+                file.truncate(len(complete))
+        messages: dict[int, dict] = {}
+        indices: list[int] = []
+        for line in complete.decode("utf-8").splitlines():
+            entry = json.loads(line)
+            if entry.get("type") == "context_window":
+                self._window = entry["window"]
+                indices = list(entry["message_indices"])
+                self._context_started = True
+                continue
+            if "message_index" not in entry:
+                continue
+            index = entry["message_index"]
+            messages[index] = entry["message"]
+            self._message_count = index + 1
+            if entry.get("window") == self._window and self._context_started:
+                indices.append(index)
+            if entry.get("type") == "assistant":
+                self.recorded_turns = max(self.recorded_turns, entry["turn"] + 1)
+        self._context = [(index, messages[index]) for index in indices]
 
     @property
     def message_count(self) -> int:

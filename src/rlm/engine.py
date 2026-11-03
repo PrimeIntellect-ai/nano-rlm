@@ -627,15 +627,18 @@ class RLMEngine:
                 # services run through it, wherever an agent started them.
                 self._supervisor.attach_host(self._repl.host_call)
 
-            system_prompt = self._load_system_prompt(self._active_tools)
-
-            self.session.log(
-                {
-                    "type": "system",
-                    "message": {"role": "system", "content": system_prompt},
-                },
-                in_context=True,
-            )
+            if self.session.messages:
+                # A loaded session's context already opens with its system prompt.
+                self._turn = self.session.recorded_turns
+            else:
+                system_prompt = self._load_system_prompt(self._active_tools)
+                self.session.log(
+                    {
+                        "type": "system",
+                        "message": {"role": "system", "content": system_prompt},
+                    },
+                    in_context=True,
+                )
             self._last_good = len(self.session.messages)
             self._started = True
         except BaseException:
