@@ -81,6 +81,10 @@ class CompactionFailed(Exception):
     """Every checkpoint attempt failed - the caller ends the run cleanly instead."""
 
 
+class CompactionFormatViolation(CompactionFailed):
+    """The model exhausted its attempts without producing a usable summary."""
+
+
 def is_context_overflow(error: APIStatusError) -> bool:
     details = f"{error} {error.body or ''}"
     # An overflow is deterministic: a 400, or a 413 for a byte-size cap.
