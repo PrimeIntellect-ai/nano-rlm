@@ -7,6 +7,8 @@ in-memory via ``model_copy``. There is no environment-variable resolution.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rlm.network import NetworkBlocklist
@@ -46,6 +48,60 @@ class InvocationContext(_ConfigModel):
 
     def child(self) -> InvocationContext:
         return InvocationContext(depth=self.depth + 1)
+
+
+class PopulationPolicy(_ConfigModel):
+    """Run a session as one episode of depth-0 peer agents instead of one root tree.
+
+    The supervisor admits the founders; any peer then admits more peers with
+    `independent=True` spawns, within the caps. Peers keep their kernel while idle; at
+    the live cap a new peer's admission retires the longest-idle peer past its grace
+    period (conversation kept, kernel released), and a direct message revives it when a
+    slot is free. Peer input lands in the recipient's inbox, never pushed into a
+    conversation; the episode ends when no agent can act again, or a budget or the
+    wall clock runs out.
+    """
+
+    founders: int = Field(default=1, gt=0)
+    """Peer agents admitted when the episode starts."""
+    max_live_agents: int = Field(default=8, gt=0)
+    """Peer agents holding a kernel at once, idle ones included."""
+    max_total_agents: int = Field(default=32, gt=0)
+    """Peers admitted over the episode, founders included. Revival is not a new
+    admission. A peer's beholden children count against max_depth and
+    max_subagent_calls instead."""
+    idle_grace_seconds: float = Field(default=60, ge=0)
+    """How long an idle peer keeps its kernel before an admission may retire it."""
+    reminder_seconds: float = Field(default=60, ge=0)
+    """While a peer is idle with unread inbox events, repeat the inbox notice at this
+    interval until it reads them; 0 disables the reminder."""
+    allow_agent_lookup_agent_history: bool = False
+    """Let peers read each other's conversation histories without waking them."""
+    max_seconds: float | None = Field(default=None, gt=0)
+    """Episode wall-clock limit (stop_reason=max_seconds). None = no limit."""
+    scored_on: Literal["answer", "workspace"] = "answer"
+    """What the task scores: the CAS-submitted episode answer, or the final state of
+    the shared workspace. The scorer itself stays in the task runner, outside every
+    agent's reach."""
+    max_agent_turns: int | None = Field(default=None, gt=0)
+    """Model calls one agent may make over the episode; an agent that reaches it stops
+    for good. None = no per-agent limit (the tree budgets still apply)."""
+    artifacts: tuple[str, ...] = ()
+    """Final files the task scores, relative to the working directory. Agents replace
+    them only through revision-checked publication (rlm.artifact.publish)."""
+
+    @field_validator("artifacts", mode="before")
+    @classmethod
+    def _artifacts_tuple(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def _founders_fit(self) -> PopulationPolicy:
+        if self.founders > min(self.max_live_agents, self.max_total_agents):
+            raise ValueError(
+                "founders must fit within max_live_agents and max_total_agents"
+            )
+        return self
 
 
 class ExecutionPolicy(_ConfigModel):
@@ -98,6 +154,10 @@ class ExecutionPolicy(_ConfigModel):
     """Include prompt guidance that assumes outbound network access (installing extra
     kernel packages, the online-solutions clause of the Git guard). Disable it for
     boxes with no network."""
+    population: PopulationPolicy | None = None
+    """Run the session as one population episode; None = one root agent's tree. A
+    population's peers are depth-0 agents, so recursion depth limits only a peer's
+    beholden children."""
 
 
 class TcpExecutionConfig(_ConfigModel):

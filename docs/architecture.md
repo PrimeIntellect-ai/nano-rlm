@@ -19,6 +19,8 @@ nano-rlm gives a model one place to work, a persistent IPython kernel, and lets 
 
 **Child agents.** `rlm.agent.spawn(...)` asks the supervisor for a child: another engine with its own kernel and session directory, configured from the parent's contract one level deeper. Children can spawn their own children up to `max_depth`. The parent holds a handle; losing the handle does not stop the child.
 
+**Population episodes.** A session with a population policy runs as one episode of depth-0 peer agents instead of one root tree: founders plus `independent=True` spawns, all with the same authority, plus each peer's own beholden children. Peer input lands in the recipient's inbox behind one coalesced notice, and the supervisor owns admission caps, retirement (passivation with full teardown), the shared board, the compare-and-swap episode answer and the episode's stop ([details](runtime-contract.md#population-episodes)).
+
 **Session directory.** Each agent writes `$RLM_HOME/sessions/<id>/`, with children nested under it as `sub-<id>/`. Its `messages.jsonl` is the append-only ledger of the conversation, which the agent itself can read back from Python ([Context and history](context.md)).
 
 ## One turn
