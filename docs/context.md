@@ -10,6 +10,8 @@ Compaction is on by default and unlimited: `compaction: false` turns it off and 
 
 **How.** The engine asks the model for a plain-text handoff summary, without reasoning, and resumes on a fresh context seeded with it. The checkpoint prompt asks the summary to keep the task's requirements, evidence, outstanding assignments, jobs, subscriptions, pending event actions, output cursors and history references, plus the commands and edits that matter, and to name the important kernel variables so the resumed context knows what exists. An empty or tool-calling reply is resampled. A rejected checkpoint request falls back to the last state that passed a threshold check, which by definition has a full reserve of room. After `max_compaction_attempts` failures the run ends cleanly with what the conversation holds. An overflow with nothing beyond the task to drop propagates, because there is nothing to reclaim.
 
+For training, set `max_compaction_attempts: 1`. An unusable final summary (empty, tool-calling, or not normally terminated) ends the prompt with `format_violation`. Its terminal attempt is advertised as a `format_violation` semantic edge so a trainer can retain those tokens and assign zero reward. Earlier discarded attempts remain separate. A rejected provider request or an exhausted context-recovery path remains `compaction_failed`, without a format-violation edge.
+
 The kernel keeps running through compaction, so variables, imports and in-memory data survive it. The same policy applies to every agent in the tree.
 
 ## Tool output

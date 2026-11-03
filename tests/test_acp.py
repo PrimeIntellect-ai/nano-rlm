@@ -976,7 +976,10 @@ async def test_acp_stop_reason_names_the_spent_limit(
     assert snapshot["last_stop_reason"] == last_stop_reason
 
 
-async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path):
+@pytest.mark.parametrize("attempts", [1, 5])
+async def test_acp_prompt_snapshot_records_compaction_edge(
+    monkeypatch, tmp_path, attempts
+):
     client = DummyClient(
         [
             DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
@@ -997,6 +1000,9 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
     runtime_metadata[RUNTIME_METADATA_KEY]["builtin_tools"] = ["add"]
     runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["compaction"] = True
     runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["summarize_at_tokens"] = 1
+    runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["max_compaction_attempts"] = (
+        attempts
+    )
     created = await agent.new_session(str(tmp_path), **runtime_metadata)
 
     try:
@@ -1015,6 +1021,22 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
         request_ids = [
             call["extra_headers"]["X-ACP-Model-Request-ID"] for call in client.calls
         ]
+        if attempts == 1:
+            turn, rejected_tool = request_ids
+            assert response.stop_reason == "end_turn"
+            assert (
+                response.field_meta[SESSION_METADATA_KEY]["last_stop_reason"]
+                == "format_violation"
+            )
+            assert semantic_edges["edges"] == [
+                {
+                    "source_request_id": turn,
+                    "target_request_id": rejected_tool,
+                    "type": kind,
+                }
+                for kind in ("compaction_attempt", "format_violation")
+            ]
+            return
         turn, rejected_tool, rejected_empty, accepted, resumed = request_ids
         assert semantic_edges["edges"] == [
             {

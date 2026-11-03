@@ -84,6 +84,7 @@ The ACP stop reason says when a limit cut a prompt short; the snapshot's `last_s
 | `max_total_tokens` | The tree reached `max_total_tokens` | `max_tokens` |
 | `token_budget` | The agent reached its `max_tokens` | `max_tokens` |
 | `compaction_failed` | A compaction failed with the context full | `max_tokens` |
+| `format_violation` | The final summary response was unusable | `end_turn` |
 | `cancelled` | The client cancelled the prompt | `cancelled` |
 
 ## Tracing headers
@@ -99,5 +100,7 @@ Each call also carries a private `X-ACP-Model-Request-ID`. Responses publish spa
 | `subagent_return` | The parent retrieving a child's result |
 | `agent_message` | A delivered instruction, or an inbox event the agent explicitly read; an unread count alone creates none |
 | `compaction` | A compaction call |
+| `compaction_attempt` | A summary attempt branching from the agent's work |
+| `format_violation` | The terminal unusable summary; retained for zero-reward training |
 
 Clients that do not understand the extension ignore it.
