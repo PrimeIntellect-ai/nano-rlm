@@ -7,12 +7,14 @@ import certifi
 from openai import (
     APIConnectionError,
     APIResponseValidationError,
+    DEFAULT_TIMEOUT,
     APITimeoutError,
     AsyncOpenAI,
     DefaultAsyncHttpxClient,
     InternalServerError,
     NotFoundError,
     RateLimitError,
+    Timeout,
 )
 from pydantic import ValidationError
 
@@ -40,6 +42,13 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
 # Widely-spaced delays (seconds) between attempts; total ~5 min wall budget.
 _RETRY_DELAYS: tuple[int, ...] = (15, 30, 60, 90, 120)
 
+# Connect is bounded, reading is not: a model call may legitimately wait for hours
+# behind a queue (e.g. an interception proxy or a concurrency gate that sends no
+# bytes until it admits the request) or spend long on one reasoning reply. A read
+# timeout there abandons a call that is still queued and resubmits it at the back,
+# so the session's own deadline is what bounds a call.
+MODEL_CALL_TIMEOUT = Timeout(None, connect=DEFAULT_TIMEOUT.connect)
+
 
 class ModelTransportError(Exception):
     """A model connection failed after its transport retries were exhausted."""
@@ -63,6 +72,7 @@ def make_client(provider: ProviderConfig) -> AsyncOpenAI:
         base_url=provider.base_url,
         api_key=provider.api_key,
         max_retries=provider.max_retries,
+        timeout=MODEL_CALL_TIMEOUT,
         default_headers=provider.headers,
         # Minimal task images may lack a system CA bundle.
         http_client=DefaultAsyncHttpxClient(verify=certifi.where()),
