@@ -260,6 +260,8 @@ class _KernelDied(RuntimeError):
 
 MAX_RECOVERY_ATTEMPTS = 3
 
+_JUPYTER_INIT_LOCK = threading.Lock()
+
 
 def kill_session(session: int) -> None:
     """SIGKILL the process group of every process in `session`, read from /proc; a no-op
@@ -341,34 +343,39 @@ class IPythonREPL:
         # unencrypted TCP). The socket path must be absolute and short
         # (macOS caps Unix socket paths at 104 bytes), hence a temp dir.
         self._ipc_dir = tempfile.mkdtemp(prefix="rlm-ipc-")
-        self._km = KernelManager(
-            transport="ipc", ip=os.path.join(self._ipc_dir, "kernel"), autorestart=False
-        )
-        self._km.kernel_spec.argv = [
-            sys.executable,
-            "-m",
-            "ipykernel_launcher",
-            "-f",
-            "{connection_file}",
-        ]
-        self._km.kernel_spec.env = {}
-        kernel_env = build_kernel_env(
-            self.kernel_env,
-            private_dir=self._ipc_dir,
-        )
-        launcher = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
-        launcher_dir = os.path.dirname(os.path.abspath(launcher))
-        path_entries = kernel_env.get("PATH", "").split(os.pathsep)
-        if launcher_dir not in path_entries:
-            kernel_env["PATH"] = os.pathsep.join([launcher_dir, *path_entries])
-        self._km.start_kernel(
-            cwd=self.cwd,
-            env=kernel_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        self._kernel_session = self._km.provisioner.pid
-        self._kc = self._km.client()
+        # traitlets resolves string class traits on first use without a lock, so agents starting
+        # kernels in parallel threads can race ("import_item accepts strings, not MetaHasTraits").
+        with _JUPYTER_INIT_LOCK:
+            self._km = KernelManager(
+                transport="ipc",
+                ip=os.path.join(self._ipc_dir, "kernel"),
+                autorestart=False,
+            )
+            self._km.kernel_spec.argv = [
+                sys.executable,
+                "-m",
+                "ipykernel_launcher",
+                "-f",
+                "{connection_file}",
+            ]
+            self._km.kernel_spec.env = {}
+            kernel_env = build_kernel_env(
+                self.kernel_env,
+                private_dir=self._ipc_dir,
+            )
+            launcher = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
+            launcher_dir = os.path.dirname(os.path.abspath(launcher))
+            path_entries = kernel_env.get("PATH", "").split(os.pathsep)
+            if launcher_dir not in path_entries:
+                kernel_env["PATH"] = os.pathsep.join([launcher_dir, *path_entries])
+            self._km.start_kernel(
+                cwd=self.cwd,
+                env=kernel_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._kernel_session = self._km.provisioner.pid
+            self._kc = self._km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)
         self._inject_startup()
