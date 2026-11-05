@@ -1204,7 +1204,7 @@ class RLMEngine:
         request: dict = {
             "model": self.model,
             "messages": messages,
-            "extra_headers": model_call_headers(request_id),
+            "extra_headers": model_call_headers(request_id, self._invocation_id),
         }
         if self._active_tool_schemas:
             request["tools"] = self._active_tool_schemas

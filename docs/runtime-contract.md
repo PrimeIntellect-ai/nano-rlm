@@ -103,4 +103,6 @@ Each call also carries a private `X-ACP-Model-Request-ID`. Responses publish spa
 | `compaction_attempt` | A summary attempt branching from the agent's work |
 | `format_violation` | The terminal unusable summary; retained for zero-reward training |
 
+`X-ACP-Agent-Session-ID`, also on every call, names the calling agent's session in the tree: the root's is the ACP session, each sub-agent's its own. A session-affinity router can key on it to keep each agent's growing prefix on one engine without pinning a whole tree, whose agents run concurrently, to that engine.
+
 Clients that do not understand the extension ignore it.
