@@ -10,7 +10,8 @@ from typing import Literal
 CompactionStatus = Literal["completed", "failed", "cancelled", "format_violation"]
 
 MODEL_REQUEST_ID_HEADER = "X-ACP-Model-Request-ID"
-ACP_EXTENSION_HEADER_NAMES = (MODEL_REQUEST_ID_HEADER,)
+AGENT_SESSION_ID_HEADER = "X-ACP-Agent-Session-ID"
+ACP_EXTENSION_HEADER_NAMES = (MODEL_REQUEST_ID_HEADER, AGENT_SESSION_ID_HEADER)
 
 
 @dataclass(frozen=True)

@@ -31,9 +31,15 @@ def test_subagent_call_and_return_are_request_edges():
     lineage.finish_subagent("child")
     resumed_request = _finish(lineage, "root")
 
-    assert model_call_headers(parent_request) == {
+    assert model_call_headers(parent_request, "root") == {
         "Idempotency-Key": parent_request,
         "X-ACP-Model-Request-ID": parent_request,
+        "X-ACP-Agent-Session-ID": "root",
+    }
+    assert model_call_headers(child_request, "child") == {
+        "Idempotency-Key": child_request,
+        "X-ACP-Model-Request-ID": child_request,
+        "X-ACP-Agent-Session-ID": "child",
     }
     assert lineage.snapshot() == {
         "edges": [
@@ -288,7 +294,7 @@ async def test_concurrent_requests_receive_unique_stable_ids():
         await asyncio.sleep(0)
         request_id = lineage.start_request("root")
         lineage.finish_request(request_id)
-        return model_call_headers(request_id)
+        return model_call_headers(request_id, "root")
 
     headers = await asyncio.gather(*(start_request() for _ in range(64)))
     request_ids = [item["X-ACP-Model-Request-ID"] for item in headers]
