@@ -53,6 +53,7 @@ from rlm.config import (
 )
 from rlm.mcp import MCPHTTPServer, MCPServer, MCPStdioServer
 from rlm.session import Session
+from rlm.skills.search import SearchProvider
 
 CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
@@ -90,6 +91,7 @@ class _RuntimeMetadata(_ContractModel):
     execution_command: list[Annotated[str, Field(min_length=1)]] | None = None
     kernel_env: dict[str, str]
     search_api_key: str | None
+    search_provider: SearchProvider = "serper"
     network_block: list[str] = Field(default_factory=list)
 
 
@@ -226,6 +228,7 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
                 if payload.execution_command is not None
                 else None,
                 search_api_key=payload.search_api_key,
+                search_provider=payload.search_provider,
                 network_block=tuple(payload.network_block),
             ),
             payload.session_id,

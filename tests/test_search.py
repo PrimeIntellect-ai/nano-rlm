@@ -87,3 +87,55 @@ async def test_search_omits_whole_results_and_handles_block_everything(monkeypat
     assert await run_with_api_key("fake", "query", network_block=("*",)) == (
         "No results returned for query: query"
     )
+
+
+async def test_eco_search_maps_web_results_and_filters_before_limit(monkeypatch):
+    requests = []
+    response = httpx.Response(
+        200,
+        request=httpx.Request("GET", "https://ydc-index.io/v1/eco_search"),
+        json={
+            "results": {
+                "web": [
+                    {
+                        "url": "https://example.org/a",
+                        "title": "secret",
+                        "description": "answer",
+                        "snippets": ["answer"],
+                    },
+                    {
+                        "url": "https://you.com",
+                        "title": "The World's Greatest Search Engine!",
+                        "description": "Search on YDC",
+                        "snippets": ["Search on YDC"],
+                        "favicon_url": "https://someurl.com/favicon",
+                    },
+                    {"url": "https://allowed.test/b", "title": "second"},
+                ]
+            },
+            "metadata": {"query": "query", "latency": 0.1},
+        },
+    )
+
+    async def get(self, url, **kwargs):
+        requests.append((url, kwargs))
+        return response
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", get)
+    result = await run_with_api_key(
+        "eco-key",
+        "query",
+        num_results=1,
+        network_block=("example.org",),
+        provider="eco",
+    )
+
+    assert result == (
+        "Result 1: The World's Greatest Search Engine!\n"
+        "URL: https://you.com\n"
+        "  - Search on YDC"
+    )
+    url, kwargs = requests[0]
+    assert url == "https://ydc-index.io/v1/eco_search"
+    assert kwargs["params"] == {"query": "query"}
+    assert kwargs["headers"] == {"X-API-Key": "eco-key"}

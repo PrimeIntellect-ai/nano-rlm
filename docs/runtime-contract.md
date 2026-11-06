@@ -28,7 +28,8 @@ The agent accepts text prompts, and stdio or streamable-HTTP MCP servers (with H
 | `skills` | list | Built-in Python tools to pre-import: `bash`, `edit`, `fetch`, `search` ([Tools](tools.md#built-in-python-tools)) |
 | `builtin_tools` | list or null | Native tools; null means `["ipython"]` ([Tools](tools.md#native-tools)) |
 | `kernel_env` | object | Variables added to the kernel's minimal environment |
-| `search_api_key` | string or null | Serper key for `search`, held by the supervisor |
+| `search_api_key` | string or null | The search provider's key for `search`, held by the supervisor |
+| `search_provider` | string | The provider behind `search`: `serper` (default) or `eco` ([You.com Eco Search](https://you.com/docs/api-reference/search/v1-eco_search)) |
 | `network_block` | list | Domains, wildcard hosts or URL origins that `search` results must not point to |
 | `execution_command` | list or null | A trusted argv starting `python -m rlm.execution`, for [split execution](split-execution.md) over stdio |
 | `execution_cwd` | string or null | The tools' working directory in split execution |
