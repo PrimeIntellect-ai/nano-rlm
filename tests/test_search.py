@@ -89,9 +89,9 @@ async def test_search_omits_whole_results_and_handles_block_everything(monkeypat
     )
 
 
-async def test_eco_search_maps_web_results_and_filters_before_limit(monkeypatch):
+async def test_eco_search_resolves_redirects_and_filters_before_limit(monkeypatch):
     requests = []
-    response = httpx.Response(
+    eco = httpx.Response(
         200,
         request=httpx.Request("GET", "https://ydc-index.io/v1/eco_search"),
         json={
@@ -104,13 +104,23 @@ async def test_eco_search_maps_web_results_and_filters_before_limit(monkeypatch)
                         "snippets": ["answer"],
                     },
                     {
+                        "url": "https://www.google.com/goto?url=hidden",
+                        "title": "unresolvable",
+                        "description": "hidden destination",
+                    },
+                    {
                         "url": "https://you.com",
                         "title": "The World's Greatest Search Engine!",
                         "description": "Search on YDC",
                         "snippets": ["Search on YDC"],
                         "favicon_url": "https://someurl.com/favicon",
                     },
-                    {"url": "https://allowed.test/b", "title": "second"},
+                    {
+                        "url": "https://www.google.com/goto?url=found",
+                        "title": "redirected",
+                        "description": "resolved destination",
+                    },
+                    {"url": "https://allowed.test/c", "title": "beyond the limit"},
                 ]
             },
             "metadata": {"query": "query", "latency": 0.1},
@@ -119,13 +129,20 @@ async def test_eco_search_maps_web_results_and_filters_before_limit(monkeypatch)
 
     async def get(self, url, **kwargs):
         requests.append((url, kwargs))
-        return response
+        request = httpx.Request("GET", url)
+        if url.endswith("url=found"):
+            return httpx.Response(
+                302, headers={"Location": "https://allowed.test/b"}, request=request
+            )
+        if url.endswith("url=hidden"):
+            return httpx.Response(200, text="interstitial", request=request)
+        return eco
 
     monkeypatch.setattr(httpx.AsyncClient, "get", get)
     result = await run_with_api_key(
         "eco-key",
         "query",
-        num_results=1,
+        num_results=2,
         network_block=("example.org",),
         provider="eco",
     )
@@ -133,9 +150,18 @@ async def test_eco_search_maps_web_results_and_filters_before_limit(monkeypatch)
     assert result == (
         "Result 1: The World's Greatest Search Engine!\n"
         "URL: https://you.com\n"
-        "  - Search on YDC"
+        "  - Search on YDC\n\n---\n\n"
+        "Result 2: redirected\n"
+        "URL: https://allowed.test/b\n"
+        "  - resolved destination"
     )
     url, kwargs = requests[0]
     assert url == "https://ydc-index.io/v1/eco_search"
     assert kwargs["params"] == {"query": "query"}
     assert kwargs["headers"] == {"X-API-Key": "eco-key"}
+    # Each redirect link gets one GET, without the Eco key.
+    assert sorted(url for url, _ in requests[1:]) == [
+        "https://www.google.com/goto?url=found",
+        "https://www.google.com/goto?url=hidden",
+    ]
+    assert all("headers" not in kwargs for _, kwargs in requests[1:])
