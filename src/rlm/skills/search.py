@@ -82,7 +82,7 @@ async def run_with_api_key(
         One formatted text string containing titles, URLs, and snippets.
     """
     if not api_key:
-        key_name = "ECO_API_KEY" if provider == "eco" else "SERPER_API_KEY"
+        key_name = "YOU_API_KEY" if provider == "eco" else "SERPER_API_KEY"
         return f"Error: {key_name} environment variable is not set"
     try:
         async with httpx.AsyncClient() as client:
