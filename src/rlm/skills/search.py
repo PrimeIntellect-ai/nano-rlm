@@ -7,10 +7,8 @@ Enabled via ``RLM_SKILLS``; pre-imported into the IPython kernel so the agent ca
 
 from __future__ import annotations
 
-import asyncio
 import os
 from typing import Literal
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -95,8 +93,6 @@ async def run_with_api_key(
                     headers={"X-API-Key": api_key},
                     timeout=45,
                 )
-                response.raise_for_status()
-                results = await _eco_results(client, response.json(), network_block)
             else:
                 response = await client.post(
                     SERPER_URL,
@@ -104,8 +100,11 @@ async def run_with_api_key(
                     headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
                     timeout=45,
                 )
-                response.raise_for_status()
-                results = response.json().get("organic") or []
+        response.raise_for_status()
+        if provider == "eco":
+            results = _eco_results(response.json())
+        else:
+            results = response.json().get("organic") or []
     except Exception:
         raise RuntimeError("web search is unavailable") from None
     return _format_search_results(results, query, num_results, network_block)
@@ -123,15 +122,9 @@ async def run(
     )
 
 
-async def _eco_results(
-    client: httpx.AsyncClient, payload: dict, network_block: NetworkBlocklist
-) -> list[dict]:
-    """Map Eco Search web results onto Serper's ``title``/``link``/``snippet`` fields.
-
-    Eco often links a result through a Google ``/goto`` redirect. Each one is replaced
-    by its target, so the blocklist and the model see the real destination.
-    """
-    results = [
+def _eco_results(payload: dict) -> list[dict]:
+    """Map Eco Search web results onto Serper's ``title``/``link``/``snippet`` fields."""
+    return [
         {
             "title": result.get("title"),
             "link": result.get("url"),
@@ -139,30 +132,6 @@ async def _eco_results(
         }
         for result in payload.get("results", {}).get("web", [])
     ]
-    redirects = [result for result in results if _is_google_redirect(result["link"])]
-    targets = await asyncio.gather(
-        *(_redirect_target(client, result["link"]) for result in redirects)
-    )
-    for result, target in zip(redirects, targets):
-        result["link"] = target or result["link"]
-    if network_block:
-        # An unresolved redirect hides its destination from the blocklist.
-        results = [r for r in results if not _is_google_redirect(r["link"])]
-    return results
-
-
-def _is_google_redirect(url: str | None) -> bool:
-    parts = urlsplit(url or "")
-    return parts.hostname == "www.google.com" and parts.path == "/goto"
-
-
-async def _redirect_target(client: httpx.AsyncClient, url: str) -> str | None:
-    """Where a redirect link points, read from one GET that does not follow it."""
-    try:
-        response = await client.get(url, timeout=10)
-    except httpx.HTTPError:
-        return None
-    return response.headers["location"] if response.is_redirect else None
 
 
 def _format_search_results(
