@@ -6,6 +6,10 @@ has_command() {
 }
 
 install_system_packages() {
+    if [ "${RLM_SYSTEM_PACKAGES:-enabled}" = "disabled" ]; then
+        echo "System package installation is disabled: $*" >&2
+        return 1
+    fi
     if has_command apt-get; then
         apt-get -o Acquire::Retries=3 update -qq
         DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends "$@"
@@ -75,9 +79,8 @@ select_tool_python() {
     echo "3.10"
 }
 
-ensure_command curl ca-certificates curl
-
-# Always install latest uv (sandbox images may have stale versions). Pin
+# RLM_USE_EXISTING_UV=1 requires a compatible preinstalled uv; otherwise install
+# latest uv (sandbox images may have stale versions). Pin
 # UV_INSTALL_DIR (uv installer target) and UV_TOOL_BIN_DIR (`uv tool install`
 # shim target) to the same directory, and make the PATH export agree — on
 # images that set XDG_DATA_HOME independent of HOME (e.g. SWE-rebench-V2
@@ -87,7 +90,17 @@ ensure_command curl ca-certificates curl
 # and any `uv tool install`-ed executables (e.g. `rlm`) off PATH.
 export UV_INSTALL_DIR="${UV_INSTALL_DIR:-$HOME/.local/bin}"
 export UV_TOOL_BIN_DIR="${UV_TOOL_BIN_DIR:-$UV_INSTALL_DIR}"
-install_uv
+if [ "${RLM_USE_EXISTING_UV:-0}" = "1" ]; then
+    if ! uv_tool_help="$(uv tool install --help 2>/dev/null)" ||
+        [[ "$uv_tool_help" != *"--python"* || "$uv_tool_help" != *"--editable"* ||
+           "$uv_tool_help" != *"--with-editable"* || "$uv_tool_help" != *"--with-executables-from"* ]]; then
+        echo "RLM_USE_EXISTING_UV=1 requires a compatible preinstalled uv" >&2
+        exit 1
+    fi
+else
+    ensure_command curl ca-certificates curl
+    install_uv
+fi
 export PATH="$UV_INSTALL_DIR:$PATH"
 
 # Clone the repo
