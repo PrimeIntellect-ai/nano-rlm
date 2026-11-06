@@ -879,13 +879,14 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
                 env=[EnvVariable(name="TOKEN", value="task-secret")],
             ),
         ],
-        **_runtime_metadata(network_block=["example.org"]),
+        **_runtime_metadata(network_block=["example.org"], search_provider="eco"),
     )
     first = await agent.prompt(created.session_id, [text_block("one")])
     second = await agent.prompt(created.session_id, [text_block("two")])
 
     engine = _Engine.instances[0]
     assert engine.runtime_config.network_block == ("example.org",)
+    assert engine.runtime_config.search_provider == "eco"
     assert engine.prompts == ["one", "two"]
     assert engine.mcp_servers == {
         "tools": MCPHTTPServer(
