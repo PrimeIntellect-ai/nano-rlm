@@ -514,9 +514,12 @@ async def test_engine_rollback_write_failure_is_fatal(monkeypatch, session):
     write = session._msg_file.write
 
     def fail_rollback(line):
-        if '"reason": "rollback"' in line:
-            raise OSError("disk full during rollback")
+        if b'"reason": "rollback"' in line:
+            raise OSError("write failed")
         return write(line)
+
+    def fail_truncate(size):
+        raise OSError("disk full during rollback")
 
     async def fail_prompt():
         engine._turn = 7
@@ -526,6 +529,7 @@ async def test_engine_rollback_write_failure_is_fatal(monkeypatch, session):
         raise RuntimeError("model failed")
 
     monkeypatch.setattr(session._msg_file, "write", fail_rollback)
+    monkeypatch.setattr(session._msg_file, "truncate", fail_truncate)
     monkeypatch.setattr(engine, "_run_loop", fail_prompt)
     try:
         with pytest.raises(OSError, match="disk full during rollback"):
