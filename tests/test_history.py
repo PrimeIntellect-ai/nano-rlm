@@ -83,30 +83,48 @@ async def test_live_reader_ignores_unfinished_record_and_sees_it_on_next_read(tm
     ]
 
 
-@pytest.mark.parametrize("failure", ["write", "flush"])
-async def test_failed_writer_rejects_further_appends(tmp_path, failure):
+async def test_failed_write_is_cut_back_and_retried(tmp_path):
     session = Session(tmp_path)
     stream = session._msg_file
     session._msg_file = Mock(wraps=stream)
     session._msg_file.closed = False
 
-    def fail_write(text):
-        stream.write(text[:10])
-        stream.flush()
+    def fail_write(data):
+        stream.write(data[:10])
         raise OSError("disk full")
 
-    def fail_flush():
-        stream.flush()
-        raise OSError("disk full")
-
-    getattr(session._msg_file, failure).side_effect = (
-        fail_write if failure == "write" else fail_flush
-    )
+    session._msg_file.write.side_effect = fail_write
     try:
+        session.log({"type": "user", "message": {"role": "user", "content": "a"}})
+        assert (tmp_path / "messages.jsonl").read_bytes() == b""
         with pytest.raises(OSError, match="disk full"):
+            session.flush()
+
+        session._msg_file.write.side_effect = None
+        session.log({"type": "user", "message": {"role": "user", "content": "b"}})
+        lines = (tmp_path / "messages.jsonl").read_text().splitlines()
+        assert [json.loads(line)["message"]["content"] for line in lines] == ["a", "b"]
+    finally:
+        stream.close()
+
+
+async def test_failed_cut_back_rejects_further_appends(tmp_path):
+    session = Session(tmp_path)
+    stream = session._msg_file
+    session._msg_file = Mock(wraps=stream)
+    session._msg_file.closed = False
+
+    def fail_write(data):
+        stream.write(data[:10])
+        raise OSError("disk full")
+
+    session._msg_file.write.side_effect = fail_write
+    session._msg_file.truncate.side_effect = OSError("device gone")
+    try:
+        with pytest.raises(OSError, match="device gone"):
             session.log({"type": "user", "message": {"role": "user", "content": "a"}})
         persisted = (tmp_path / "messages.jsonl").read_bytes()
-        with pytest.raises(OSError, match="unusable"):
+        with pytest.raises(OSError, match="unusable.*device gone"):
             session.log({"type": "user", "message": {"role": "user", "content": "b"}})
         assert (tmp_path / "messages.jsonl").read_bytes() == persisted
     finally:

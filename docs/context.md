@@ -29,7 +29,7 @@ Each agent appends its conversation to `messages.jsonl` in its session directory
 - **Prompts and turns.** A `user` record begins a prompt attempt, and `prompt_rollback.prompt_id` marks one that failed or was cancelled; its records remain as history. The `turn` field counts loop iterations and is not an index.
 - **Other records.** Lifecycle records such as `kernel_recovery`, child spawns and delivered inbox notifications are in the same file.
 
-Indices are local to each agent. A session opens a fresh ledger and refuses to reopen an existing `messages.jsonl` for writing. A failed write or flush makes the session refuse further prompts; rollback restores the in-memory context even if its own record cannot be written.
+Indices are local to each agent. A session opens a fresh ledger and refuses to reopen an existing `messages.jsonl` for writing. If a write fails (for example, the disk is full), the session cuts the file back to its last whole record. It keeps the unwritten records in memory and writes them with the next record, so the session continues and the file holds only whole records. The session must write every record before it finishes, or finishing fails. If the session cannot cut back a failed write, the session refuses further prompts. Rollback restores the in-memory context even if its own record cannot be written.
 
 ## Reading history
 
