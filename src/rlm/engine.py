@@ -18,6 +18,7 @@ from typing import Any
 
 from openai import APIStatusError, AsyncOpenAI
 
+from rlm.broker import BrokerEndpoint
 from rlm.client import (
     call_with_retries,
     extract_usage,
@@ -131,6 +132,13 @@ WAIT_SCHEMA = {
 }
 
 
+KERNEL_RELEASED_NOTICE = (
+    "Supervisor: You were retired while idle to free a slot for a new agent, and a "
+    "message revived you. Your conversation is intact, but your IPython kernel is new: "
+    "Python variables, imports and in-kernel tasks were lost, and your shell jobs, "
+    "subscriptions and services were stopped. Recreate what you need."
+)
+
 MAX_EMPTY_REPLY_NUDGES = 2
 EMPTY_REPLY_NUDGE = (
     "Your last reply was empty (no text and no tool call). Continue the task: call a "
@@ -158,6 +166,18 @@ MULTILINE_COMMAND_HINT = (
     "Write multi-line commands (heredocs, python -c, scripts) as a triple-quoted raw string: "
     "r'''...''' (or r\"\"\"...\"\"\" when the text contains '''), so quotes, backslashes and "
     "newlines inside need no escaping."
+)
+UNSUBMITTED_ANSWER_NUDGE = (
+    "Your reply ends your turn, but the episode answer is still empty and only a "
+    "submitted answer is scored, not any reply. If you have the complete answer to the "
+    "episode task, submit it with `await rlm.population.submit(text, "
+    "expected_revision=0)` in the format the task asks for; otherwise end your turn again."
+)
+UNPUBLISHED_ARTIFACTS_NUDGE = (
+    "Your reply ends your turn, but no final artifact has been published and only "
+    "published artifacts are scored, not any reply. If you have a complete draft, publish "
+    "it with `await rlm.artifact.publish(path, draft_path, expected_revision=0)`; "
+    "otherwise end your turn again."
 )
 PLAN_REPLY_NUDGE = (
     "Your last reply reads as a plan, not a final answer, and made no tool call. If the "
@@ -199,6 +219,8 @@ class RLMEngine:
                 "environment configuration was removed (rlm is consumed via "
                 "the ACP runtime contract; children inherit in-memory)."
             )
+        if runtime_config.policy.population is not None and supervisor is None:
+            raise ValueError("a population episode runs through rlm.swarm.Swarm")
         self.runtime_config = runtime_config
         config = self.runtime_config
         self.model = config.model
@@ -266,6 +288,7 @@ class RLMEngine:
 
         # IPython REPL (started lazily in single-agent execution)
         self._repl: IPythonREPL | None = None
+        self._repl_released = False  # release_kernel(): restart on the next prompt
         self._steering_active = False
         self._steering_pending: list[tuple[str, str | None, asyncio.Future]] = []
         self._steering_ids: dict[str, tuple[str, asyncio.Future]] = {}
@@ -283,6 +306,8 @@ class RLMEngine:
         self._turn = 0
         self._empty_reply_nudges = 0
         self._plan_reply_nudges = 0
+        # One unsubmitted-answer reminder per population agent.
+        self._answer_nudged = False
         self._quote_nesting_hints = 0
         self._last_answer = ""
         self._has_result = False
@@ -370,15 +395,22 @@ class RLMEngine:
         *,
         message_type: str = "user",
         event_ids: list[str] | None = None,
+        message: tuple[dict, dict] | None = None,
     ) -> RLMResult:
-        """Run one user turn while accepting steering at model boundaries."""
+        """Run one user turn while accepting steering at model boundaries.
+
+        message: the turn's rendered user message and its provenance, when the caller
+        attributes the input itself; by default it is derived from message_type."""
         if self._steering_active:
             raise RuntimeError("a prompt is already running")
         self._steering_active = True
         self._steering_applied = []
         try:
             return await self._prompt(
-                prompt, message_type=message_type, event_ids=event_ids
+                prompt,
+                message_type=message_type,
+                event_ids=event_ids,
+                message=message,
             )
         finally:
             self._steering_active = False
@@ -397,6 +429,7 @@ class RLMEngine:
         *,
         message_type: str = "user",
         event_ids: list[str] | None = None,
+        message: tuple[dict, dict] | None = None,
     ) -> RLMResult:
         """Run one user turn while preserving conversation and kernel state."""
         if self._closed or self._close_task is not None:
@@ -422,9 +455,15 @@ class RLMEngine:
         self._has_result = False
         self._prompt_kernel_notices = []
 
-        if not self._started:
+        if not self._started or self._repl_released:
             try:
-                await self._start(prompt)
+                if self._started:
+                    await self._start_repl(
+                        self._supervisor.endpoint_for(self._invocation_id)
+                    )
+                    self._pending_kernel_notices.append(KERNEL_RELEASED_NOTICE)
+                else:
+                    await self._start(prompt)
             except BaseException as exc:
                 self._metrics.stop_reason = (
                     "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
@@ -443,13 +482,15 @@ class RLMEngine:
         self._metrics.stop_reason = ""
         prompt_id = uuid.uuid4().hex
         context_before = list(self.session.context_indices)
-        message = {"role": "user", "content": prompt}
+        rendered = {"role": "user", "content": prompt}
         provenance = None
-        if message_type == "supervisor_notification":
-            message, provenance = runtime_event("notice", prompt)
+        if message is not None:
+            rendered, provenance = message
+        elif message_type == "supervisor_notification":
+            rendered, provenance = runtime_event("notice", prompt)
         elif message_type == "parent_message" or self.depth > 0:
             parent_id = self._supervisor.agent_context(self._invocation_id)["parent_id"]
-            message, provenance = agent_input(
+            rendered, provenance = agent_input(
                 prompt, agent=parent_id, kind="instruction"
             )
         try:
@@ -460,7 +501,7 @@ class RLMEngine:
                     **({"event_ids": event_ids} if event_ids else {}),
                     "turn": self._turn,
                     "content": prompt,
-                    "message": message,
+                    "message": rendered,
                     **({"provenance": provenance} if provenance else {}),
                 },
                 in_context=True,
@@ -585,6 +626,31 @@ class RLMEngine:
                     self._owns_supervisor = False
                 raise
 
+        await self._start_repl(broker_endpoint)
+        try:
+            system_prompt = self._load_system_prompt(self._active_tools)
+
+            self.session.log(
+                {
+                    "type": "system",
+                    "message": {"role": "system", "content": system_prompt},
+                },
+                in_context=True,
+            )
+            self._last_good = len(self.session.messages)
+            self._started = True
+        except BaseException:
+            if self._repl is not None:
+                self._repl.shutdown()
+                self._repl = None
+            if self._owns_supervisor and self._supervisor is not None:
+                await self._supervisor.aclose()
+                self._supervisor = None
+                self._owns_supervisor = False
+            raise
+
+    async def _start_repl(self, broker_endpoint: BrokerEndpoint | None) -> None:
+        """Start (or restart) the IPython kernel for this engine."""
         repl_type = IPythonREPL
         repl_options = {}
         if self.runtime_config.split_execution:
@@ -594,7 +660,7 @@ class RLMEngine:
             repl_options["command"] = self.runtime_config.execution_command
             repl_options["tcp"] = self.runtime_config.execution_tcp
             repl_options["tools"] = [tool.name for tool in self._active_tools]
-        self._repl = repl_type(
+        repl = repl_type(
             **repl_options,
             cwd=self.cwd,
             session=self.session,
@@ -606,7 +672,7 @@ class RLMEngine:
             allow_git=self.allow_git,
         )
         try:
-            startup = asyncio.create_task(self._repl.run_in_thread(self._repl.start))
+            startup = asyncio.create_task(repl.run_in_thread(repl.start))
             cancelled = False
             while True:
                 try:
@@ -625,27 +691,27 @@ class RLMEngine:
             ):
                 # The root's worker lives for the session, so the session's jobs and
                 # services run through it, wherever an agent started them.
-                self._supervisor.attach_host(self._repl.host_call)
-
-            system_prompt = self._load_system_prompt(self._active_tools)
-
-            self.session.log(
-                {
-                    "type": "system",
-                    "message": {"role": "system", "content": system_prompt},
-                },
-                in_context=True,
-            )
-            self._last_good = len(self.session.messages)
-            self._started = True
+                self._supervisor.attach_host(repl.host_call)
         except BaseException:
-            self._repl.shutdown()
-            self._repl = None
-            if self._owns_supervisor and self._supervisor is not None:
-                await self._supervisor.aclose()
-                self._supervisor = None
-                self._owns_supervisor = False
+            repl.shutdown()
             raise
+        self._repl = repl
+        self._repl_released = False
+
+    async def release_kernel(self) -> None:
+        """Stop the IPython kernel and keep the conversation. The next prompt starts a
+        fresh kernel and tells the model that its Python state was lost."""
+        repl, self._repl = self._repl, None
+        self._repl_released = True
+        if repl is not None:
+            repl.shutdown()
+
+    def _needs_answer_nudge(self) -> bool:
+        return (
+            self.runtime_config.policy.population is not None
+            and not self._answer_nudged
+            and self._supervisor.episode_output_empty()
+        )
 
     def _publish_agent_step(self, start: int) -> None:
         if self._supervisor is not None:
@@ -773,7 +839,7 @@ class RLMEngine:
                     or self._last_handoff_summary
                     or (
                         "[turn budget reached]"
-                        if capped == "max_total_turns"
+                        if capped in {"max_total_turns", "max_agent_turns"}
                         else "[token budget reached]"
                     )
                 )
@@ -898,6 +964,24 @@ class RLMEngine:
                     self.session.log(
                         {
                             "type": "plan_reply_nudge",
+                            "message": message,
+                            "provenance": provenance,
+                        },
+                        in_context=True,
+                    )
+                    continue
+                if self._needs_answer_nudge():
+                    self._answer_nudged = True
+                    message, provenance = runtime_event(
+                        "nudge",
+                        UNPUBLISHED_ARTIFACTS_NUDGE
+                        if self.runtime_config.policy.population.artifacts
+                        else UNSUBMITTED_ANSWER_NUDGE,
+                        reason="unsubmitted_answer",
+                    )
+                    self.session.log(
+                        {
+                            "type": "unsubmitted_answer_nudge",
                             "message": message,
                             "provenance": provenance,
                         },
@@ -1157,6 +1241,10 @@ class RLMEngine:
     def _spent_tree_cap(self) -> str | None:
         """The stop_reason of a spent tree budget, or None. Live supervisor totals
         cover the whole tree; without a supervisor this engine is the whole tree."""
+        if self._supervisor is not None and self._supervisor.spent_agent_turns(
+            self._invocation_id
+        ):
+            return "max_agent_turns"
         if self._supervisor is not None:
             turns = self._supervisor.total_turns
             tokens = self._supervisor.total_tokens
@@ -1228,9 +1316,9 @@ class RLMEngine:
             self._own_turns += 1
         if self._supervisor is not None:
             if checkpoint:
-                self._supervisor.record_usage(new_tokens)
+                self._supervisor.record_usage(new_tokens, self._invocation_id, usage)
             else:
-                self._supervisor.record_call(new_tokens, self._invocation_id)
+                self._supervisor.record_call(new_tokens, self._invocation_id, usage)
         if not checkpoint:
             self._last_prompt_tokens = usage.prompt_tokens
             self._last_call_id = request_id
@@ -1462,6 +1550,8 @@ class RLMEngine:
         )
 
         # Metrics: close the old branch.
+        if self._supervisor is not None:
+            self._supervisor.record_compaction(self._invocation_id)
         self._metrics.record(
             CompactionApplied(
                 dropped_chars=dropped_chars,

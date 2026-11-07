@@ -147,6 +147,15 @@ class ServiceManager:
             return ""
         return "\n".join(data.decode(errors="replace").splitlines()[-lines:])
 
+    async def stop_owner(self, owner_id: str, grace: float = 5.0) -> list[str]:
+        """Stop every running service an owner started, by name."""
+        stopped = []
+        for record in self.list():
+            if record["owner_id"] == owner_id and record["running"]:
+                await self.stop(record["name"], grace)
+                stopped.append(record["name"])
+        return stopped
+
     async def stop(self, name: str, grace: float) -> dict:
         record = self._load(name)
         if self._snapshot(record)["running"]:

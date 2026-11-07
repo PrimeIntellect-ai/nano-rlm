@@ -56,6 +56,7 @@ The only process environment variable is `RLM_HOME` (default `~/.rlm`): the root
 | `max_compactions` | null | Compactions per session |
 | `max_compaction_attempts` | 5 | Summary attempts within one compaction |
 | `allow_git` | false | Lift the guard that refuses Git commands reaching beyond the current branch (other refs, branch and tag listings, `clone`, `fetch`, `pull`) |
+| `population` | null | Run the session as one [population episode](#population-episodes) of peer agents |
 
 **Model-call admission.** `max_concurrent_subagents` bounds calls across the tree. Queued calls closer to the root go first, FIFO within a depth, and calls in flight are not preempted, so continuous shallow work can delay deeper agents. Tools, child waits and the backoff between outer retries hold no slot; the SDK's own retries stay within one. The limit is per tree: a cap across trees belongs in the runner or inference gateway.
 
@@ -75,7 +76,7 @@ An optional `messageId` deduplicates retries within the session; reusing an ID w
 
 Prompt responses and the `session/close` response carry one credential-free snapshot under `ai.prime.rlm/session-v1`: the session ID and last stop reason, the model, turns, cumulative token usage, metrics (compactions, sub-agent calls, programmatic tool calls, ...), supervisor counters and the effective limits. The `session/close` snapshot is authoritative.
 
-The ACP stop reason says when a limit cut a prompt short; the snapshot's `last_stop_reason` names the exact cause:
+The ACP stop reason says when a limit cut a prompt short; the snapshot's `last_stop_reason` names the exact cause. A population episode additionally carries a `population` block with the admission counts, membership counters, episode answer and per-agent usage, and its `last_stop_reason` is the episode's stop: `quiescent` (no agent can act again), `extinct` (every admitted agent ended), `max_agent_turns`, `max_seconds` or `agent_failed` (an infrastructure failure of one agent ends the episode as an error after the summary is written):
 
 | `last_stop_reason` | Cause | ACP stop reason |
 |---|---|---|
@@ -86,6 +87,31 @@ The ACP stop reason says when a limit cut a prompt short; the snapshot's `last_s
 | `compaction_failed` | A compaction failed with the context full | `max_tokens` |
 | `format_violation` | The final summary response was unusable | `end_turn` |
 | `cancelled` | The client cancelled the prompt | `cancelled` |
+
+## Population episodes
+
+A non-null `population` policy turns the session into one episode of peer agents instead of one root agent's tree: the single `session/prompt` runs the whole episode, steering is refused, and the returned answer is the episode answer, not any agent's reply. Set `policy.population` to the object below; omitted fields take their defaults.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `founders` | 1 | Peer agents admitted when the episode starts |
+| `max_live_agents` | 8 | Peers holding a kernel at once, idle ones included |
+| `max_total_agents` | 32 | Peers admitted over the episode; revival is not a new admission |
+| `idle_grace_seconds` | 60 | How long an idle peer keeps its kernel before an admission may retire it |
+| `reminder_seconds` | 60 | Repeat the inbox notice at this interval while a peer is idle with unread peer messages; 0 disables |
+| `max_agent_turns` | null | Model calls one agent may make over the episode; at the cap it stops for good |
+| `max_seconds` | null | Episode wall-clock limit (`stop_reason=max_seconds`) |
+| `scored_on` | "answer" | What the task scores: the CAS-submitted episode answer, or the final workspace state |
+| `artifacts` | [] | Final files, relative to the working directory, replaced only through `rlm.artifact.publish` |
+| `allow_agent_lookup_agent_history` | false | Let peers read each other's conversation histories |
+
+**Agents.** Founders and every `rlm.agent.spawn(..., independent=True)` are depth-0 peers: same authority, not beholden to their spawner, no lifecycle events to it, no cascade when either ends; the spawn edge is recorded for provenance and spend attribution, and the spawner keeps a handle to observe and message the peer. The default `rlm.agent.spawn(...)` inside an episode still spawns a beholden child one depth deeper: it reports to its parent, ends with it and counts against `max_depth` and `max_subagent_calls`, while the population caps count only peers.
+
+**Messaging is inbox-plus-pull.** Direct messages, broadcasts, membership changes and job completions land in the recipient's `rlm.inbox`; nothing is pushed into a conversation. One coalesced, time-signatured notice (`[inbox 14:03] 3 messages waiting (2 dm, 1 broadcast)`) announces arrivals at the recipient's next model boundary, waking it if idle, and `reminder_seconds` repeats the notice while peer messages stay unread. Senders poll receipts with `rlm.agent.delivery` — accepted, delivered (read), answered (the reply's tail, pulled) or failed — and never wait on a wake for a reply.
+
+**Lifecycle and budgets.** At the live cap an admission retires the longest-idle peer past its grace period: its kernel, jobs, subscriptions and services stop, its conversation and spend stay. A direct message revives it when a slot is free. Every retire or stop is owned by the supervisor, so no process of the episode outlives it: jobs, subscriptions and services all stop at episode end. Episode budgets are the tree-wide `max_total_tokens`/`max_total_turns` plus `max_seconds`, accounted across every agent including retired ones; a turn-cap death never records a synthetic answer.
+
+**Scoring.** The scorer stays in the task runner, outside every agent's reach. `scored_on="answer"` is scored on the answer submitted through `rlm.population.submit`; `scored_on="workspace"` on the workspace state after the session closes. The episode answer and declared artifacts are supervisor-owned compare-and-swap state, the `population_summary.json` written at episode end records the submitted answer, artifact revisions and per-agent usage, and a runner snapshots the workspace after `session/close` returns.
 
 ## Tracing headers
 
