@@ -132,6 +132,17 @@ def test_ipython_null_bytes_left_to_exec():
     assert find_blocked_in_ipython("x = 1\x00") is None
 
 
+def test_python_long_operator_chain_still_scanned():
+    chain = "x = " + " + ".join(["'a'"] * 1000)
+    assert find_blocked_in_ipython(chain) is None
+    code = f"{chain}\nimport subprocess\nsubprocess.run(['git', 'log', '--all'])"
+    assert find_blocked_in_ipython(code) == "--all"
+
+
+def test_ipython_too_deep_to_parse_left_to_exec():
+    assert find_blocked_in_ipython("x = " + " + ".join(["1"] * 100_000)) is None
+
+
 def test_ipython_shell_escape_git_status_allowed():
     assert find_blocked_in_ipython("!git status") is None
 
