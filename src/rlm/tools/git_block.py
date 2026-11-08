@@ -450,14 +450,15 @@ def find_blocked_python(code: str, *, allow_git: bool | None = None) -> str | No
     (``!cmd``, ``%magic``, ``obj?``) is stripped before parsing so
     cells mixing ipython and Python still get scanned. Returns ``None``
     on unparseable source (``SyntaxError``, ``ValueError`` for null bytes
-    before Python 3.12, or ``RecursionError`` for nesting too deep to parse)
-    so the normal exec path surfaces the error.
+    before Python 3.12, ``RecursionError`` for nesting too deep to parse, or
+    ``SystemError`` from CPython parser bugs such as "Negative size passed to
+    PyUnicode_New") so the normal exec path surfaces the error.
     """
     if _git_allowed(allow_git):
         return None
     try:
         tree = ast.parse(_strip_ipython_only(code))
-    except (SyntaxError, ValueError, RecursionError):
+    except (SyntaxError, ValueError, RecursionError, SystemError):
         return None
     finder = _GitCallFinder(allow_git)
     finder.scan(tree)
