@@ -350,7 +350,9 @@ class IPythonREPL:
         # kernels in parallel threads can race ("import_item accepts strings, not MetaHasTraits").
         with _JUPYTER_INIT_LOCK:
             self._km = KernelManager(
-                transport="ipc", ip=os.path.join(self._ipc_dir, "kernel"), autorestart=False
+                transport="ipc",
+                ip=os.path.join(self._ipc_dir, "kernel"),
+                autorestart=False,
             )
             self._km.kernel_spec.argv = [
                 sys.executable,
