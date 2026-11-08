@@ -211,6 +211,7 @@ class Swarm:
                 "max_compactions": policy.max_compactions,
                 "max_compaction_attempts": policy.max_compaction_attempts,
                 "allow_git": policy.allow_git,
+                "network_guidance": policy.network_guidance,
             },
             "semantic_edges": self.supervisor.semantic_edges.snapshot(),
             "population": summary,
