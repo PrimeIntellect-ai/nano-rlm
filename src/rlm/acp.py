@@ -36,6 +36,7 @@ from acp.schema import (
     SessionCapabilities,
     SessionCloseCapabilities,
     SseMcpServer,
+    StopReason,
     TextContentBlock,
     Usage,
 )
@@ -45,6 +46,7 @@ from rlm.client import ModelTransportError
 from rlm.engine import RLMEngine
 from rlm.config import (
     ExecutionPolicy,
+    TcpExecutionConfig,
     InvocationContext,
     ProviderConfig,
     RuntimeConfig,
@@ -57,6 +59,14 @@ CONTRACT_METADATA_KEY = "ai.prime.rlm/contract-v1"
 SESSION_METADATA_KEY = "ai.prime.rlm/session-v1"
 RUNTIME_METADATA_KEY = "ai.prime.rlm/runtime-v1"
 ACP_SEMANTIC_EDGES_METADATA_KEY = "ai.prime.acp/semantic-edges-v1"
+# A run cut short by a limit reports that limit; any other ending is `end_turn`. The
+# exact cause stays in the snapshot's `last_stop_reason`.
+_ACP_STOP_REASONS: dict[str, StopReason] = {
+    "max_total_turns": "max_turn_requests",
+    "max_total_tokens": "max_tokens",
+    "token_budget": "max_tokens",
+    "compaction_failed": "max_tokens",
+}
 
 
 class _ContractModel(BaseModel):
@@ -76,6 +86,9 @@ class _RuntimeMetadata(_ContractModel):
     leaf_append_to_system_prompt: str | None = None
     skills: list[Annotated[str, Field(min_length=1)]]
     builtin_tools: list[Annotated[str, Field(min_length=1)]] | None = None
+    execution_tcp: TcpExecutionConfig | None = None
+    execution_cwd: str | None = None
+    execution_command: list[Annotated[str, Field(min_length=1)]] | None = None
     kernel_env: dict[str, str]
     search_api_key: str | None
     network_block: list[str] = Field(default_factory=list)
@@ -109,6 +122,7 @@ class _LimitsSnapshot(_ContractModel):
     max_compactions: int | None = Field(default=None, gt=0)
     max_compaction_attempts: int = Field(gt=0)
     allow_git: bool
+    network_guidance: bool
 
 
 class _SemanticEdge(_ContractModel):
@@ -191,6 +205,33 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
         payload = _RuntimeMetadata.model_validate(
             meta_kwargs.get(RUNTIME_METADATA_KEY),
         )
+        result = (
+            RuntimeConfig(
+                model=payload.model,
+                provider=payload.provider,
+                invocation=InvocationContext(),
+                policy=payload.policy,
+                system_prompt_path=payload.system_prompt_path,
+                append_to_system_prompt=payload.append_to_system_prompt,
+                subagent_append_to_system_prompt=payload.subagent_append_to_system_prompt,
+                leaf_append_to_system_prompt=payload.leaf_append_to_system_prompt,
+                skills=tuple(payload.skills),
+                builtin_tools=(
+                    tuple(payload.builtin_tools)
+                    if payload.builtin_tools is not None
+                    else None
+                ),
+                kernel_env=tuple(payload.kernel_env.items()),
+                execution_tcp=payload.execution_tcp,
+                execution_cwd=payload.execution_cwd,
+                execution_command=tuple(payload.execution_command)
+                if payload.execution_command is not None
+                else None,
+                search_api_key=payload.search_api_key,
+                network_block=tuple(payload.network_block),
+            ),
+            payload.session_id,
+        )
     except ValidationError as error:
         raise RequestError.invalid_params(
             {
@@ -201,28 +242,7 @@ def _runtime_config(meta_kwargs: Any) -> tuple[RuntimeConfig, str]:
             }
         ) from error
 
-    return (
-        RuntimeConfig(
-            model=payload.model,
-            provider=payload.provider,
-            invocation=InvocationContext(),
-            policy=payload.policy,
-            system_prompt_path=payload.system_prompt_path,
-            append_to_system_prompt=payload.append_to_system_prompt,
-            subagent_append_to_system_prompt=payload.subagent_append_to_system_prompt,
-            leaf_append_to_system_prompt=payload.leaf_append_to_system_prompt,
-            skills=tuple(payload.skills),
-            builtin_tools=(
-                tuple(payload.builtin_tools)
-                if payload.builtin_tools is not None
-                else None
-            ),
-            kernel_env=tuple(payload.kernel_env.items()),
-            search_api_key=payload.search_api_key,
-            network_block=tuple(payload.network_block),
-        ),
-        payload.session_id,
-    )
+    return result
 
 
 def _mcp_servers(
@@ -295,7 +315,14 @@ class RLMACPAgent(Agent):
                 ),
             ),
             agent_info=Implementation(name="rlm", title="RLM", version=version("rlm")),
-            field_meta={CONTRACT_METADATA_KEY: True, "steering": {"supported": True}},
+            field_meta={
+                CONTRACT_METADATA_KEY: True,
+                "steering": {"supported": True},
+                "ai.prime.rlm/execution-v1": {
+                    "transports": ["stdio", "tcp"],
+                    "tools": ["ipython", "bash", "edit", "fetch"],
+                },
+            },
         )
 
     async def new_session(
@@ -376,11 +403,7 @@ class RLMACPAgent(Agent):
             finally:
                 state.prompt_task = None
 
-            stop_reason = (
-                "max_tokens"
-                if state.engine.stop_reason == "token_budget"
-                else "end_turn"
-            )
+            stop_reason = _ACP_STOP_REASONS.get(state.engine.stop_reason, "end_turn")
             state.last_stop_reason = state.engine.stop_reason or stop_reason
             if state.closing:
                 return PromptResponse(

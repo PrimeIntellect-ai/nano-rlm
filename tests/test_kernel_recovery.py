@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
+import uuid
 
 import pytest
 
@@ -263,3 +266,365 @@ async def test_cancel_interrupts_pending_scope_setup(session, monkeypatch):
         repl._interrupt_requested.set()
         await pending
         await asyncio.to_thread(repl.shutdown)
+
+
+async def test_remote_execution_preserves_state_and_brokers_children(session, tmp_path):
+    import sys
+
+    # One CPU, like a sandbox VM: a fast job then finishes before the worker
+    # acknowledges its start, which is when its events used to get lost.
+    cpu = str(min(os.sched_getaffinity(0)))
+    config = _config(max_depth=1).model_copy(
+        update={
+            "execution_command": (
+                "taskset",
+                "-c",
+                cpu,
+                sys.executable,
+                "-m",
+                "rlm.execution",
+            ),
+            "skills": ("bash", "edit"),
+            "builtin_tools": ("ipython",),
+            "policy": _config(max_depth=1).policy.model_copy(
+                update={"compaction": False}
+            ),
+        }
+    )
+
+    def factory(**kwargs):
+        return RLMEngine(
+            client=DummyClient(
+                [
+                    _tool(
+                        "from pathlib import Path; Path('child.txt').write_text('child'); print('CHILD')"
+                    ),
+                    DummyMessage(content="child complete"),
+                ]
+            ),
+            **kwargs,
+        )
+
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        engine_factory=factory,
+    )
+    client = DummyClient(
+        [
+            _tool("value = 41; print(await bash('pwd'))"),
+            _tool(
+                """
+from pathlib import Path
+assert value == 41
+child = await rlm.agent.spawn('write child.txt')
+await child.wait(timeout=30)
+assert (await child.result()).answer == 'child complete'
+assert 'write child.txt' in (await child.history()).user_messages()[0]['content']
+assert Path('child.txt').read_text() == 'child'
+h = await rlm.history()
+assert h.user_messages()[0]['content'] == 'run remotely'
+import asyncio
+# The supervisor's jobs, services and watches run in the workspace, beside this kernel.
+job = await rlm.shell.run('echo $PPID; touch from-shell')
+assert job.ok and int(job.text.split()[0]) != SUPERVISOR_PID, job.text
+assert Path('from-shell').exists()
+import time
+started = time.monotonic()
+assert (await rlm.shell.run('true')).ok and time.monotonic() - started < 5
+svc = await rlm.services.start(SERVICE, 'echo service-up; sleep 30')
+for _ in range(50):
+    if 'service-up' in await svc.tail():
+        break
+    await asyncio.sleep(0.1)
+assert 'service-up' in await svc.tail()
+assert not (await svc.stop(grace=1)).running
+await rlm.watch.path('.')
+Path('watched.txt').write_text('x')
+for _ in range(50):
+    if any(e['type'] == 'watch.path' for e in await rlm.inbox.list()):
+        break
+    await asyncio.sleep(0.1)
+assert any(e['type'] == 'watch.path' for e in await rlm.inbox.list())
+print('REMOTE_OK')
+""".replace("SUPERVISOR_PID", str(os.getpid())).replace(
+                    "SERVICE", repr(f"split-{uuid.uuid4().hex[:8]}")
+                )
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        supervisor=supervisor,
+    )
+    try:
+        await engine.prompt("run remotely")
+        logs = (session.dir / "messages.jsonl").read_text()
+        assert any(
+            record.get("type") == "tool_result"
+            and "REMOTE_OK" in record.get("content", "")
+            for record in map(json.loads, logs.splitlines())
+        )
+    finally:
+        await engine.aclose()
+        await supervisor.aclose()
+
+
+async def test_remote_execution_interrupt_and_recovery(session, tmp_path):
+    import sys
+    from rlm.execution import RemoteREPL
+
+    repl = RemoteREPL(
+        command=(sys.executable, "-m", "rlm.execution"),
+        cwd=str(tmp_path),
+        session=session,
+    )
+    try:
+        await repl.run_in_thread(repl.start)
+        task = asyncio.create_task(
+            repl.run_in_thread(repl.execute, "import time; time.sleep(60)", 120)
+        )
+        await asyncio.sleep(1)
+        await asyncio.to_thread(repl.interrupt)
+        await asyncio.wait_for(task, 10)
+        repl.finish_interrupt()
+        result = await repl.run_in_thread(repl.execute, "print('STILL_ALIVE')", 10)
+        assert "STILL_ALIVE" in result
+        await repl.run_in_thread(repl.execute, "import os; os._exit(7)", 10)
+        assert repl.take_recovery_notices()
+        assert "RECOVERED" in await repl.run_in_thread(
+            repl.execute, "print('RECOVERED')", 10
+        )
+    finally:
+        await asyncio.to_thread(repl.shutdown)
+
+
+async def test_endless_output_is_bounded_until_the_timeout(session):
+    from rlm.tools.bash import run_bash
+    from rlm.tools.output import OUTPUT_KEEP_BYTES
+
+    repl = IPythonREPL(session=session, cwd=str(session.dir))
+    try:
+        await repl.run_in_thread(repl.start)
+        output = await asyncio.wait_for(
+            repl.run_in_thread(
+                repl.execute, "while True: print('x' * 65536, flush=True)", 5
+            ),
+            timeout=25,
+        )
+        assert len(output.encode()) < OUTPUT_KEEP_BYTES + 256
+        assert output.endswith("[execution timed out after 5s and was interrupted]")
+        assert repl.omitted.nbytes > 0
+        continued = await repl.run_in_thread(repl.execute, "print('STILL_ALIVE')", 10)
+        assert "STILL_ALIVE" in continued
+    finally:
+        await repl.run_in_thread(repl.shutdown)
+    output = await asyncio.to_thread(run_bash, "yes", 3)
+    assert len(output.encode()) < OUTPUT_KEEP_BYTES + 256
+    assert output.endswith("Error: command timed out after 3s")
+
+
+@pytest.mark.parametrize("budget", [None, 3 << 20], ids=["default", "large"])
+@pytest.mark.parametrize("split", [False, True], ids=["local", "split"])
+@pytest.mark.parametrize("tool", ["bash", "ipython"])
+async def test_long_output_runs_to_its_end_and_reads_as_whole(
+    session, tmp_path, split, tool, budget
+):
+    """A command that prints far more than a tool result keeps runs to its end, and the
+    model sees the truncation of its whole output: the same start, end and counts. A
+    budget larger than what was kept shows no more of either end than that, once."""
+    import sys
+
+    from rlm.compaction import truncate_tool_output
+    from rlm.tools.output import OUTPUT_KEEP_BYTES
+
+    lines = "".join(f"{i}\n" for i in range(1, 300001))
+    if tool == "bash":
+        call = DummyToolCall(
+            "bash",
+            {
+                "command": "printf 'a\\r\\nb\\rc\\n'; seq 300000; echo DONE; "
+                "seq 200000 >&2; echo ERR_END >&2"
+            },
+        )
+        errors = "".join(f"{i}\n" for i in range(1, 200001))
+        whole = f"a\nb\nc\n{lines}DONE\n\n{errors}ERR_END\n".strip()
+    else:
+        call = DummyToolCall(
+            "ipython", {"code": "for i in range(1, 300001): print(i)\nprint('DONE')"}
+        )
+        whole = f"{lines}DONE\n"
+    config = _config()
+    config = config.model_copy(
+        update={
+            "builtin_tools": ("ipython", "bash"),
+            "policy": config.policy.model_copy(
+                update={"max_tool_output_bytes": budget}
+            ),
+        }
+    )
+    if split:
+        config = config.model_copy(
+            update={"execution_command": (sys.executable, "-m", "rlm.execution")}
+        )
+    client = DummyClient(
+        [DummyMessage(tool_calls=[call]), DummyMessage(content="done")]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=config, cwd=str(tmp_path)
+    )
+    try:
+        await engine.prompt("print a lot")
+    finally:
+        await engine.aclose()
+    seen = [m for m in client.calls[1]["messages"] if m["role"] == "tool"][-1]
+    if budget is None:
+        assert seen["content"] == truncate_tool_output(whole)
+    else:
+        assert seen["content"].count(whole[:200]) == 1
+        assert seen["content"].count(whole[-200:]) == 1
+        assert len(seen["content"].encode()) <= budget
+    logged = [
+        record["content"]
+        for record in map(json.loads, (session.dir / "messages.jsonl").open())
+        if record.get("type") == "tool_result"
+    ][-1]
+    assert "bytes of output omitted" in logged
+    assert len(logged.encode()) < OUTPUT_KEEP_BYTES + 512
+    assert logged[:10_000] == whole[:10_000]
+    assert logged[-10_000:] == whole[-10_000:]
+
+
+@pytest.mark.parametrize("split", [False, True], ids=["local", "split"])
+async def test_processes_live_as_on_a_terminal(session, tmp_path, split):
+    """A cancelled turn stops its running bash command at once. The session's end stops
+    what is attached to the kernel, like a closing terminal, and leaves a daemon and a
+    bash command's background jobs running, among them one that held the command's
+    output until its timeout."""
+    import signal
+    import sys
+
+    def loop(name):
+        return f"echo $$ > {name}.pid; while :; do touch {name}.alive; sleep 0.1; done"
+
+    cell = (
+        "import subprocess\n"
+        f"subprocess.Popen(['sh', '-c', {loop('attached')!r}])\n"
+        f"subprocess.Popen(['sh', '-c', {loop('daemon')!r}], start_new_session=True)\n"
+    )
+    background = f"(sh -c {loop('job')!r}) >/dev/null 2>&1 &"
+    held = f"sh -c {loop('held')!r} &"
+    client = DummyClient(
+        [
+            _tool(cell),
+            DummyMessage(tool_calls=[DummyToolCall("bash", {"command": background})]),
+            DummyMessage(tool_calls=[DummyToolCall("bash", {"command": held})]),
+            DummyMessage(tool_calls=[DummyToolCall("bash", {"command": "sleep 60"})]),
+        ]
+    )
+    config = _config()
+    config = config.model_copy(
+        update={
+            "builtin_tools": ("ipython", "bash"),
+            "policy": config.policy.model_copy(update={"exec_timeout": 2}),
+        }
+    )
+    if split:
+        config = config.model_copy(
+            update={"execution_command": (sys.executable, "-m", "rlm.execution")}
+        )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=config, cwd=str(tmp_path)
+    )
+    names = ("attached", "daemon", "job", "held")
+    try:
+        try:
+            turn = asyncio.create_task(engine.prompt("run the commands"))
+            while len(client.calls) < 4:
+                await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(turn, 5)
+            assert all((tmp_path / f"{name}.alive").exists() for name in names)
+        finally:
+            await engine.aclose()
+        for name in names:
+            (tmp_path / f"{name}.alive").unlink(missing_ok=True)
+        await asyncio.sleep(0.5)
+        assert not (tmp_path / "attached.alive").exists()
+        assert (tmp_path / "daemon.alive").exists()
+        assert (tmp_path / "job.alive").exists()
+        assert (tmp_path / "held.alive").exists()
+    finally:
+        for name in names:
+            pid = tmp_path / f"{name}.pid"
+            if pid.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pid.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.parametrize("split", [False, True], ids=["local", "split"])
+async def test_history_past_the_frame_limit_reads_whole(session, tmp_path, split):
+    """A history larger than one frame reads whole: the agent's own, which reaches a
+    worker in frame-sized chunks, and a child's, which the supervisor returns in pages."""
+    import sys
+
+    from rlm.execution import MAX_FRAME
+
+    prompt = "x" * (MAX_FRAME + 1024)
+    config = _config(max_depth=1).model_copy(update={"builtin_tools": ("ipython",)})
+    if split:
+        config = config.model_copy(
+            update={"execution_command": (sys.executable, "-m", "rlm.execution")}
+        )
+
+    def factory(**kwargs):
+        return RLMEngine(client=DummyClient([DummyMessage(content="ok")]), **kwargs)
+
+    supervisor = SessionTreeSupervisor(
+        root_session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        engine_factory=factory,
+    )
+    client = DummyClient(
+        [
+            _tool(
+                f"""
+import json
+from rlm import history
+assert len((await history()).user_messages()[0]['content']) == {len(prompt)}
+child = await rlm.agent.spawn('answer')
+await child.wait(timeout=30)
+# A long child conversation: five records of a quarter frame each.
+with (child.session_dir / 'messages.jsonl').open('a') as stream:
+    for _ in range(5):
+        stream.write(json.dumps({{'type': 'padding', 'text': 'y' * {MAX_FRAME // 4}}}) + '\\n')
+h = await child.history()
+assert 'answer' in h.user_messages()[0]['content']
+print(f"PADDED {{sum(event['type'] == 'padding' for event in h.events)}}")
+"""
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=config,
+        cwd=str(tmp_path),
+        supervisor=supervisor,
+    )
+    try:
+        await engine.prompt(prompt)
+    finally:
+        await engine.aclose()
+    tool = [m for m in client.calls[1]["messages"] if m["role"] == "tool"][-1]
+    # Printed, not asserted in the cell: a traceback would show the cell's source.
+    assert "PADDED 5" in tool["content"], tool["content"][-2000:]

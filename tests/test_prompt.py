@@ -12,7 +12,10 @@ from rlm.prompt import (
     EDIT_SKILL_PROMPT,
     GIT_HISTORY_GUARD_PROMPT,
     IPYTHON_CONTROL_PROMPT,
+    KERNEL_PACKAGES_PROMPT,
+    KERNEL_PREINSTALLED_PROMPT,
     MCP_DISCOVERY_PROMPT,
+    OFFLINE_GIT_HISTORY_GUARD_PROMPT,
     SEARCH_SKILL_PROMPT,
     build_system_prompt,
 )
@@ -28,6 +31,7 @@ def _prompt(
     *,
     installed_skills: list[str] | None = None,
     allow_git: bool = False,
+    network_guidance: bool = True,
     mcp_servers: list[dict] | None = None,
 ) -> str:
     return build_system_prompt(
@@ -35,6 +39,7 @@ def _prompt(
         installed_skills or [],
         allow_recursion=False,
         allow_git=allow_git,
+        network_guidance=network_guidance,
         active_tools=active_tools,
         mcp_servers=mcp_servers,
     )
@@ -48,6 +53,19 @@ def test_git_history_guard_prompt_included_for_shell_tools():
     assert "online solutions or hints specific to this task" in prompt
     assert "other branches, tags, remotes" in prompt
     assert "`git log --all`" in prompt and "`clone`" in prompt
+
+
+def test_network_guidance_off_drops_only_network_dependent_sentences():
+    online = _prompt([_Tool("ipython")])
+    offline = _prompt([_Tool("ipython")], network_guidance=False)
+
+    assert KERNEL_PACKAGES_PROMPT in online and GIT_HISTORY_GUARD_PROMPT in online
+    assert KERNEL_PREINSTALLED_PROMPT in offline
+    assert OFFLINE_GIT_HISTORY_GUARD_PROMPT in offline
+    assert "uv pip install" not in offline
+    assert "online solutions" not in offline
+    assert "Do not cheat by copying or inferring solutions" in offline
+    assert "`git log --all`" in offline and "`clone`" in offline
 
 
 def test_git_history_guard_prompt_omitted_when_unrestricted():

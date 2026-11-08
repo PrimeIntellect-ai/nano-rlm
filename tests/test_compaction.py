@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import itertools
 import json
+import re
+import sys
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,6 +26,7 @@ from rlm.compaction import (
     OMITTED_CONTEXT,
     hollow_middle,
     CompactionFailed,
+    CompactionFormatViolation,
     is_context_overflow,
 )
 from rlm.config import (
@@ -80,6 +85,11 @@ def test_overflow_detection_is_status_gated():
     assert is_context_overflow(error)
 
 
+# Discovered context windows are cached per base URL for the whole process, and an
+# id() can be reused once its object is freed, so each client gets a fresh number.
+_client_numbers = itertools.count()
+
+
 class _ScriptedClient(DummyClient):
     def __init__(
         self,
@@ -90,7 +100,7 @@ class _ScriptedClient(DummyClient):
         super().__init__([])
         self.actions = list(actions)
         self.max_model_len = max_model_len
-        self.base_url = f"http://scripted-{id(self)}"
+        self.base_url = f"http://scripted-{next(_client_numbers)}"
 
     @property
     def models(self):
@@ -139,7 +149,8 @@ def _config(
     )
 
 
-async def test_compaction_attempt_limit_is_configurable(session):
+@pytest.mark.parametrize("attempts", [1, 2])
+async def test_compaction_attempt_limit_is_configurable(session, attempts):
     client = _ScriptedClient(
         [
             _response(DummyMessage(tool_calls=[DummyToolCall("ipython", {})])),
@@ -149,7 +160,7 @@ async def test_compaction_attempt_limit_is_configurable(session):
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        runtime_config=_config(max_compaction_attempts=2),
+        runtime_config=_config(max_compaction_attempts=attempts),
     )
     messages = [
         {"role": "system", "content": "system"},
@@ -157,12 +168,14 @@ async def test_compaction_attempt_limit_is_configurable(session):
     ]
 
     try:
-        with pytest.raises(CompactionFailed, match="after 2 attempts"):
+        with pytest.raises(
+            CompactionFormatViolation, match=f"after {attempts} attempts"
+        ):
             await engine._compact_branch(messages, turn=0)
     finally:
         engine.close()
 
-    assert len(client.calls) == 2
+    assert len(client.calls) == attempts
 
 
 @pytest.mark.parametrize(
@@ -256,7 +269,18 @@ async def test_compaction_retries_reasoning_without_final_content(session, conte
         engine.close()
 
 
-async def test_tool_result_overflow_compacts_and_retries(session):
+@pytest.mark.parametrize("split", [False, True])
+async def test_tool_result_overflow_compacts_and_retries(session, tmp_path, split):
+    """Under split execution the kernel reads the worker's synced copy of the history,
+    and the compaction notice names that copy."""
+    config = _config()
+    if split:
+        config = config.model_copy(
+            update={
+                "execution_command": (sys.executable, "-m", "rlm.execution"),
+                "builtin_tools": ("ipython",),
+            }
+        )
     client = _ScriptedClient(
         [
             _response(
@@ -294,13 +318,14 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        runtime_config=_config(),
+        runtime_config=config,
+        cwd=str(tmp_path),
     )
 
     try:
         result = await engine.run("produce a large tool result")
     finally:
-        engine.close()
+        await engine.aclose()
 
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 1
@@ -310,7 +335,9 @@ async def test_tool_result_overflow_compacts_and_retries(session):
     assert retry_messages[1]["content"].startswith(
         '<runtime_event kind="compaction">\n' + SUMMARY_FRAMING
     )
-    assert str(session.dir / "messages.jsonl") in retry_messages[1]["content"]
+    named = re.search(r"available in (\S+)\. ", retry_messages[1]["content"])
+    assert named is not None
+    assert (Path(named.group(1)) != session.dir / "messages.jsonl") is split
     records = [
         json.loads(line)
         for line in (session.dir / "messages.jsonl").read_text().splitlines()

@@ -7,10 +7,11 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-CompactionStatus = Literal["completed", "failed", "cancelled"]
+CompactionStatus = Literal["completed", "failed", "cancelled", "format_violation"]
 
 MODEL_REQUEST_ID_HEADER = "X-ACP-Model-Request-ID"
-ACP_EXTENSION_HEADER_NAMES = (MODEL_REQUEST_ID_HEADER,)
+AGENT_SESSION_ID_HEADER = "X-ACP-Agent-Session-ID"
+ACP_EXTENSION_HEADER_NAMES = (MODEL_REQUEST_ID_HEADER, AGENT_SESSION_ID_HEADER)
 
 
 @dataclass(frozen=True)
@@ -185,6 +186,19 @@ class SemanticEdgeTracker:
 
     def finish_compaction(self, compaction_id: str, status: CompactionStatus) -> None:
         compaction = self._compactions.pop(compaction_id)
+        if status == "format_violation":
+            if compaction.summary_request_id is None:
+                raise ValueError(
+                    "format violation requires a committed summary request"
+                )
+            if compaction.source_request_id is not None:
+                self._edges.append(
+                    {
+                        "source_request_id": compaction.source_request_id,
+                        "target_request_id": compaction.summary_request_id,
+                        "type": "format_violation",
+                    }
+                )
         if status != "completed":
             return
         summary_request_id = compaction.summary_request_id

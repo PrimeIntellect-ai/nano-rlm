@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from rlm.client import model_call_headers
 from rlm.semantic import SemanticEdgeTracker
 
@@ -29,9 +31,15 @@ def test_subagent_call_and_return_are_request_edges():
     lineage.finish_subagent("child")
     resumed_request = _finish(lineage, "root")
 
-    assert model_call_headers(parent_request) == {
+    assert model_call_headers(parent_request, "root") == {
         "Idempotency-Key": parent_request,
         "X-ACP-Model-Request-ID": parent_request,
+        "X-ACP-Agent-Session-ID": "root",
+    }
+    assert model_call_headers(child_request, "child") == {
+        "Idempotency-Key": child_request,
+        "X-ACP-Model-Request-ID": child_request,
+        "X-ACP-Agent-Session-ID": "child",
     }
     assert lineage.snapshot() == {
         "edges": [
@@ -191,18 +199,35 @@ def test_compaction_consumes_restored_edges_but_preserves_late_returns():
     ]
 
 
-def test_failed_compaction_publishes_no_transition():
+@pytest.mark.parametrize("status", ["failed", "format_violation"])
+def test_failed_compaction_publishes_no_transition(status):
     lineage = SemanticEdgeTracker()
     lineage.register_session("root", parent_session_id=None)
+    preceding_request = _finish(lineage, "root")
     compaction = lineage.begin_compaction("root")
     summary_request = lineage.start_request(
         "root", compaction_id=compaction.compaction_id
     )
-    lineage.fail_request(summary_request)
-    lineage.finish_compaction(compaction.compaction_id, "failed")
+    if status == "failed":
+        lineage.fail_request(summary_request)
+    else:
+        lineage.finish_request(summary_request)
+    lineage.finish_compaction(compaction.compaction_id, status)
     _finish(lineage, "root")
 
-    assert lineage.snapshot() == {"edges": []}
+    edges = lineage.snapshot()["edges"]
+    assert not any(edge["type"] == "compaction" for edge in edges)
+    assert [edge for edge in edges if edge["type"] == "format_violation"] == (
+        [
+            {
+                "source_request_id": preceding_request,
+                "target_request_id": summary_request,
+                "type": "format_violation",
+            }
+        ]
+        if status == "format_violation"
+        else []
+    )
 
 
 def test_prompt_rollback_keeps_unconsumed_compaction_attempt():
@@ -269,7 +294,7 @@ async def test_concurrent_requests_receive_unique_stable_ids():
         await asyncio.sleep(0)
         request_id = lineage.start_request("root")
         lineage.finish_request(request_id)
-        return model_call_headers(request_id)
+        return model_call_headers(request_id, "root")
 
     headers = await asyncio.gather(*(start_request() for _ in range(64)))
     request_ids = [item["X-ACP-Model-Request-ID"] for item in headers]
