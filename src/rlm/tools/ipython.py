@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import zmq
+
 from rlm.isolation import ProcessIdentity, own_kernel_dir
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
@@ -563,7 +565,10 @@ import rlm
                 return False
             try:
                 msg = self._kc.get_iopub_msg(timeout=remaining)
-            except Empty:
+            except (
+                Empty,
+                zmq.ZMQError,
+            ):  # a ZMQError means the channel is gone: recover the kernel
                 return False
             if (
                 msg["parent_header"].get("msg_id") == msg_id
