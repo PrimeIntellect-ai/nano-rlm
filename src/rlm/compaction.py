@@ -1,6 +1,9 @@
 """Context checkpoint helpers."""
 
+import json
+import re
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 from openai import APIError, APIStatusError, AsyncOpenAI
@@ -23,6 +26,12 @@ If resources are no longer needed, note that they can be cancelled; do not imply
 
 Summarize from the existing conversation. Do not call tools. Reply with the summary as plain text."""
 
+CUT_REPLY_NOTE = (
+    "\n\nYour last reply ran into the model's context window and was cut off mid-thought. "
+    "Record where that reply left off and what you were about to do next, so the work "
+    "continues from there."
+)
+
 REPL_NOTE = (
     "\n\nCompaction itself preserves the IPython kernel and supervisor-owned resources. "
     "Record useful Python variable names and what they contain, but account for any recovery "
@@ -40,8 +49,9 @@ SUMMARY_FRAMING = (
     "missing evidence, and do not duplicate work merely because its full conversation is absent."
 )
 
-RESERVE_TOKENS = 16_384
-"""Compact when this many tokens remain below the model context window."""
+OVERSHOOT_TOKENS = 8_192
+"""Room above the threshold for the turn and tool result that cross it, so a routine
+compaction leaves the summary its budget without trimming."""
 
 TOOL_OUTPUT_MAX_BYTES = 20_000
 """Middle-out truncation budget for one tool result before it enters the conversation."""
@@ -93,9 +103,10 @@ def is_context_overflow(error: APIStatusError) -> bool:
     )
 
 
-def default_threshold(context_window: int) -> int:
-    """Leave a fixed reserve below the window; small windows keep at least half."""
-    return max(context_window - RESERVE_TOKENS, context_window // 2)
+def default_threshold(context_window: int, summary_budget: int) -> int:
+    """Leave the summary budget plus overshoot room below the window; small windows
+    keep at least half."""
+    return max(context_window - summary_budget - OVERSHOOT_TOKENS, context_window // 2)
 
 
 def _model_context_window(payload: Mapping[str, Any], model: str) -> int | None:
@@ -116,7 +127,7 @@ def _model_context_window(payload: Mapping[str, Any], model: str) -> int | None:
     return None
 
 
-async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
+async def discover_context_window(client: AsyncOpenAI, model: str) -> int | None:
     key = (str(getattr(client, "base_url", None)), model)
     if key not in _window_cache:
         try:
@@ -138,8 +149,7 @@ async def discover_threshold(client: AsyncOpenAI, model: str) -> int | None:
             # rest of the process - leave the cache empty so the next engine retries.
             return None
         _window_cache[key] = _model_context_window(payload, model)
-    window = _window_cache[key]
-    return default_threshold(window) if window is not None else None
+    return _window_cache[key]
 
 
 def truncate_tool_output(
@@ -181,58 +191,129 @@ def compactable(messages: list[dict]) -> bool:
     )
 
 
-OMITTED_CONTEXT = (
-    "Some middle context has been omitted to make room for summarization. "
-    "Summarize only the information provided. Do not call tools."
+TOOL_OUTPUT_STUB = "[tool output omitted to make room for the summary]"
+
+KEEP_REPLY_TOKENS = (4_096, 16_384)
+"""Maximum beginning/end budgets shared by an oversized newest reply's text fields."""
+
+_REASONING_FIELDS = ("reasoning_content", "reasoning")
+_OMISSION = re.compile(
+    r"^\[(\d+) earlier messages were omitted to make room for the summary\."
 )
 
 
-def hollow_middle(
-    messages: list[dict], *, prompt_tokens: int | None, remove_tokens: int
+def omission_marker(count: int) -> dict:
+    return {
+        "role": "user",
+        "content": (
+            f"[{count} earlier messages were omitted to make room for the summary. "
+            "The full history remains available through rlm.history. Summarize from "
+            "what is shown and do not call tools.]"
+        ),
+    }
+
+
+def _omitted_count(message: dict) -> int | None:
+    content = message.get("content")
+    if message.get("role") != "user" or not isinstance(content, str):
+        return None
+    match = _OMISSION.match(content)
+    return int(match.group(1)) if match else None
+
+
+def _size(item: Any) -> int:
+    return len(json.dumps(item, ensure_ascii=False))
+
+
+def _keep_ends(text: str, head: int, tail: int) -> str:
+    """Keep the ends of `text` only when the omission note still makes it shorter."""
+    omitted = len(text) - head - tail
+    note = f"\n[... {omitted} characters omitted ...]\n"
+    if omitted <= len(note):
+        return text
+    return text[:head] + note + (text[-tail:] if tail else "")
+
+
+def trim_summary_input(
+    messages: list[dict], *, context_tokens: int, remove_tokens: int
 ) -> list[dict]:
-    """Shorten summary input, keeping its beginning and end and whole tool exchanges.
+    """Shrink a summary request by about `remove_tokens`, cheapest context first.
 
-    Measured input usage calibrates the serialized-size estimate. Provider tokenization
-    and tool-schema overhead can differ; further truncated attempts shrink again.
+    System messages, the first message after them (the task or the carried-over summary)
+    and the newest exchange are kept. Between them, oldest first: tool outputs give way to
+    a stub, then assistant reasoning is dropped (tool calls stay as the record of what was
+    done), then whole exchanges are replaced by one omission marker. If that is still not
+    enough, the newest assistant reply keeps its beginning and end, sized to the
+    remaining space and shared across content and reasoning fields.
+
+    `context_tokens` measures `messages` as a prompt and calibrates the serialized-size
+    estimate. The measured prompt also covers tool schemas, which are not in `messages`,
+    so the chars-per-token ratio runs low; over-remove a little rather than spend another
+    attempt. `messages` itself is left unchanged.
     """
-    import json
-
-    system = []
+    system: list[dict] = []
     groups: list[list[dict]] = []
-    for message in messages:
+    omitted = 0
+    for message in deepcopy(messages):
         if message.get("role") == "system":
             system.append(message)
-        elif message.get("content") == OMITTED_CONTEXT:
-            continue
+        elif (count := _omitted_count(message)) is not None:
+            omitted += count
         elif message.get("role") == "tool" and groups:
             groups[-1].append(message)
         else:
             groups.append([message])
-    if len(groups) < 3:
-        return messages
-    sizes = [len(json.dumps(group, ensure_ascii=False)) for group in groups]
-    total = len(json.dumps(messages, ensure_ascii=False))
-    measured = prompt_tokens or max(1, (total + 3) // 4)
-    marker = {"role": "user", "content": OMITTED_CONTEXT}
-    # The measured prompt also covers the checkpoint prompt and forwarded tool schemas,
-    # which are not in `messages`, so the chars-per-token ratio runs low; over-remove a
-    # little rather than spend another attempt.
-    needed = 1.25 * total * remove_tokens / measured + len(json.dumps(marker))
-    # Grow a contiguous hole around the middle while retaining both endpoints.
-    left = right = len(groups) // 2
-    removed = sizes[left]
-    while removed < needed and (left > 1 or right < len(groups) - 2):
-        if left > 1 and (
-            right == len(groups) - 2 or sum(sizes[:left]) > sum(sizes[right + 1 :])
+    total = _size(messages)
+    needed = 1.25 * total * remove_tokens / max(context_tokens, 1) + _size(
+        omission_marker(len(messages))
+    )
+    middle = groups[1:-1]
+    newest = groups[-1] if len(groups) > 1 else []
+    removed = 0
+    for message in (message for group in middle for message in group):
+        if removed >= needed:
+            break
+        if message.get("role") == "tool" and _size(message.get("content")) > _size(
+            TOOL_OUTPUT_STUB
         ):
-            left -= 1
-            removed += sizes[left]
-        else:
-            right += 1
-            removed += sizes[right]
+            removed += _size(message)
+            message["content"] = TOOL_OUTPUT_STUB
+            removed -= _size(message)
+    for message in (message for group in middle for message in group):
+        if removed >= needed:
+            break
+        if message.get("role") == "assistant":
+            removed += _size(message)
+            for field in _REASONING_FIELDS:
+                message.pop(field, None)
+            removed -= _size(message)
+    while middle and removed < needed:
+        group = middle.pop(0)
+        removed += sum(_size(message) for message in group)
+        omitted += len(group)
+    if removed < needed:
+        fields = [
+            (message, field, text)
+            for message in newest
+            if message.get("role") == "assistant"
+            for field in ("content", *_REASONING_FIELDS)
+            if isinstance(text := message.get(field), str) and text
+        ]
+        chars = sum(len(text) for _, _, text in fields)
+        size = sum(_size(text) for _, _, text in fields)
+        head, tail = KEEP_REPLY_TOKENS
+        keep = min(
+            4 * (head + tail),
+            max(0, int(chars * (1 - (needed - removed) / max(size, 1)))),
+        )
+        for message, field, text in fields:
+            share = max(2, keep * len(text) // max(chars, 1))
+            start = max(1, share * head // (head + tail))
+            message[field] = _keep_ends(text, start, share - start)
     return [
         *system,
-        *(message for group in groups[:left] for message in group),
-        marker,
-        *(message for group in groups[right + 1 :] for message in group),
+        *(message for group in groups[:1] for message in group),
+        *([omission_marker(omitted)] if omitted else []),
+        *(message for group in middle for message in group),
+        *newest,
     ]
