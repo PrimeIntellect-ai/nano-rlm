@@ -1359,6 +1359,13 @@ class RLMEngine:
             "exceeds the model's window"
         )
 
+    @property
+    def _summary_budget(self) -> int:
+        """Leave at least half a known window for the summary's input."""
+        if self.context_window is None:
+            return self.summary_budget_tokens
+        return min(self.summary_budget_tokens, max(1, self.context_window // 2))
+
     def _fit_summary_input(
         self, messages: list[dict], checkpoint_prompt: str, context_tokens: int | None
     ) -> list[dict]:
@@ -1373,7 +1380,7 @@ class RLMEngine:
         excess = (
             context_tokens
             + estimated_tokens(checkpoint_prompt)
-            + self.summary_budget_tokens
+            + self._summary_budget
             - self.context_window
         )
         if excess <= 0:
@@ -1426,7 +1433,10 @@ class RLMEngine:
             # Only the summary request is shortened; the live context and ledger
             # remain intact until a complete summary succeeds.
             base = self._fit_summary_input(messages, checkpoint_prompt, context_tokens)
-            snapshot: list[dict] | None = messages[: self._last_good]
+            # A cut reply must survive every attempt, including overflow recovery.
+            snapshot: list[dict] | None = (
+                None if cut_reply else messages[: self._last_good]
+            )
             summary_text = ""
             for attempt in range(self.max_compaction_attempts):
                 last_attempt = attempt + 1 == self.max_compaction_attempts
@@ -1448,7 +1458,7 @@ class RLMEngine:
                             base,
                             snapshot,
                             prompt_tokens=None,
-                            remove_tokens=self.summary_budget_tokens,
+                            remove_tokens=self._summary_budget,
                         )
                     continue
                 choice = response.choices[0]
@@ -1473,7 +1483,7 @@ class RLMEngine:
                         prompt_tokens=usage.prompt_tokens,
                         remove_tokens=max(
                             usage.prompt_tokens
-                            + 2 * self.summary_budget_tokens
+                            + 2 * self._summary_budget
                             - self.context_window,
                             1024,
                         ),
@@ -1490,7 +1500,7 @@ class RLMEngine:
                         base,
                         snapshot,
                         prompt_tokens=usage.prompt_tokens,
-                        remove_tokens=self.summary_budget_tokens,
+                        remove_tokens=self._summary_budget,
                     )
             if not summary_text:
                 raise CompactionFailed(

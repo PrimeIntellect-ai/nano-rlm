@@ -776,7 +776,12 @@ def test_summary_trim_spends_outputs_then_reasoning_then_exchanges():
     assert medium[-2:] == original[-2:]
 
     heavy = trim_summary_input(messages, context_tokens=tokens, remove_tokens=tokens)
-    assert heavy == [*original[:2], omission_marker(10), *original[-2:]]
+    assert heavy[:3] == [*original[:2], omission_marker(10)]
+    assert heavy[-1] == original[-1]
+    assert heavy[-2]["tool_calls"] == original[-2]["tool_calls"]
+    assert heavy[-2]["reasoning_content"].startswith("r")
+    assert heavy[-2]["reasoning_content"].endswith("r")
+    assert len(heavy[-2]["reasoning_content"]) < len(original[-2]["reasoning_content"])
     again = trim_summary_input(medium, context_tokens=tokens, remove_tokens=tokens)
     assert again == heavy
     for trimmed in (light, medium, heavy):
@@ -797,7 +802,111 @@ def test_oversized_newest_reply_keeps_its_ends():
     assert kept.endswith("]\n" + "T" * 65_536)
     assert "M" not in kept
     again = trim_summary_input(trimmed, context_tokens=20_000, remove_tokens=10_000)
-    assert again == trimmed
+    assert len(again[-1]["reasoning_content"]) < len(kept)
+    assert again[-1]["reasoning_content"].startswith("H")
+    assert again[-1]["reasoning_content"].endswith("T")
+
+
+@pytest.mark.parametrize("summary_budget", [4_096, 24_576])
+@pytest.mark.parametrize("overflow", [False, True])
+async def test_small_window_cut_reply_survives_summary_retries(
+    session, summary_budget, overflow
+):
+    client = _ScriptedClient(
+        [
+            _overflow()
+            if overflow
+            else _response(
+                DummyMessage(content="unfinished summary"),
+                finish_reason="length",
+                prompt_tokens=16_000,
+                completion_tokens=384,
+            ),
+            _response(DummyMessage(content="complete summary")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config(
+            summary_budget_tokens=summary_budget, max_compaction_attempts=2
+        ),
+    )
+    engine.context_window = 16_384
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": "H" * 15_000 + "T" * 15_000,
+            "reasoning_content": "R" * 15_000 + "S" * 15_000,
+        },
+    ]
+    original = deepcopy(messages)
+    session.replace_context(messages, reason="start")
+    engine._last_good = 2
+    try:
+        assert engine._summary_budget == min(summary_budget, 8_192)
+        await engine._compact_branch(
+            messages, turn=0, context_tokens=16_384, cut_reply=True
+        )
+        for call in client.calls:
+            checkpoint = call["messages"]
+            assert checkpoint[:2] == original[:2]
+            assert CUT_REPLY_NOTE in checkpoint[-1]["content"]
+            reply = checkpoint[-2]
+            assert reply["role"] == "assistant"
+            assert reply["content"].startswith("H")
+            assert reply["content"].endswith("T")
+            assert reply["reasoning_content"].startswith("R")
+            assert reply["reasoning_content"].endswith("S")
+        first, retry = (call["messages"][:-1] for call in client.calls)
+        assert (
+            len(json.dumps(retry)) < len(json.dumps(first)) < len(json.dumps(original))
+        )
+        assert messages == original
+        assert engine._metrics.num_compactions == 1
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("overflow", [False, True])
+async def test_unshrinkable_cut_reply_never_uses_an_older_snapshot(session, overflow):
+    client = _ScriptedClient(
+        [
+            _overflow()
+            if overflow
+            else _response(
+                DummyMessage(content="unfinished summary"),
+                finish_reason="length",
+                prompt_tokens=16_000,
+                completion_tokens=384,
+            ),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=_config(max_compaction_attempts=2),
+    )
+    engine.context_window = 16_384
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task" * 16_384},
+        {"role": "assistant", "content": "partial reply"},
+    ]
+    session.replace_context(messages, reason="start")
+    engine._last_good = 2
+    try:
+        with pytest.raises(CompactionFailed, match="cannot be shortened"):
+            await engine._compact_branch(
+                messages, turn=0, context_tokens=16_384, cut_reply=True
+            )
+        assert len(client.calls) == 1
+        assert session.messages == messages
+        assert engine._metrics.num_compactions == 0
+    finally:
+        engine.close()
 
 
 async def test_unshrinkable_summary_input_fails_fast(session):
@@ -858,10 +967,10 @@ async def test_hollowed_input_falls_back_to_last_good_snapshot(session):
     engine.summarize_at_tokens = 114688
     messages = [
         {"role": "system", "content": "system"},
-        {"role": "user", "content": "task"},
+        {"role": "user", "content": "task" * 100_000},
         {"role": "assistant", "content": "step one"},
         {"role": "assistant", "content": "step two"},
-        {"role": "assistant", "content": "x" * 400_000},
+        {"role": "assistant", "content": "partial"},
     ]
     session.replace_context(messages, reason="start")
     engine._last_good = 4

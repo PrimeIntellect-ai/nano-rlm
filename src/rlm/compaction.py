@@ -194,7 +194,7 @@ def compactable(messages: list[dict]) -> bool:
 TOOL_OUTPUT_STUB = "[tool output omitted to make room for the summary]"
 
 KEEP_REPLY_TOKENS = (4_096, 16_384)
-"""How much of its beginning and end an oversized newest reply keeps."""
+"""Maximum beginning/end budgets shared by an oversized newest reply's text fields."""
 
 _REASONING_FIELDS = ("reasoning_content", "reasoning")
 _OMISSION = re.compile(
@@ -226,12 +226,12 @@ def _size(item: Any) -> int:
 
 
 def _keep_ends(text: str, head: int, tail: int) -> str:
-    """Keep the ends of `text`. Cutting under a thousand characters is not worth a note,
-    so a text already cut to its ends comes back unchanged."""
+    """Keep the ends of `text` only when the omission note still makes it shorter."""
     omitted = len(text) - head - tail
-    if omitted < 1_000:
+    note = f"\n[... {omitted} characters omitted ...]\n"
+    if omitted <= len(note):
         return text
-    return f"{text[:head]}\n[... {omitted} characters omitted ...]\n{text[-tail:]}"
+    return text[:head] + note + (text[-tail:] if tail else "")
 
 
 def trim_summary_input(
@@ -243,7 +243,8 @@ def trim_summary_input(
     and the newest exchange are kept. Between them, oldest first: tool outputs give way to
     a stub, then assistant reasoning is dropped (tool calls stay as the record of what was
     done), then whole exchanges are replaced by one omission marker. If that is still not
-    enough, the newest assistant reply keeps only its beginning and end.
+    enough, the newest assistant reply keeps its beginning and end, sized to the
+    remaining space and shared across content and reasoning fields.
 
     `context_tokens` measures `messages` as a prompt and calibrates the serialized-size
     estimate. The measured prompt also covers tool schemas, which are not in `messages`,
@@ -291,13 +292,24 @@ def trim_summary_input(
         removed += sum(_size(message) for message in group)
         omitted += len(group)
     if removed < needed:
-        for message in newest:
-            if message.get("role") != "assistant":
-                continue
-            for field in ("content", *_REASONING_FIELDS):
-                if isinstance(text := message.get(field), str):
-                    head, tail = KEEP_REPLY_TOKENS
-                    message[field] = _keep_ends(text, 4 * head, 4 * tail)
+        fields = [
+            (message, field, text)
+            for message in newest
+            if message.get("role") == "assistant"
+            for field in ("content", *_REASONING_FIELDS)
+            if isinstance(text := message.get(field), str) and text
+        ]
+        chars = sum(len(text) for _, _, text in fields)
+        size = sum(_size(text) for _, _, text in fields)
+        head, tail = KEEP_REPLY_TOKENS
+        keep = min(
+            4 * (head + tail),
+            max(0, int(chars * (1 - (needed - removed) / max(size, 1)))),
+        )
+        for message, field, text in fields:
+            share = max(2, keep * len(text) // max(chars, 1))
+            start = max(1, share * head // (head + tail))
+            message[field] = _keep_ends(text, start, share - start)
     return [
         *system,
         *(message for group in groups[:1] for message in group),
