@@ -46,6 +46,21 @@ _RETRYABLE: tuple[type[BaseException], ...] = (
 # Widely-spaced delays (seconds) between attempts; total ~5 min wall budget.
 _RETRY_DELAYS: tuple[int, ...] = (15, 30, 60, 90, 120)
 
+_STREAM_ERROR_STATUSES = {
+    "context_length_exceeded": 400,
+    "invalid_request_error": 400,
+    "invalid_api_key": 401,
+    "authentication_error": 401,
+    "permission_error": 403,
+    "not_found_error": 404,
+    "request_too_large": 413,
+    "rate_limit_exceeded": 429,
+    "rate_limit_error": 429,
+    "server_error": 500,
+    "api_error": 500,
+    "overloaded_error": 503,
+}
+
 
 class ModelTransportError(Exception):
     """A model connection failed after its transport retries were exhausted."""
@@ -111,6 +126,19 @@ def _append_reasoning_details(details: list[dict], delta: list[dict]) -> None:
             details.append(dict(detail))
 
 
+def _stream_error_status(body: dict) -> int:
+    # Explicit HTTP statuses take precedence over symbolic provider codes and types.
+    for key in ("status_code", "code"):
+        value = str(body.get(key))
+        if value.isdigit() and 400 <= int(value) <= 599:
+            return int(value)
+    for key in ("code", "type"):
+        value = body.get(key)
+        if isinstance(value, str) and value in _STREAM_ERROR_STATUSES:
+            return _STREAM_ERROR_STATUSES[value]
+    return 502
+
+
 async def stream_completion(client: AsyncOpenAI, **request: Any) -> ChatCompletion:
     """Consume one complete model attempt before returning or releasing its slot."""
     stream = await client.chat.completions.create(
@@ -152,8 +180,7 @@ async def stream_completion(client: AsyncOpenAI, **request: Any) -> ChatCompleti
             raise
         # The SDK reports HTTP-200 SSE error events as a plain APIError.
         body = error.body if isinstance(error.body, dict) else {}
-        status = body.get("status_code") or body.get("code")
-        status = int(status) if str(status).isdigit() else 502
+        status = _stream_error_status(body)
         error_type = (
             RateLimitError
             if status == 429

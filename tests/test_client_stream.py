@@ -6,6 +6,7 @@ from openai import APIStatusError, AsyncOpenAI
 
 from rlm import client as model_client
 from rlm.client import call_with_retries, model_call_headers, stream_completion
+from rlm.compaction import is_context_overflow
 
 
 def chunk(delta=None, finish_reason=None, **extra):
@@ -121,7 +122,17 @@ async def test_stream_preserves_response_fields(finish_reason):
 
 
 @pytest.mark.parametrize(
-    "failure", ["truncated", "timeout", "disconnect", "error_event", "error_finish"]
+    "failure",
+    [
+        "truncated",
+        "timeout",
+        "disconnect",
+        "error_event",
+        "rate_limit",
+        "overloaded",
+        "unknown_error",
+        "error_finish",
+    ],
 )
 async def test_stream_failure_retries_the_whole_attempt(monkeypatch, failure):
     monkeypatch.setattr(model_client, "_RETRY_DELAYS", (0,))
@@ -139,9 +150,15 @@ async def test_stream_failure_retries_the_whole_attempt(monkeypatch, failure):
                     raise httpx.ReadTimeout("stalled")
                 if failure == "disconnect":
                     raise httpx.RemoteProtocolError("disconnected")
-                if failure == "error_event":
+                errors = {
+                    "error_event": {"code": 429},
+                    "rate_limit": {"code": "rate_limit_exceeded"},
+                    "overloaded": {"type": "overloaded_error"},
+                    "unknown_error": {"code": "unknown_provider_error"},
+                }
+                if failure in errors:
                     yield sse(
-                        [{"error": {"message": "overloaded", "code": 429}}, "[DONE]"]
+                        [{"error": {"message": "failed", **errors[failure]}}, "[DONE]"]
                     )
                 if failure == "error_finish":
                     yield sse([chunk({}, "error"), "[DONE]"])
@@ -167,7 +184,35 @@ async def test_stream_failure_retries_the_whole_attempt(monkeypatch, failure):
     assert all(r.is_closed for r in responses)
 
 
-async def test_nonretryable_stream_error_preserves_status(monkeypatch):
+@pytest.mark.parametrize(
+    "error,status,overflow",
+    [
+        ({"code": 400}, 400, False),
+        (
+            {"code": "context_length_exceeded", "type": "invalid_request_error"},
+            400,
+            True,
+        ),
+        (
+            {
+                "type": "invalid_request_error",
+                "message": "maximum context length is 4096 tokens",
+            },
+            400,
+            True,
+        ),
+        ({"type": "invalid_request_error"}, 400, False),
+        ({"code": "invalid_api_key"}, 401, False),
+        ({"type": "permission_error"}, 403, False),
+        ({"type": "request_too_large"}, 413, True),
+        ({"status_code": "413", "code": "context_length_exceeded"}, 413, True),
+        ({"status_code": 401, "code": "context_length_exceeded"}, 401, False),
+        ({"code": 200, "type": "invalid_request_error"}, 400, False),
+    ],
+)
+async def test_nonretryable_stream_error_preserves_status(
+    monkeypatch, error, status, overflow
+):
     monkeypatch.setattr(model_client, "_RETRY_DELAYS", (0,))
     calls = []
 
@@ -177,7 +222,7 @@ async def test_nonretryable_stream_error_preserves_status(monkeypatch):
             200,
             content=sse(
                 [
-                    {"error": {"message": "invalid request", "code": 400}},
+                    {"error": {"message": "invalid request", **error}},
                     "[DONE]",
                 ]
             ),
@@ -188,5 +233,6 @@ async def test_nonretryable_stream_error_preserves_status(monkeypatch):
             await call_with_retries(
                 stream_completion, client=client, model="m", messages=[]
             )
-    assert raised.value.status_code == 400
+    assert raised.value.status_code == status
+    assert is_context_overflow(raised.value) is overflow
     assert len(calls) == 1
