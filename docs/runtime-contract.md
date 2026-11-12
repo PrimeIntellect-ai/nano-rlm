@@ -16,7 +16,7 @@ The agent accepts text prompts, and stdio or streamable-HTTP MCP servers (with H
 ## The runtime object
 
 | Field | Type | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `session_id` | string | The client's ID for the session, echoed in snapshots (`[A-Za-z0-9._:-]`, at most 128 characters) |
 | `model` | string | Model name sent to the provider |
 | `provider` | object | `base_url`, `api_key`, `headers`, `max_retries` (default 5). `Idempotency-Key`, `x-stainless-retry-count` and the ACP tracing headers are reserved |
@@ -41,7 +41,7 @@ The only process environment variable is `RLM_HOME` (default `~/.rlm`): the root
 ## Policy
 
 | Field | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `max_total_tokens` | 1,000,000 | New tokens across the whole tree: each call's completion plus uncached prompt. Once reached, every engine stops before its next model call and no more agents are spawned. The default terminator |
 | `max_total_turns` | null | Model calls across the tree, compaction excluded |
 | `max_depth` | 1 | How deep agents can recurse; 0 disables `rlm.agent.spawn` |
@@ -58,6 +58,8 @@ The only process environment variable is `RLM_HOME` (default `~/.rlm`): the root
 | `allow_git` | false | Lift the guard that refuses Git commands reaching beyond the current branch (other refs, branch and tag listings, `clone`, `fetch`, `pull`) |
 
 **Model-call admission.** `max_concurrent_subagents` bounds calls across the tree. Queued calls closer to the root go first, FIFO within a depth, and calls in flight are not preempted, so continuous shallow work can delay deeper agents. Tools, child waits and the backoff between outer retries hold no slot; the SDK's own retries stay within one. The limit is per tree: a cap across trees belongs in the runner or inference gateway.
+
+**Model transport.** All model calls, including compaction, request Chat Completions streaming with usage reporting. nano-rlm assembles the complete reply before using it; tools never execute from partial deltas. Providers must support SSE streaming. The inference slot remains held until the stream is consumed and closed. Interrupted streams and transient stream errors retry the whole call with the same request ID; partial replies do not enter the conversation or token totals. Streaming keeps an active generation from leaving the HTTP connection idle, but does not bypass absolute request-duration limits or stalls before the first byte.
 
 ## Prompts
 
@@ -78,7 +80,7 @@ Prompt responses and the `session/close` response carry one credential-free snap
 The ACP stop reason says when a limit cut a prompt short; the snapshot's `last_stop_reason` names the exact cause:
 
 | `last_stop_reason` | Cause | ACP stop reason |
-|---|---|---|
+| --- | --- | --- |
 | `done` | The agent answered | `end_turn` |
 | `max_total_turns` | The tree reached `max_total_turns` | `max_turn_requests` |
 | `max_total_tokens` | The tree reached `max_total_tokens` | `max_tokens` |
@@ -94,7 +96,7 @@ Every model call carries a standard `Idempotency-Key` header that stays stable a
 Each call also carries a private `X-ACP-Model-Request-ID`. Responses publish sparse, labeled edges between those request IDs under `ai.prime.acp/semantic-edges-v1`:
 
 | Edge | Meaning |
-|---|---|
+| --- | --- |
 | `continuation` | The same agent's next call, in causal order even where a consumer's token-prefix graph splits |
 | `subagent_call` | A spawn |
 | `subagent_return` | The parent retrieving a child's result |

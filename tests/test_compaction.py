@@ -178,9 +178,7 @@ async def test_compaction_attempt_limit_is_configurable(session, attempts):
     assert len(client.calls) == attempts
 
 
-@pytest.mark.parametrize(
-    "finish_reason", ["length", "content_filter", "tool_calls", None]
-)
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter", "tool_calls"])
 @pytest.mark.parametrize("recovers", [False, True])
 @pytest.mark.parametrize("threshold", [None, 8, 32])
 async def test_compaction_requires_normal_termination(

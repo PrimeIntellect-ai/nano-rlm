@@ -5,7 +5,13 @@ from dataclasses import dataclass
 
 import pytest
 
-from conftest import DummyClient, DummyMessage, DummyToolCall, tool_result
+from conftest import (
+    DummyClient,
+    DummyMessage,
+    DummyResponse,
+    DummyToolCall,
+    tool_result,
+)
 from rlm.config import (
     ExecutionPolicy,
     InvocationContext,
@@ -821,14 +827,22 @@ async def test_inference_limit_includes_root_and_compaction_with_root_priority(
             releases[name] = asyncio.Event()
 
         async def create(self, **kwargs):
-            state.active += 1
-            state.peak = max(state.peak, state.active)
-            started.put_nowait(self.name)
-            try:
-                await releases[self.name].wait()
-                return await super().create(**kwargs)
-            finally:
-                state.active -= 1
+            response = await super().create(**kwargs)
+            name = self.name
+
+            class BlockingStream(DummyResponse):
+                async def __aiter__(self):
+                    state.active += 1
+                    state.peak = max(state.peak, state.active)
+                    started.put_nowait(name)
+                    try:
+                        await releases[name].wait()
+                        async for chunk in super().__aiter__():
+                            yield chunk
+                    finally:
+                        state.active -= 1
+
+            return BlockingStream(response.choices, response.usage)
 
     class ObservedEngine(RLMEngine):
         async def _model_attempt(self, **request):
