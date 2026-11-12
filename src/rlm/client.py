@@ -4,9 +4,12 @@ import asyncio
 from typing import Any, Awaitable, Callable
 
 import certifi
+import httpx
 from openai import (
     APIConnectionError,
+    APIError,
     APIResponseValidationError,
+    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     DefaultAsyncHttpxClient,
@@ -14,6 +17,8 @@ from openai import (
     NotFoundError,
     RateLimitError,
 )
+from openai.lib.streaming.chat import ChatCompletionStreamState
+from openai.types.chat import ChatCompletion
 from pydantic import ValidationError
 
 from rlm.config import ProviderConfig
@@ -79,6 +84,109 @@ def model_call_headers(request_id: str, session_id: str) -> dict[str, str]:
         MODEL_REQUEST_ID_HEADER: request_id,
         AGENT_SESSION_ID_HEADER: session_id,
     }
+
+
+def _append_reasoning_details(details: list[dict], delta: list[dict]) -> None:
+    # Provider reasoning blocks may omit indexes and repeat stable IDs on each delta.
+    for detail in delta:
+        previous = details[-1] if details else {}
+        field = {"reasoning.text": "text", "reasoning.summary": "summary"}.get(
+            detail.get("type")
+        )
+        if (
+            field
+            and detail.get("type") == previous.get("type")
+            and all(
+                previous.get(key) is None
+                or detail.get(key) is None
+                or previous[key] == detail[key]
+                for key in ("id", "index", "format")
+            )
+        ):
+            previous[field] = (previous.get(field) or "") + (detail.get(field) or "")
+            for key in ("id", "index", "format", "signature"):
+                if detail.get(key) is not None:
+                    previous[key] = detail[key]
+        else:
+            details.append(dict(detail))
+
+
+async def stream_completion(client: AsyncOpenAI, **request: Any) -> ChatCompletion:
+    """Consume one complete model attempt before returning or releasing its slot."""
+    stream = await client.chat.completions.create(
+        **request, stream=True, stream_options={"include_usage": True}
+    )
+    state = ChatCompletionStreamState()
+    completion = None
+    usage = None
+    roles: dict[int, str] = {}
+    reasoning_details: dict[int, list[dict]] = {}
+    try:
+        async with stream:
+            async for chunk in stream:
+                for choice in chunk.choices:
+                    if choice.finish_reason == "error":
+                        raise APIConnectionError(
+                            message=f"Model stream failed: {chunk.model_dump_json()}",
+                            request=stream.response.request,
+                        )
+                    if choice.delta.role:
+                        roles[choice.index] = choice.delta.role
+                        choice.delta.role = None
+                    extras = choice.delta.model_extra or {}
+                    details = extras.pop("reasoning_details", None)
+                    if details:
+                        _append_reasoning_details(
+                            reasoning_details.setdefault(choice.index, []), details
+                        )
+                # No structured-output parsing: length-limited replies belong to compaction.
+                state.handle_chunk(chunk)
+                completion = state.current_completion_snapshot
+                usage = chunk.usage or usage
+    except httpx.TransportError as error:
+        raise APIConnectionError(
+            message=str(error), request=stream.response.request
+        ) from error
+    except APIError as error:
+        if type(error) is not APIError:
+            raise
+        # The SDK reports HTTP-200 SSE error events as a plain APIError.
+        body = error.body if isinstance(error.body, dict) else {}
+        status = body.get("status_code") or body.get("code")
+        status = int(status) if str(status).isdigit() else 502
+        error_type = (
+            RateLimitError
+            if status == 429
+            else NotFoundError
+            if status == 404
+            else InternalServerError
+            if status >= 500
+            else APIStatusError
+        )
+        raise error_type(
+            str(error),
+            response=httpx.Response(status, request=stream.response.request),
+            body=error.body,
+        ) from error
+    if (
+        completion is None
+        or not completion.choices
+        or any(choice.finish_reason is None for choice in completion.choices)
+    ):
+        raise APIConnectionError(
+            message="Model stream ended before a completion finished",
+            request=stream.response.request,
+        )
+    completion.usage = usage
+    for choice in completion.choices:
+        choice.message.role = roles.get(choice.index, "assistant")
+        for tool_call in choice.message.tool_calls or []:
+            # Delta indexes are transport metadata, not assistant-message fields.
+            if tool_call.model_extra is not None:
+                tool_call.model_extra.pop("index", None)
+        if choice.index in reasoning_details:
+            choice.message.reasoning_details = reasoning_details[choice.index]
+    return completion
 
 
 async def call_with_retries(

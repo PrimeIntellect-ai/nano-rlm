@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+import httpx
+from openai.types.chat import ChatCompletionChunk
 from fixtures.tools.add import AddTool
 from fixtures.tools.boom import BoomTool
 
@@ -104,6 +106,46 @@ class DummyResponse:
     choices: list[DummyChoice]
     usage: DummyUsage = field(default_factory=DummyUsage)
 
+    @property
+    def response(self):
+        return httpx.Response(200, request=httpx.Request("POST", "http://model.test"))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def __aiter__(self):
+        head = {
+            "id": "dummy",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "dummy",
+        }
+        for index, choice in enumerate(self.choices):
+            delta = choice.message.model_dump()
+            for tool_index, tool in enumerate(delta.get("tool_calls", [])):
+                tool["index"] = tool_index
+            yield ChatCompletionChunk(
+                **head,
+                choices=[
+                    {
+                        "index": index,
+                        "delta": delta,
+                        "finish_reason": choice.finish_reason,
+                    }
+                ],
+            )
+        yield ChatCompletionChunk(
+            **head,
+            choices=[],
+            usage=vars(self.usage)
+            | {
+                "total_tokens": self.usage.prompt_tokens + self.usage.completion_tokens,
+            },
+        )
+
 
 class DummyClient:
     """Replays scripted DummyMessages, one per ``chat.completions.create`` call."""
@@ -115,6 +157,7 @@ class DummyClient:
         self.completions = self
 
     async def create(self, **kwargs: Any) -> DummyResponse:
+        assert kwargs["stream"] is True
         self.calls.append(kwargs)
         if not self.scripted:
             raise AssertionError("DummyClient exhausted: no more scripted messages")
