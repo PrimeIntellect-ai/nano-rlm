@@ -23,6 +23,7 @@ from rlm.client import (
     extract_usage,
     make_client,
     model_call_headers,
+    stream_completion,
 )
 from rlm.provenance import agent_input, runtime_event
 from rlm.compaction import (
@@ -1238,9 +1239,9 @@ class RLMEngine:
 
     async def _model_attempt(self, **request: Any) -> Any:
         if self._supervisor is None:
-            return await self.client.chat.completions.create(**request)
+            return await stream_completion(self.client, **request)
         async with self._supervisor.inference_slot(self._invocation_id):
-            return await self.client.chat.completions.create(**request)
+            return await stream_completion(self.client, **request)
 
     async def _call_model(
         self,
