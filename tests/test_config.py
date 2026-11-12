@@ -71,6 +71,7 @@ def test_default_policy_enables_recursion_and_compaction():
     policy = ExecutionPolicy()
     assert policy.compaction is True
     assert policy.summarize_at_tokens is None
+    assert policy.summary_budget_tokens == 24_576
     assert policy.max_compactions is None
     assert policy.max_compaction_attempts == 5
     assert policy.max_total_tokens == 1_000_000

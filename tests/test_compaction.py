@@ -22,12 +22,14 @@ from conftest import (
     DummyUsage,
 )
 from rlm.compaction import (
+    CUT_REPLY_NOTE,
     SUMMARY_FRAMING,
-    OMITTED_CONTEXT,
-    hollow_middle,
+    TOOL_OUTPUT_STUB,
     CompactionFailed,
     CompactionFormatViolation,
     is_context_overflow,
+    omission_marker,
+    trim_summary_input,
 )
 from rlm.config import (
     ExecutionPolicy,
@@ -134,6 +136,7 @@ def _config(
     summarize_at_tokens: int | None = None,
     compaction: bool = True,
     max_compaction_attempts: int = 5,
+    summary_budget_tokens: int = 24_576,
 ):
     return RuntimeConfig(
         model="test-model",
@@ -145,6 +148,7 @@ def _config(
             compaction=compaction,
             summarize_at_tokens=summarize_at_tokens,
             max_compaction_attempts=max_compaction_attempts,
+            summary_budget_tokens=summary_budget_tokens,
         ),
     )
 
@@ -230,7 +234,7 @@ async def test_compaction_requires_normal_termination(
         if finish_reason == "length" and threshold in (None, 8):
             assert client.calls[1]["messages"] == [
                 *original[:2],
-                {"role": "user", "content": OMITTED_CONTEXT},
+                omission_marker(1),
                 original[-1],
                 client.calls[0]["messages"][-1],
             ]
@@ -416,29 +420,38 @@ async def test_context_overflow_propagates_when_compaction_is_disabled(session):
     assert engine._metrics.num_compactions == 0
 
 
-async def test_decode_context_limit_uses_discovered_threshold(session):
+async def test_window_cut_reply_is_kept_and_compacted(session):
+    """A reply that runs into the context window stays in the conversation, without the
+    tool call it was cut off in, and the summary request carries it."""
     client = _ScriptedClient(
         [
             _response(
                 DummyMessage(
                     tool_calls=[DummyToolCall("ipython", {"code": "print('ready')"})]
-                )
+                ),
+                prompt_tokens=1_000,
+                completion_tokens=50,
             ),
             _response(
-                DummyMessage(content="partial decode"),
-                prompt_tokens=95,
-                completion_tokens=5,
+                DummyMessage(
+                    content="partial decode",
+                    tool_calls=[
+                        DummyToolCall("ipython", {"code": "print(1)"}, id="cut")
+                    ],
+                ),
+                prompt_tokens=1_200,
+                completion_tokens=2_800,
                 finish_reason="length",
             ),
             _response(DummyMessage(content="summary")),
             _response(DummyMessage(content="done")),
         ],
-        max_model_len=112,
+        max_model_len=4_000,
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        runtime_config=_config(),
+        runtime_config=_config(summary_budget_tokens=1_000, max_compaction_attempts=1),
     )
 
     try:
@@ -448,10 +461,136 @@ async def test_decode_context_limit_uses_discovered_threshold(session):
 
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 1
-    checkpoint_messages = client.calls[2]["messages"]
-    assert all(
-        message.get("content") != "partial decode" for message in checkpoint_messages
+    assert len(client.calls) == 4
+    checkpoint = client.calls[2]["messages"]
+    assert CUT_REPLY_NOTE in checkpoint[-1]["content"]
+    assert checkpoint[-2] == {"role": "assistant", "content": "partial decode"}
+    assert omission_marker(2) in checkpoint
+    assert len(client.calls[3]["messages"]) == 2
+    records = [
+        json.loads(line)
+        for line in (session.dir / "messages.jsonl").read_text().splitlines()
+    ]
+    assert not any(
+        entry["type"] == "tool_result" and entry["turn"] == 1 for entry in records
     )
+    assert {"role": "assistant", "content": "partial decode"} in [
+        entry["message"] for entry in records if entry["type"] == "assistant"
+    ]
+
+
+@pytest.mark.parametrize("prompt_tokens", [100, 1_500])
+async def test_length_cut_below_the_window_ends_the_run(session, prompt_tokens):
+    """A reply stopped by a completion cap is the answer, even past the threshold."""
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(content="capped answer"),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=1_000,
+                finish_reason="length",
+            ),
+        ],
+        max_model_len=4_000,
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(summary_budget_tokens=1_000),
+    )
+
+    try:
+        result = await engine.run("answer at length")
+    finally:
+        engine.close()
+
+    assert engine.summarize_at_tokens == 2_000
+    assert result.answer == "capped answer"
+    assert engine._metrics.stop_reason == "done"
+    assert engine._metrics.num_compactions == 0
+    assert len(client.calls) == 1
+
+
+def _exchanges(count: int, output_chars: int) -> list[dict]:
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+    ]
+    for i in range(count):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "r" * 1000,
+                    "tool_calls": [
+                        {
+                            "id": str(i),
+                            "type": "function",
+                            "function": {"name": "ipython", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": str(i), "content": "o" * output_chars},
+            ]
+        )
+    return messages
+
+
+@pytest.mark.parametrize("context_tokens", [1_000, 9_800])
+async def test_summary_request_keeps_its_budget(session, context_tokens):
+    """A summary request that would leave the summary less than its budget is trimmed
+    before the first attempt, so a single attempt suffices."""
+    client = _ScriptedClient([_response(DummyMessage(content="summary"))])
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(summary_budget_tokens=2_000, max_compaction_attempts=1),
+    )
+    engine.context_window = 10_000
+    messages = _exchanges(4, 4_000)
+    session.replace_context(messages, reason="start")
+    original = deepcopy(messages)
+    try:
+        await engine._compact_branch(messages, turn=0, context_tokens=context_tokens)
+    finally:
+        engine.close()
+
+    sent = client.calls[0]["messages"][:-1]
+    assert engine._metrics.num_compactions == 1
+    assert messages == original
+    if context_tokens == 1_000:
+        assert sent == original
+    else:
+        assert sent[3]["content"] == TOOL_OUTPUT_STUB
+        assert sent[-2:] == original[-2:]
+        assert len(sent) == len(original)
+
+
+async def test_overflow_compacts_with_a_trimmed_request(session):
+    client = _ScriptedClient(
+        [
+            _overflow(),
+            _response(DummyMessage(content="summary")),
+            _response(DummyMessage(content="done")),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(summary_budget_tokens=2_000, max_compaction_attempts=1),
+    )
+    engine.context_window = 10_000
+    messages = _exchanges(4, 4_000)
+    session.replace_context(messages, reason="start")
+    try:
+        response, _ = await engine._complete(session.messages, turn=0)
+    finally:
+        engine.close()
+
+    assert response.choices[0].message.content == "done"
+    assert client.calls[1]["messages"][3]["content"] == TOOL_OUTPUT_STUB
+    assert len(client.calls[2]["messages"]) == 2
 
 
 async def test_subagent_recovers_from_context_overflow(tmp_path):
@@ -595,7 +734,7 @@ async def test_context_full_summary_preserves_recent_exchange(session, prompt_to
         await engine._compact_branch(messages, turn=0)
         retry = client.calls[1]["messages"]
         assert retry[:2] == original[:2]
-        assert retry[2] == {"role": "user", "content": OMITTED_CONTEXT}
+        assert retry[2] == omission_marker(1)
         assert retry[3:5] == original[-2:]
         assert messages == original
         assert len(json.dumps(retry)) < len(json.dumps(client.calls[0]["messages"])) / 2
@@ -604,30 +743,63 @@ async def test_context_full_summary_preserves_recent_exchange(session, prompt_to
         engine.close()
 
 
-def test_middle_hole_grows_without_orphaning_tools():
-    messages = [{"role": "system", "content": "system"}]
-    for i in range(12):
-        messages.extend(
-            [
-                {
-                    "role": "assistant",
-                    "content": "x" * 1000,
-                    "tool_calls": [{"id": str(i)}],
-                },
-                {"role": "tool", "tool_call_id": str(i), "content": "done"},
-            ]
-        )
+def test_summary_trim_spends_outputs_then_reasoning_then_exchanges():
+    messages = _exchanges(6, 1000)
     original = deepcopy(messages)
-    first = hollow_middle(messages, prompt_tokens=4000, remove_tokens=1000)
-    second = hollow_middle(first, prompt_tokens=3000, remove_tokens=1000)
-    assert len(second) < len(first) < len(messages)
-    assert second[:3] == original[:3]
-    assert second[-2:] == original[-2:]
-    assert sum(m.get("content") == OMITTED_CONTEXT for m in second) == 1
-    for i, m in enumerate(second):
-        if m["role"] == "tool":
-            assert second[i - 1]["tool_calls"][0]["id"] == m["tool_call_id"]
+    tokens = len(json.dumps(messages)) // 4
+
+    def assert_paired(trimmed: list[dict]) -> None:
+        for i, message in enumerate(trimmed):
+            if message["role"] == "tool":
+                call = trimmed[i - 1]["tool_calls"][0]
+                assert call["id"] == message["tool_call_id"]
+
+    light = trim_summary_input(messages, context_tokens=tokens, remove_tokens=200)
+    assert [m["content"] == TOOL_OUTPUT_STUB for m in light[3::2]] == [
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert all(m.get("reasoning_content") for m in light[2::2])
+
+    medium = trim_summary_input(messages, context_tokens=tokens, remove_tokens=1_260)
+    assert all(m["content"] == TOOL_OUTPUT_STUB for m in medium[3:-2:2])
+    assert [bool(m.get("reasoning_content")) for m in medium[2:-2:2]] == [
+        False,
+        False,
+        True,
+        True,
+        True,
+    ]
+    assert all(m["tool_calls"] for m in medium[2::2])
+    assert medium[-2:] == original[-2:]
+
+    heavy = trim_summary_input(messages, context_tokens=tokens, remove_tokens=tokens)
+    assert heavy == [*original[:2], omission_marker(10), *original[-2:]]
+    again = trim_summary_input(medium, context_tokens=tokens, remove_tokens=tokens)
+    assert again == heavy
+    for trimmed in (light, medium, heavy):
+        assert_paired(trimmed)
     assert messages == original
+
+
+def test_oversized_newest_reply_keeps_its_ends():
+    reasoning = "H" * 20_000 + "M" * 200_000 + "T" * 70_000
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "", "reasoning_content": reasoning},
+    ]
+    trimmed = trim_summary_input(messages, context_tokens=80_000, remove_tokens=40_000)
+    kept = trimmed[-1]["reasoning_content"]
+    assert kept.startswith("H" * 16_384 + "\n[... ")
+    assert kept.endswith("]\n" + "T" * 65_536)
+    assert "M" not in kept
+    again = trim_summary_input(trimmed, context_tokens=20_000, remove_tokens=10_000)
+    assert again == trimmed
 
 
 async def test_unshrinkable_summary_input_fails_fast(session):
@@ -650,8 +822,8 @@ async def test_unshrinkable_summary_input_fails_fast(session):
     engine.summarize_at_tokens = 114688
     messages = [
         {"role": "system", "content": "system"},
-        {"role": "user", "content": "task"},
-        {"role": "assistant", "content": "x" * 400_000},
+        {"role": "user", "content": "x" * 400_000},
+        {"role": "assistant", "content": "partial"},
     ]
     session.replace_context(messages, reason="start")
     engine._last_good = len(messages)
@@ -698,7 +870,7 @@ async def test_hollowed_input_falls_back_to_last_good_snapshot(session):
     try:
         await engine._compact_branch(messages, turn=0)
         hollowed = client.calls[1]["messages"]
-        assert hollowed[2] == {"role": "user", "content": OMITTED_CONTEXT}
+        assert hollowed[2] == omission_marker(2)
         assert client.calls[2]["messages"][:-1] == messages[:4]
         assert len(client.calls) == 3
     finally:
