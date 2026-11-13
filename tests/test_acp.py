@@ -738,6 +738,7 @@ async def test_engine_cancelled_tool_recovers_kernel(session, tmp_path):
     assert result.answer == "continued"
     assert tool_messages[-1]["content"].strip() == "42"
     assert engine._metrics._ipython_call_count == 2
+    assert engine._metrics.tool_seconds > 0
 
 
 async def test_engine_failed_start_cleans_kernel_before_retry(

@@ -144,8 +144,8 @@ class RLMMetrics:
     semantic edges, and reports token counts natively, so tracking them here would
     double-count.
     What remains is rlm-internal behaviour verifiers can't see: compaction
-    volume, ipython input size, and programmatic tool calls made from inside the
-    REPL (which never hit the API proxy).
+    volume, ipython input size, tool execution time, and programmatic tool calls
+    made from inside the REPL (which never hit the API proxy).
     """
 
     # Compaction metrics (auto-summarization at a token threshold)
@@ -159,6 +159,10 @@ class RLMMetrics:
     # IPython input size metrics
     ipython_input_chars_mean: float = 0.0
     ipython_input_loc_mean: float = 0.0
+
+    # Wall-clock seconds this agent spent executing its own tool calls (ipython, wait,
+    # ...), from dispatch to result. Excludes model calls and their retries.
+    tool_seconds: float = 0.0
 
     # Skill-CLI invocations from inside the ipython REPL (invisible to verifiers:
     # they run within a single tool call and never reach the API proxy).

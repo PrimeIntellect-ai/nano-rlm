@@ -1041,6 +1041,7 @@ class RLMEngine:
                                         exc_info=True,
                                     )
             duration = time.time() - t0
+            self._metrics.tool_seconds += duration
             for event in tool_result.metric_events:
                 self._metrics.record(event)
 

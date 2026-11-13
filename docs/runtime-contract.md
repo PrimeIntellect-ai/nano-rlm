@@ -76,7 +76,9 @@ An optional `messageId` deduplicates retries within the session; reusing an ID w
 
 ## Session snapshot
 
-Prompt responses and the `session/close` response carry one credential-free snapshot under `ai.prime.rlm/session-v1`: the session ID and last stop reason, the model, turns, cumulative token usage, metrics (compactions, sub-agent calls, programmatic tool calls, ...), supervisor counters and the effective limits. The `session/close` snapshot is authoritative.
+Prompt responses and the `session/close` response carry one credential-free snapshot under `ai.prime.rlm/session-v1`: the session ID and last stop reason, the model, turns, cumulative token usage, metrics (compactions, sub-agent calls, programmatic tool calls, `tool_seconds`, ...), supervisor counters and the effective limits. The `session/close` snapshot is authoritative.
+
+`tool_seconds` is the wall-clock time the session's own agent spent executing its tool calls, `wait` included, from dispatch to result. It excludes model calls and their retries, and the tool calls of sub-agents.
 
 The ACP stop reason says when a limit cut a prompt short; the snapshot's `last_stop_reason` names the exact cause:
 
