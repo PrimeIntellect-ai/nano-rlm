@@ -52,8 +52,8 @@ The only process environment variable is `RLM_HOME` (default `~/.rlm`): the root
 | `max_tokens` | null | Completion tokens one agent may spend; reaching it ends the turn |
 | `max_tool_output_bytes` | null (20 KB) | How much of one tool result enters the conversation |
 | `compaction` | true | Compact the context when it runs out of room, and recover from provider overflows |
-| `summarize_at_tokens` | null | Compaction threshold; null derives it from the provider's advertised context window |
-| `summary_budget_tokens` | 24,576 | Room a summary reply gets, reasoning included, capped at half a known window; a summary request that would leave less is trimmed first |
+| `summarize_at_tokens` | null | Compaction threshold; null derives window minus summary reserve. Exact-cutoff providers enforce the smaller of this and the default during generation |
+| `summary_budget_tokens` | 24,576 | Reserve for summary instructions and reply, reasoning included, capped at half a known window; see [compaction](context.md#compaction) for provider support and overflow handling |
 | `max_compactions` | null | Compactions per session |
 | `max_compaction_attempts` | 5 | Summary attempts within one compaction |
 | `allow_git` | false | Lift the guard that refuses Git commands reaching beyond the current branch (other refs, branch and tag listings, `clone`, `fetch`, `pull`) |

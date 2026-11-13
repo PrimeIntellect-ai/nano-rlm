@@ -27,7 +27,7 @@ If resources are no longer needed, note that they can be cancelled; do not imply
 Summarize from the existing conversation. Do not call tools. Reply with the summary as plain text."""
 
 CUT_REPLY_NOTE = (
-    "\n\nYour last reply ran into the model's context window and was cut off mid-thought. "
+    "\n\nYour last reply reached the context cutoff and was cut off mid-thought. "
     "Record where that reply left off and what you were about to do next, so the work "
     "continues from there."
 )
@@ -48,10 +48,6 @@ SUMMARY_FRAMING = (
     "state with the available tools. Consult original history for exact instructions or "
     "missing evidence, and do not duplicate work merely because its full conversation is absent."
 )
-
-OVERSHOOT_TOKENS = 8_192
-"""Room above the threshold for the turn and tool result that cross it, so a routine
-compaction leaves the summary its budget without trimming."""
 
 TOOL_OUTPUT_MAX_BYTES = 20_000
 """Middle-out truncation budget for one tool result before it enters the conversation."""
@@ -84,7 +80,7 @@ _OVERFLOW_MARKERS = (
     # xAI: "This model's maximum prompt length is N but the request contains M tokens".
     "maximum prompt length is",
 )
-_window_cache: dict[tuple[str, str], int | None] = {}
+_window_cache: dict[tuple[str, str], tuple[int | None, bool]] = {}
 
 
 class CompactionFailed(Exception):
@@ -104,9 +100,8 @@ def is_context_overflow(error: APIStatusError) -> bool:
 
 
 def default_threshold(context_window: int, summary_budget: int) -> int:
-    """Leave the summary budget plus overshoot room below the window; small windows
-    keep at least half."""
-    return max(context_window - summary_budget - OVERSHOOT_TOKENS, context_window // 2)
+    """Reserve room for the summary request and reply; small windows keep half."""
+    return max(context_window - summary_budget, context_window // 2)
 
 
 def _model_context_window(payload: Mapping[str, Any], model: str) -> int | None:
@@ -127,7 +122,10 @@ def _model_context_window(payload: Mapping[str, Any], model: str) -> int | None:
     return None
 
 
-async def discover_context_window(client: AsyncOpenAI, model: str) -> int | None:
+async def discover_context_limits(
+    client: AsyncOpenAI, model: str
+) -> tuple[int | None, bool]:
+    """Discover the real window and support for an exact per-request context cap."""
     key = (str(getattr(client, "base_url", None)), model)
     if key not in _window_cache:
         try:
@@ -147,8 +145,12 @@ async def discover_context_window(client: AsyncOpenAI, model: str) -> int | None
         except (APIError, AttributeError):
             # A transient listing failure must not disable compaction for the
             # rest of the process - leave the cache empty so the next engine retries.
-            return None
-        _window_cache[key] = _model_context_window(payload, model)
+            return None, False
+        supports_limit = any(
+            card.get("id") == model and card.get("supports_max_context_tokens") is True
+            for card in payload["data"]
+        )
+        _window_cache[key] = _model_context_window(payload, model), supports_limit
     return _window_cache[key]
 
 
