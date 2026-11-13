@@ -98,10 +98,12 @@ class _ScriptedClient(DummyClient):
         actions: list[DummyResponse | BaseException],
         *,
         max_model_len: int | None = None,
+        supports_context_limit: bool = False,
     ):
         super().__init__([])
         self.actions = list(actions)
         self.max_model_len = max_model_len
+        self.supports_context_limit = supports_context_limit
         self.base_url = f"http://scripted-{next(_client_numbers)}"
 
     @property
@@ -116,6 +118,7 @@ class _ScriptedClient(DummyClient):
                     else {}
                 )
                 card = SimpleNamespace(id="test-model", model_extra=extra)
+                extra["supports_max_context_tokens"] = outer.supports_context_limit
                 return SimpleNamespace(data=[card])
 
         return _Models()
@@ -418,7 +421,8 @@ async def test_context_overflow_propagates_when_compaction_is_disabled(session):
     assert engine._metrics.num_compactions == 0
 
 
-async def test_window_cut_reply_is_kept_and_compacted(session):
+@pytest.mark.parametrize("supports_limit", [False, True])
+async def test_window_cut_reply_is_kept_and_compacted(session, supports_limit):
     """A reply that runs into the context window stays in the conversation, without the
     tool call it was cut off in, and the summary request carries it."""
     client = _ScriptedClient(
@@ -438,13 +442,14 @@ async def test_window_cut_reply_is_kept_and_compacted(session):
                     ],
                 ),
                 prompt_tokens=1_200,
-                completion_tokens=2_800,
+                completion_tokens=1_800 if supports_limit else 2_800,
                 finish_reason="length",
             ),
             _response(DummyMessage(content="summary")),
             _response(DummyMessage(content="done")),
         ],
         max_model_len=4_000,
+        supports_context_limit=supports_limit,
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
@@ -463,7 +468,14 @@ async def test_window_cut_reply_is_kept_and_compacted(session):
     checkpoint = client.calls[2]["messages"]
     assert CUT_REPLY_NOTE in checkpoint[-1]["content"]
     assert checkpoint[-2] == {"role": "assistant", "content": "partial decode"}
-    assert omission_marker(2) in checkpoint
+    if supports_limit:
+        assert client.calls[1]["extra_body"] == {"max_context_tokens": 3_000}
+        assert client.calls[2]["extra_body"] == {"max_context_tokens": 4_000}
+        assert client.calls[2]["max_tokens"] == 1_000
+        assert checkpoint[:-2] == client.calls[1]["messages"]
+    else:
+        assert omission_marker(2) in checkpoint
+        assert "extra_body" not in client.calls[1]
     assert len(client.calls[3]["messages"]) == 2
     records = [
         json.loads(line)
@@ -478,7 +490,10 @@ async def test_window_cut_reply_is_kept_and_compacted(session):
 
 
 @pytest.mark.parametrize("prompt_tokens", [100, 1_500])
-async def test_length_cut_below_the_window_ends_the_run(session, prompt_tokens):
+@pytest.mark.parametrize("supports_limit", [False, True])
+async def test_length_cut_below_the_window_ends_the_run(
+    session, prompt_tokens, supports_limit
+):
     """A reply stopped by a completion cap is the answer, even past the threshold."""
     client = _ScriptedClient(
         [
@@ -490,6 +505,7 @@ async def test_length_cut_below_the_window_ends_the_run(session, prompt_tokens):
             ),
         ],
         max_model_len=4_000,
+        supports_context_limit=supports_limit,
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
@@ -502,7 +518,7 @@ async def test_length_cut_below_the_window_ends_the_run(session, prompt_tokens):
     finally:
         engine.close()
 
-    assert engine.summarize_at_tokens == 2_000
+    assert engine.summarize_at_tokens == 3_000
     assert result.answer == "capped answer"
     assert engine._metrics.stop_reason == "done"
     assert engine._metrics.num_compactions == 0
@@ -565,7 +581,8 @@ async def test_summary_request_keeps_its_budget(session, context_tokens):
         assert len(sent) == len(original)
 
 
-async def test_overflow_compacts_with_a_trimmed_request(session):
+@pytest.mark.parametrize("supports_limit", [False, True])
+async def test_overflow_compacts_with_a_trimmed_request(session, supports_limit):
     client = _ScriptedClient(
         [
             _overflow(),
@@ -579,6 +596,7 @@ async def test_overflow_compacts_with_a_trimmed_request(session):
         runtime_config=_config(summary_budget_tokens=2_000, max_compaction_attempts=1),
     )
     engine.context_window = 10_000
+    engine._supports_context_limit = supports_limit
     messages = _exchanges(4, 4_000)
     session.replace_context(messages, reason="start")
     try:
@@ -587,7 +605,10 @@ async def test_overflow_compacts_with_a_trimmed_request(session):
         engine.close()
 
     assert response.choices[0].message.content == "done"
-    assert client.calls[1]["messages"][3]["content"] == TOOL_OUTPUT_STUB
+    if supports_limit:
+        assert client.calls[1]["messages"][:-1] == messages
+    else:
+        assert client.calls[1]["messages"][3]["content"] == TOOL_OUTPUT_STUB
     assert len(client.calls[2]["messages"]) == 2
 
 

@@ -78,12 +78,15 @@ class ExecutionPolicy(_ConfigModel):
     let an overflowing session fail instead."""
     summarize_at_tokens: int | None = Field(default=None, gt=0)
     """Compaction threshold. None = derive it from the provider's advertised context
-    window (the summary budget plus 8k tokens of headroom); when the provider
-    advertises no window, compaction stays overflow-reactive only."""
+    window minus the summary reserve (small windows keep half). Providers advertising
+    ``supports_max_context_tokens`` also enforce this threshold during generation;
+    otherwise it is checked between turns. An explicit threshold cannot increase the
+    enforced cutoff above the default. Without an advertised window, only between-turn
+    checks and overflow recovery are available."""
     summary_budget_tokens: int = Field(default=24_576, gt=0)
-    """Room a summary reply gets, reasoning included. A summary request that would
-    leave less of the advertised context window is trimmed first. Capped at half
-    a known context window to leave room for the retained input."""
+    """Context reserved for the summary instructions and reply, reasoning included.
+    Capped at half a known window. Exact-cutoff providers summarize the full input
+    first; other providers trim the summary input to leave this reply budget."""
     max_compactions: int | None = Field(default=None, gt=0)
     """Compactions per session before the engine stops compacting. None (default) =
     unlimited: every compaction cycle itself spends new tokens, so ``max_total_tokens``

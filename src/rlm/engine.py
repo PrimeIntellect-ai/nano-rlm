@@ -36,7 +36,7 @@ from rlm.compaction import (
     SUMMARY_FRAMING,
     compactable,
     default_threshold,
-    discover_context_window,
+    discover_context_limits,
     estimated_tokens,
     is_context_overflow,
     trim_summary_input,
@@ -212,6 +212,7 @@ class RLMEngine:
         self.summarize_at_tokens = config.policy.summarize_at_tokens
         self.summary_budget_tokens = config.policy.summary_budget_tokens
         self.context_window: int | None = None
+        self._supports_context_limit = False
         self.max_compactions = config.policy.max_compactions
         self.max_compaction_attempts = config.policy.max_compaction_attempts
         self.system_prompt_path = config.system_prompt_path
@@ -533,7 +534,10 @@ class RLMEngine:
         self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
 
         if self.compaction:
-            self.context_window = await discover_context_window(self.client, self.model)
+            (
+                self.context_window,
+                self._supports_context_limit,
+            ) = await discover_context_limits(self.client, self.model)
             if self.summarize_at_tokens is None and self.context_window is not None:
                 self.summarize_at_tokens = default_threshold(
                     self.context_window, self.summary_budget_tokens
@@ -1229,12 +1233,22 @@ class RLMEngine:
         tokens = usage.total + estimated_tokens(extra_text)
         return tokens >= self.summarize_at_tokens
 
-    def _ran_into_window(self, finish_reason: str | None, usage: TokenUsage) -> bool:
-        """A reply cut off by the advertised context window, not by a completion cap."""
+    @property
+    def _work_window(self) -> int | None:
+        if self._supports_context_limit and self.context_window is not None:
+            return min(
+                self.summarize_at_tokens or self.context_window,
+                default_threshold(self.context_window, self.summary_budget_tokens),
+            )
+        return self.context_window
+
+    def _ran_into_window(
+        self, finish_reason: str | None, usage: TokenUsage, *, checkpoint: bool = False
+    ) -> bool:
+        """A reply cut off by its total-context limit, not by a completion cap."""
+        window = self.context_window if checkpoint else self._work_window
         return (
-            finish_reason == "length"
-            and self.context_window is not None
-            and usage.total >= self.context_window
+            finish_reason == "length" and window is not None and usage.total >= window
         )
 
     async def _model_attempt(self, **request: Any) -> Any:
@@ -1258,6 +1272,14 @@ class RLMEngine:
             "messages": messages,
             "extra_headers": model_call_headers(request_id, self._invocation_id),
         }
+        if self._supports_context_limit and self.context_window is not None:
+            request["extra_body"] = {
+                "max_context_tokens": self.context_window
+                if checkpoint
+                else self._work_window
+            }
+            if checkpoint:
+                request["max_tokens"] = self._summary_budget
         if self._active_tool_schemas:
             request["tools"] = self._active_tool_schemas
             if checkpoint:
@@ -1307,7 +1329,8 @@ class RLMEngine:
                     raise CompactionFailed(
                         "the compacted conversation still overflows"
                     ) from error
-                raise
+                if not self._supports_context_limit:
+                    raise
         else:
             if (
                 self.summarize_at_tokens is not None
@@ -1369,9 +1392,9 @@ class RLMEngine:
     def _fit_summary_input(
         self, messages: list[dict], checkpoint_prompt: str, context_tokens: int | None
     ) -> list[dict]:
-        """Trim a summary request until the summary has its budget of the advertised
-        context window. `context_tokens` measures `messages` as a prompt."""
-        if self.context_window is None:
+        """Exact-cutoff providers get the full input first. Otherwise estimate how much
+        to trim to leave summary room. `context_tokens` measures `messages` as a prompt."""
+        if self.context_window is None or self._supports_context_limit:
             return messages
         if context_tokens is None:
             context_tokens = estimated_tokens(
@@ -1406,10 +1429,10 @@ class RLMEngine:
         toward token budgets. Every committed attempt remains represented in the
         semantic graph.
 
-        The summary request is trimmed up front so the summary keeps
-        ``summary_budget_tokens`` of the context window; ``context_tokens`` measures
-        ``messages`` as a prompt. ``cut_reply`` marks a conversation whose last reply ran
-        into the window, which the summary is asked to pick up from.
+        Exact-cutoff providers get the full conversation with access to the reserved
+        context. Other providers get an input trimmed to leave summary room;
+        ``context_tokens`` measures ``messages`` as a prompt. ``cut_reply`` marks a
+        conversation whose last reply reached its cutoff.
 
         Forwarding active tool schemas preserves vLLM's system-message tool block
         and prime-rl's trajectory extension property across compaction.
@@ -1435,7 +1458,9 @@ class RLMEngine:
             base = self._fit_summary_input(messages, checkpoint_prompt, context_tokens)
             # A cut reply must survive every attempt, including overflow recovery.
             snapshot: list[dict] | None = (
-                None if cut_reply else messages[: self._last_good]
+                None
+                if cut_reply or self._supports_context_limit
+                else messages[: self._last_good]
             )
             summary_text = ""
             for attempt in range(self.max_compaction_attempts):
@@ -1475,7 +1500,7 @@ class RLMEngine:
                         f"no usable summary after {self.max_compaction_attempts} attempts"
                     )
                 self._semantic_edges.release_summary_request(compaction.compaction_id)
-                if self._ran_into_window(choice.finish_reason, usage):
+                if self._ran_into_window(choice.finish_reason, usage, checkpoint=True):
                     # The summary needed more room than it had: give it another budget.
                     base, snapshot = self._shorter_summary_input(
                         base,
