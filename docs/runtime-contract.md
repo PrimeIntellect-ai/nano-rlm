@@ -76,7 +76,9 @@ An optional `messageId` deduplicates retries within the session; reusing an ID w
 
 ## Session snapshot
 
-Prompt responses and the `session/close` response carry one credential-free snapshot under `ai.prime.rlm/session-v1`: the session ID and last stop reason, the model, turns, cumulative token usage, metrics (compactions, sub-agent calls, programmatic tool calls, ...), supervisor counters and the effective limits. The `session/close` snapshot is authoritative.
+Prompt responses and the `session/close` response carry one credential-free snapshot under `ai.prime.rlm/session-v1`: the session ID and last stop reason, the model, turns, cumulative token usage, metrics (compactions, sub-agent calls, programmatic tool calls, `tool_seconds`, ...), supervisor counters and the effective limits. The `session/close` snapshot is authoritative.
+
+`tool_seconds` is the wall-clock time the session's own agent spent executing its tool calls, `wait` included, from dispatch to result. It excludes model calls and their retries, and the tool calls of sub-agents.
 
 The ACP stop reason says when a limit cut a prompt short; the snapshot's `last_stop_reason` names the exact cause:
 
@@ -106,6 +108,6 @@ Each call also carries a private `X-ACP-Model-Request-ID`. Responses publish spa
 | `compaction_attempt` | A summary attempt branching from the agent's work |
 | `format_violation` | The terminal unusable summary; retained for zero-reward training |
 
-`X-ACP-Agent-Session-ID`, also on every call, names the calling agent's session in the tree: the root's is the ACP session, each sub-agent's its own. A session-affinity router can key on it to keep each agent's growing prefix on one engine without pinning a whole tree, whose agents run concurrently, to that engine.
+`X-ACP-Agent-Session-ID`, also on every call, names the calling agent's session in the tree: the root's is the ACP session, each sub-agent's its own. Compaction calls carry their agent's ID too, so a client can attribute every call to its agent, and tell the root's calls from sub-agents', however often a context is compacted. A session-affinity router can key on it to keep each agent's growing prefix on one engine without pinning a whole tree, whose agents run concurrently, to that engine.
 
 Clients that do not understand the extension ignore it.
