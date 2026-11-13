@@ -90,6 +90,8 @@ class WorkspaceHost:
             return self.services.tail(params["name"], params["lines"])
         if method == "services.stop":
             return self._run(self.services.stop(params["name"], params["grace"]))
+        if method == "services.stop_owned":
+            return self._run(self.services.stop_owner(params["owner_id"]))
         if method == "watch.path":
             return self._run(self._watch(params))
         if method == "watch.cancel":

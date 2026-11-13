@@ -57,6 +57,43 @@ await rlm.agent.send_to_parent("Found a missing permission check")
 
 Parent instructions enter the child's conversation; neither kind interrupts a running model call or tool. Both wake an idle persistent child, and sending to an agent that has ended raises. `send` and `steer` return acceptance IDs, not acknowledgements, and refuse when the tree's budget is spent. An accepted instruction that cannot be delivered (the budget ran out, or the child ended) is recorded as `instruction_failed` in the child's inbox journal and reported to the parent as an `agent.delivery_failed` event with `agent_id`, `message_id` and `reason`.
 
+## Population episodes
+
+A session configured with a [population policy](runtime-contract.md#population-episodes) runs as one episode of peer agents. Every peer is a depth-0 agent with the same authority; no agent leads.
+
+**Spawning.** `await rlm.agent.spawn(brief, independent=True)` admits a new depth-0 peer: not beholden to you (no lifecycle events to you, no cascade when either of you ends), the spawn recorded for provenance and spend attribution, and you get a handle to observe it (`info()`, `history()`, `result()`) and message it like any peer. `await rlm.agent.spawn(brief)` (the default) spawns a beholden child one depth deeper instead: it reports to you, ends with you and counts against the tree limits; the population's own caps count only peers. At the live cap an admission retires the longest-idle peer past its grace period (conversation kept, kernel released); a direct message revives it when a slot is free.
+
+**Messaging is inbox-plus-pull; nothing is pushed into a conversation.** Messages land in the recipient's `rlm.inbox`, one coalesced, time-signatured notice announces them at the recipient's next model boundary, and a periodic reminder repeats while peer messages stay unread. Check the inbox before ending a turn.
+
+```python
+receipt = await rlm.agent.dm("agent-2", "please compute 6*7")   # lands in agent-2's inbox
+await rlm.agent.broadcast("midpoint check")                    # every live peer but you
+print(await rlm.agent.delivery(receipt["message_id"]))
+# {'message_id': ..., 'to': 'agent-2', 'kind': 'agent.dm', 'status': 'accepted', ...}
+# status: accepted -> delivered (read) -> answered (answer = the reply's tail, pulled),
+# or failed with a reason.
+```
+
+Do not wait on a wake for a reply: the answering peer DMs you back (into your inbox) or you read the receipt and `rlm.population.history`.
+
+**Population, board and answer.**
+
+```python
+await rlm.population.status()                        # live, capacity, admissions, budgets
+await rlm.population.list()                          # peers: name, status, spawned_by, task
+await rlm.population.events()                        # membership ledger, in order
+
+b = await rlm.board.read()                           # shared Markdown board
+await rlm.board.append("agent-1: claiming the proof")  # or board.edit(old, new, expected_revision=...)
+
+cur = await rlm.population.answer()                  # {"text": ..., "revision": ..., "author": ...}
+await rlm.population.submit("42", expected_revision=cur["revision"])  # CAS, scored
+```
+
+Board edits and the episode answer are revision-checked compare-and-swap: a conflict means someone else wrote first — read again and reconcile, never overwrite. Declared final files are only replaced through `await rlm.artifact.publish(path, draft, expected_revision=...)`.
+
+**Episode end.** The episode runs until no agent can act again (or a budget or the wall clock runs out), then every agent stops — jobs, subscriptions and services included — and the scored state is the submitted answer and/or the workspace as the task's runner sees it after the session closes.
+
 ## Inbox and waiting
 
 Reports, completions and watch events arrive in the agent's inbox. The model sees the unread count whenever it changes and decides when to read:
