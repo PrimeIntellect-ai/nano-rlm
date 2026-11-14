@@ -81,30 +81,16 @@ async def run_with_api_key(
     Returns:
         One formatted text string containing titles, URLs, and snippets.
     """
+    match provider:
+        case "serper":
+            key_name, fetch = "SERPER_API_KEY", _serper_results
+        case "eco":
+            key_name, fetch = "YOU_API_KEY", _eco_results
     if not api_key:
-        key_name = "YOU_API_KEY" if provider == "eco" else "SERPER_API_KEY"
         return f"Error: {key_name} environment variable is not set"
     try:
         async with httpx.AsyncClient() as client:
-            if provider == "eco":
-                response = await client.get(
-                    ECO_URL,
-                    params={"query": query},
-                    headers={"X-API-Key": api_key},
-                    timeout=45,
-                )
-            else:
-                response = await client.post(
-                    SERPER_URL,
-                    json={"q": query},
-                    headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-                    timeout=45,
-                )
-        response.raise_for_status()
-        if provider == "eco":
-            results = _eco_results(response.json())
-        else:
-            results = response.json().get("organic") or []
+            results = await fetch(client, api_key, query)
     except Exception:
         raise RuntimeError("web search is unavailable") from None
     return _format_search_results(results, query, num_results, network_block)
@@ -122,15 +108,34 @@ async def run(
     )
 
 
-def _eco_results(payload: dict) -> list[dict]:
-    """Map Eco Search web results onto Serper's ``title``/``link``/``snippet`` fields."""
+async def _serper_results(
+    client: httpx.AsyncClient, api_key: str, query: str
+) -> list[dict]:
+    response = await client.post(
+        SERPER_URL,
+        json={"q": query},
+        headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+        timeout=45,
+    )
+    response.raise_for_status()
+    return response.json().get("organic") or []
+
+
+async def _eco_results(
+    client: httpx.AsyncClient, api_key: str, query: str
+) -> list[dict]:
+    """Eco Search web results mapped onto Serper's ``title``/``link``/``snippet``."""
+    response = await client.get(
+        ECO_URL, params={"query": query}, headers={"X-API-Key": api_key}, timeout=45
+    )
+    response.raise_for_status()
     return [
         {
             "title": result.get("title"),
             "link": result.get("url"),
             "snippet": result.get("description"),
         }
-        for result in payload.get("results", {}).get("web", [])
+        for result in response.json().get("results", {}).get("web", [])
     ]
 
 
