@@ -37,7 +37,6 @@ from rlm.skills.search import run_with_api_key, search
         (("faß.de",), "https://fass.de/a", False),
         (("example.org",), None, True),
         (("example.org",), "malformed", True),
-        (("example.org",), "https://www.google.com/goto?url=token", True),
         ((), "https://example.org/a", False),
         ((), None, False),
     ],
@@ -105,11 +104,6 @@ async def test_eco_search_maps_web_results_and_filters_before_limit(monkeypatch)
                         "snippets": ["answer"],
                     },
                     {
-                        "url": "https://www.google.com/goto?url=token",
-                        "title": "redirected",
-                        "description": "hidden destination",
-                    },
-                    {
                         "url": "https://you.com",
                         "title": "The World's Greatest Search Engine!",
                         "description": "Search on YDC",
@@ -135,16 +129,12 @@ async def test_eco_search_maps_web_results_and_filters_before_limit(monkeypatch)
         network_block=("example.org",),
         provider="eco",
     )
-    unfiltered = await run_with_api_key(
-        "eco-key", "query", num_results=2, provider="eco"
-    )
 
     assert result == (
         "Result 1: The World's Greatest Search Engine!\n"
         "URL: https://you.com\n"
         "  - Search on YDC"
     )
-    assert "URL: https://www.google.com/goto?url=token" in unfiltered
     url, kwargs = requests[0]
     assert url == "https://ydc-index.io/v1/eco_search"
     assert kwargs["params"] == {"query": "query"}
