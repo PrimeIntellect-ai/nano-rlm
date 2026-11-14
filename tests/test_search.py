@@ -37,7 +37,9 @@ from rlm.skills.search import run_with_api_key, search
         (("faß.de",), "https://fass.de/a", False),
         (("example.org",), None, True),
         (("example.org",), "malformed", True),
+        (("example.org",), "https://www.google.com/goto?url=token", True),
         ((), "https://example.org/a", False),
+        ((), "https://www.google.com/goto?url=token", False),
         ((), None, False),
     ],
 )

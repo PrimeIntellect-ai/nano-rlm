@@ -17,6 +17,9 @@ def network_url_is_blocked(block: NetworkBlocklist, value: object) -> bool:
     except ValidationError:
         return True
     host = url.host.strip("[]").lower().rstrip(".")
+    if host == "www.google.com" and url.path == "/goto":
+        # Google's encrypted redirect links hide their destination.
+        return True
     for rule in block:
         try:
             parsed = urlsplit(rule if "://" in rule else f"//{rule}")
