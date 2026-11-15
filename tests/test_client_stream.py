@@ -236,3 +236,56 @@ async def test_nonretryable_stream_error_preserves_status(
     assert raised.value.status_code == status
     assert is_context_overflow(raised.value) is overflow
     assert len(calls) == 1
+
+
+def test_responses_round_trip_keeps_reasoning_with_its_output():
+    from openai.types.responses import Response
+
+    from rlm.client import completion_from_response, responses_input
+
+    response = Response.model_validate(
+        {
+            "id": "resp",
+            "object": "response",
+            "created_at": 1,
+            "model": "m",
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "id": "rs",
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "sealed",
+                },
+                {
+                    "id": "fc",
+                    "type": "function_call",
+                    "call_id": "call",
+                    "name": "ipython",
+                    "arguments": "{}",
+                },
+            ],
+            "usage": {
+                "input_tokens": 11,
+                "input_tokens_details": {"cached_tokens": 5},
+                "output_tokens": 7,
+                "output_tokens_details": {"reasoning_tokens": 3},
+                "total_tokens": 18,
+            },
+        }
+    )
+    completion = completion_from_response(response)
+    assert completion.choices[0].finish_reason == "tool_calls"
+    assert completion.usage.prompt_tokens_details.cached_tokens == 5
+
+    message = completion.choices[0].message.model_dump(exclude_none=True)
+    tool = {"role": "tool", "tool_call_id": "call", "content": "out"}
+    assert [item.get("type") for item in responses_input([message, tool])] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+    ]
+    message.pop("tool_calls")
+    assert responses_input([message]) == []

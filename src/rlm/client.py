@@ -19,6 +19,7 @@ from openai import (
 )
 from openai.lib.streaming.chat import ChatCompletionStreamState
 from openai.types.chat import ChatCompletion
+from openai.types.responses import Response
 from pydantic import ValidationError
 
 from rlm.config import ProviderConfig
@@ -214,6 +215,154 @@ async def stream_completion(client: AsyncOpenAI, **request: Any) -> ChatCompleti
         if choice.index in reasoning_details:
             choice.message.reasoning_details = reasoning_details[choice.index]
     return completion
+
+
+REASONING_ITEMS_FIELD = "reasoning_items"
+
+
+def responses_input(messages: list[dict]) -> list[dict]:
+    """Convert Chat Completions messages to stateless Responses input items."""
+    items: list[dict] = []
+    for message in messages:
+        role = message["role"]
+        if role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message["tool_call_id"],
+                    "output": message["content"],
+                }
+            )
+            continue
+        if role != "assistant":
+            items.append({"role": role, "content": message["content"]})
+            continue
+        tool_calls = message.get("tool_calls") or []
+        # A reasoning item is only valid next to the output it produced.
+        if message.get("content") or tool_calls:
+            items.extend(message.get(REASONING_ITEMS_FIELD) or [])
+        if message.get("content"):
+            items.append({"role": "assistant", "content": message["content"]})
+        for tool_call in tool_calls:
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": tool_call["id"],
+                    "name": tool_call["function"]["name"],
+                    "arguments": tool_call["function"]["arguments"],
+                }
+            )
+    return items
+
+
+def responses_tools(tools: list[dict]) -> list[dict]:
+    return [{"type": "function", "strict": False, **tool["function"]} for tool in tools]
+
+
+def completion_from_response(response: Response) -> ChatCompletion:
+    """Present a finished Responses reply in the Chat Completions shape the engine reads."""
+    text: list[str] = []
+    tool_calls: list[dict] = []
+    reasoning: list[dict] = []
+    for item in response.output:
+        if item.type == "message":
+            text.extend(
+                part.text for part in item.content if part.type == "output_text"
+            )
+        elif item.type == "function_call":
+            tool_calls.append(
+                {
+                    "id": item.call_id,
+                    "type": "function",
+                    "function": {"name": item.name, "arguments": item.arguments},
+                }
+            )
+        elif item.type == "reasoning":
+            reasoning.append(
+                item.model_dump(
+                    include={"id", "type", "summary", "encrypted_content"},
+                    exclude_none=True,
+                )
+            )
+    incomplete = response.incomplete_details
+    finish_reason = (
+        "length"
+        if incomplete is not None and incomplete.reason == "max_output_tokens"
+        else "tool_calls"
+        if tool_calls
+        else "stop"
+    )
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(text)}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    if reasoning:
+        message[REASONING_ITEMS_FIELD] = reasoning
+    usage = response.usage
+    return ChatCompletion.model_validate(
+        {
+            "id": response.id,
+            "object": "chat.completion",
+            "created": int(response.created_at),
+            "model": response.model,
+            "choices": [
+                {"index": 0, "finish_reason": finish_reason, "message": message}
+            ],
+            "usage": usage
+            and {
+                "prompt_tokens": usage.input_tokens,
+                "completion_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+                "prompt_tokens_details": {
+                    "cached_tokens": usage.input_tokens_details.cached_tokens
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": usage.output_tokens_details.reasoning_tokens
+                },
+            },
+        }
+    )
+
+
+async def stream_response(
+    client: AsyncOpenAI, *, reasoning_effort: str | None = None, **request: Any
+) -> ChatCompletion:
+    """Consume one complete Responses API attempt, returned as a Chat Completion."""
+    params: dict[str, Any] = {
+        "model": request["model"],
+        "input": responses_input(request["messages"]),
+        "store": False,
+        "include": ["reasoning.encrypted_content"],
+        "extra_headers": request.get("extra_headers"),
+    }
+    if reasoning_effort is not None:
+        params["reasoning"] = {"effort": reasoning_effort}
+    if "tools" in request:
+        params["tools"] = responses_tools(request["tools"])
+    for name in ("tool_choice", "parallel_tool_calls"):
+        if name in request:
+            params[name] = request[name]
+    stream = await client.responses.create(**params, stream=True)
+    final = None
+    try:
+        async with stream:
+            async for event in stream:
+                if event.type in ("response.completed", "response.incomplete"):
+                    final = event.response
+                elif event.type in ("response.failed", "error"):
+                    raise APIConnectionError(
+                        message=f"Model stream failed: {event.model_dump_json()}",
+                        request=stream.response.request,
+                    )
+    except httpx.TransportError as error:
+        raise APIConnectionError(
+            message=str(error), request=stream.response.request
+        ) from error
+    if final is None:
+        raise APIConnectionError(
+            message="Model stream ended before a response finished",
+            request=stream.response.request,
+        )
+    return completion_from_response(final)
 
 
 async def call_with_retries(

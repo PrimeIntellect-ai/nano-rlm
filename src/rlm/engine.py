@@ -24,6 +24,7 @@ from rlm.client import (
     make_client,
     model_call_headers,
     stream_completion,
+    stream_response,
 )
 from rlm.provenance import agent_input, runtime_event
 from rlm.compaction import (
@@ -1239,9 +1240,17 @@ class RLMEngine:
 
     async def _model_attempt(self, **request: Any) -> Any:
         if self._supervisor is None:
-            return await stream_completion(self.client, **request)
+            return await self._stream(**request)
         async with self._supervisor.inference_slot(self._invocation_id):
-            return await stream_completion(self.client, **request)
+            return await self._stream(**request)
+
+    async def _stream(self, **request: Any) -> Any:
+        provider = self.runtime_config.provider
+        if provider.responses_api:
+            return await stream_response(
+                self.client, reasoning_effort=provider.reasoning_effort, **request
+            )
+        return await stream_completion(self.client, **request)
 
     async def _call_model(
         self,
