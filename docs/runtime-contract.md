@@ -19,7 +19,7 @@ The agent accepts text prompts, and stdio or streamable-HTTP MCP servers (with H
 | --- | --- | --- |
 | `session_id` | string | The client's ID for the session, echoed in snapshots (`[A-Za-z0-9._:-]`, at most 128 characters) |
 | `model` | string | Model name sent to the provider |
-| `provider` | object | `base_url`, `api_key`, `headers`, `max_retries` (default 5). `Idempotency-Key`, `x-stainless-retry-count` and the ACP tracing headers are reserved |
+| `provider` | object | `base_url`, `api_key`, `headers`, `max_retries` (default 5), `responses_api` (default false), `reasoning_effort` (default null). `Idempotency-Key`, `x-stainless-retry-count` and the ACP tracing headers are reserved |
 | `policy` | object | Budgets, recursion, compaction and timeouts, see [Policy](#policy). Omitted fields take their defaults |
 | `system_prompt_path` | string or null | A file whose instructions replace the default task role |
 | `append_to_system_prompt` | string or null | Instructions appended for every agent |
@@ -61,6 +61,8 @@ The only process environment variable is `RLM_HOME` (default `~/.rlm`): the root
 **Model-call admission.** `max_concurrent_subagents` bounds calls across the tree. Queued calls closer to the root go first, FIFO within a depth, and calls in flight are not preempted, so continuous shallow work can delay deeper agents. Tools, child waits and the backoff between outer retries hold no slot; the SDK's own retries stay within one. The limit is per tree: a cap across trees belongs in the runner or inference gateway.
 
 **Model transport.** All model calls, including compaction, request Chat Completions streaming with usage reporting. nano-rlm assembles the complete reply before using it; tools never execute from partial deltas. Providers must support SSE streaming. The inference slot remains held until the stream is consumed and closed. Interrupted streams and transient stream errors retry the whole call with the same request ID; partial replies do not enter the conversation or token totals. Streaming keeps an active generation from leaving the HTTP connection idle, but does not bypass absolute request-duration limits or stalls before the first byte.
+
+With `provider.responses_api` set, calls go to the Responses API instead, for models that reject function tools on Chat Completions. Requests are stateless (`store: false`): reasoning items come back encrypted and are sent again with the assistant turn that produced them. `provider.reasoning_effort` sets the effort; null leaves the provider default. Streaming, retries and usage reporting behave the same way.
 
 ## Prompts
 

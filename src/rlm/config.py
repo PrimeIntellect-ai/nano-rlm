@@ -24,6 +24,11 @@ class ProviderConfig(_ConfigModel):
     api_key: str = Field(min_length=1, repr=False)
     headers: dict[str, str] = Field(default_factory=dict, repr=False)
     max_retries: int = Field(default=5, ge=0)
+    responses_api: bool = False
+    """Send model calls to the stateless Responses API instead of Chat Completions.
+    Reasoning is carried between turns as encrypted items on the assistant message."""
+    reasoning_effort: str | None = None
+    """Reasoning effort requested on the Responses API. None = the provider default."""
 
     @field_validator("headers")
     @classmethod
