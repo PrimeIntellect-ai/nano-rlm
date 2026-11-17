@@ -28,15 +28,21 @@ BASE_TOOLKIT = (
 )
 
 SHELL_TOOL_NAMES = frozenset({"ipython", "bash"})
-GIT_HISTORY_GUARD_PROMPT = (
-    "Do not cheat by using online solutions or hints specific to this task, or "
-    "by copying or inferring solutions from other branches, tags, remotes, "
+_GIT_HISTORY_GUARD_ONLINE = (
+    "using online solutions or hints specific to this task, or by "
+)
+_GIT_HISTORY_GUARD_LOCAL = (
+    "copying or inferring solutions from other branches, tags, remotes, "
     "reflogs, or broad git history in the project, or by cloning other "
     "repositories to read their history. Git commands that reach beyond the "
     "current branch are refused: `git log --all` and similar history options, "
     "history subcommands given another ref (`git show origin/main`), listing "
     "branches, tags, remotes or the reflog, and `clone`, `fetch` or `pull`."
 )
+GIT_HISTORY_GUARD_PROMPT = (
+    "Do not cheat by " + _GIT_HISTORY_GUARD_ONLINE + _GIT_HISTORY_GUARD_LOCAL
+)
+OFFLINE_GIT_HISTORY_GUARD_PROMPT = "Do not cheat by " + _GIT_HISTORY_GUARD_LOCAL
 PROJECT_ENV_PROMPT = (
     "The ipython kernel is an isolated venv without the project's packages — "
     "never import project modules there. Everything that executes project code "
@@ -47,8 +53,11 @@ IPYTHON_CONTROL_PROMPT = (
     "`await job.result()` collects any job. Use `rlm.services.start` for a server or daemon that must keep "
     "running after you finish. " + PROJECT_ENV_PROMPT
 )
+KERNEL_PREINSTALLED_PROMPT = (
+    "Pre-installed in the kernel venv: " + ", ".join(BASE_TOOLKIT) + "."
+)
 KERNEL_PACKAGES_PROMPT = (
-    "Pre-installed in the kernel venv: " + ", ".join(BASE_TOOLKIT) + ". "
+    KERNEL_PREINSTALLED_PROMPT + " "
     "Install extra packages with `!uv pip install <pkg>` in a code cell — that "
     "targets the kernel venv (a uv-managed venv with no pip module)."
 )
@@ -378,6 +387,7 @@ def build_system_prompt(
     allow_recursion: bool,
     delegation_prompt: bool = False,
     allow_git: bool,
+    network_guidance: bool = True,
     active_tools: list[BuiltinTool],
     shell_skills: list[str] | None = None,
     skill_docs: list["SkillDoc"] | None = None,
@@ -447,7 +457,9 @@ def build_system_prompt(
                 RUNTIME_PROMPT,
                 HISTORY_PROMPT,
                 IPYTHON_CONTROL_PROMPT,
-                KERNEL_PACKAGES_PROMPT,
+                KERNEL_PACKAGES_PROMPT
+                if network_guidance
+                else KERNEL_PREINSTALLED_PROMPT,
             ]
         )
         if can_delegate:
@@ -491,7 +503,11 @@ def build_system_prompt(
             + ". Discover CLI usage with `<tool> --help`. Other listed Python tools are IPython-only."
         )
     if _should_include_git_history_guard(active_tools, allow_git):
-        parts.append(GIT_HISTORY_GUARD_PROMPT)
+        parts.append(
+            GIT_HISTORY_GUARD_PROMPT
+            if network_guidance
+            else OFFLINE_GIT_HISTORY_GUARD_PROMPT
+        )
     return "\n\n".join(parts)
 
 

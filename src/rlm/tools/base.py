@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+from threading import Event
 
+from rlm.tools.output import OutputSize
 from rlm.types import BuiltinMetricEvent, RLMMetrics, TokenUsage
 
 
@@ -14,6 +16,9 @@ class ToolOutcome:
 
     content: str
     metric_events: list[BuiltinMetricEvent] = field(default_factory=list)
+    omitted: OutputSize | None = None
+    """How much more the whole output measures than `content`, when `content` kept
+    only its start and end."""
 
 
 @dataclass
@@ -29,6 +34,8 @@ class ToolContext:
     repl: Any | None = None
     state: dict[str, Any] = field(default_factory=dict)
     cwd: str = ""
+    env: dict[str, str] | None = None
+    interrupt_event: Event | None = None
 
 
 class BuiltinTool(Protocol):

@@ -23,6 +23,7 @@ def test_runtime_config_redacts_secrets():
             max_compactions=3,
             max_compaction_attempts=7,
             allow_git=True,
+            network_guidance=False,
         ),
         skills=("search", "edit"),
         kernel_env=(("TASK_TOKEN", "task-secret"),),
@@ -44,6 +45,7 @@ def test_runtime_config_redacts_secrets():
         max_concurrent_subagents=4,
         max_subagent_calls=None,
         allow_git=True,
+        network_guidance=False,
     )
     assert config.skills == ("search", "edit")
     assert config.kernel_env == (("TASK_TOKEN", "task-secret"),)
@@ -69,6 +71,7 @@ def test_default_policy_enables_recursion_and_compaction():
     policy = ExecutionPolicy()
     assert policy.compaction is True
     assert policy.summarize_at_tokens is None
+    assert policy.summary_budget_tokens == 24_576
     assert policy.max_compactions is None
     assert policy.max_compaction_attempts == 5
     assert policy.max_total_tokens == 1_000_000
