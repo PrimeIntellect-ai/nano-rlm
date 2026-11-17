@@ -152,6 +152,26 @@ async def discover_context_window(client: AsyncOpenAI, model: str) -> int | None
     return _window_cache[key]
 
 
+def kept_spans(
+    text: str,
+    max_bytes: int = TOOL_OUTPUT_MAX_BYTES,
+    omitted: OutputSize | None = None,
+) -> tuple[int, int]:
+    """Characters of `text` kept at its start and at its end when it is cut to
+    `max_bytes`; the whole text (its length, 0) when it fits. `omitted` is as in
+    `truncate_tool_output`."""
+    size = OutputSize.of(text) + (omitted or OutputSize())
+    if size.nbytes <= max_bytes:
+        return len(text), 0
+    keep = max_bytes // 2
+    if omitted is not None:
+        keep = min(keep, KEPT_PER_END)
+    data = text.encode("utf-8")
+    head = data[:keep].decode("utf-8", errors="ignore")
+    tail = data[-keep:].decode("utf-8", errors="ignore")
+    return len(head), len(tail)
+
+
 def truncate_tool_output(
     text: str,
     max_bytes: int = TOOL_OUTPUT_MAX_BYTES,
@@ -160,19 +180,15 @@ def truncate_tool_output(
     """Keep the head and tail of an oversized tool result and say what was cut.
     `omitted` is how much more the whole result measures than `text`, which kept only
     its start and end; the note describes the whole result."""
-    data = text.encode("utf-8")
-    size = OutputSize.of(text) + (omitted or OutputSize())
-    if size.nbytes <= max_bytes:
+    head, tail = kept_spans(text, max_bytes, omitted)
+    if head == len(text) and tail == 0:
         return text
-    keep = max_bytes // 2
-    if omitted is not None:
-        keep = min(keep, KEPT_PER_END)
-    head = data[:keep].decode("utf-8", errors="ignore")
-    tail = data[-keep:].decode("utf-8", errors="ignore")
+    size = OutputSize.of(text) + (omitted or OutputSize())
+    keep = max_bytes // 2 if omitted is None else min(max_bytes // 2, KEPT_PER_END)
     return (
         f"Warning: truncated output (original token count: {estimated_tokens(size.nchars)})\n"
         f"Total output lines: {size.newlines + 1}\n\n"
-        f"{head}\n[... {size.nbytes - 2 * keep} bytes truncated ...]\n{tail}"
+        f"{text[:head]}\n[... {size.nbytes - 2 * keep} bytes truncated ...]\n{text[len(text) - tail :]}"
     )
 
 
