@@ -304,6 +304,32 @@ async def test_skill_introspection(session):
     assert "doc match: True" in output
 
 
+def test_brokered_skill_tolerates_json_type_unions():
+    from rlm import broker
+
+    # Gym schemas declare optional fields as ["string", "null"]; a list `type` used to
+    # crash `rlm.tools.get` with "unhashable type: 'list'".
+    notify = broker.make_skill(
+        {
+            "capability": "cap-2",
+            "name": "send_notification",
+            "description": "notify",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"},
+                    "status": {"type": ["string", "null"]},
+                    "payload": {"type": ["array", "object"]},
+                },
+                "required": ["message"],
+            },
+        }
+    )
+    assert str(notify.__signature__) == (
+        "(message: str, status: str = None, payload=None) -> str"
+    )
+
+
 async def test_brokered_skill_accepts_positional_arguments(monkeypatch):
     from rlm import broker
 
@@ -331,8 +357,9 @@ async def test_brokered_skill_accepts_positional_arguments(monkeypatch):
     )
     assert (
         search.__name__ == "search"
-        and str(search.__signature__) == "(query: str, num_results: int = None)"
+        and str(search.__signature__) == "(query: str, num_results: int = None) -> str"
     )
+    assert "Returns text (str)" in search.__doc__
     assert await search("fjords") == "ok" and seen[-1] == ("cap-1", {"query": "fjords"})
     assert await search(query="a", num_results=3) == "ok" and seen[-1][1] == {
         "query": "a",
@@ -344,7 +371,7 @@ async def test_brokered_skill_accepts_positional_arguments(monkeypatch):
     }
     with pytest.raises(
         TypeError,
-        match=r"search\(query: str, num_results: int = None\) takes 2 arguments",
+        match=r"search\(query: str, num_results: int = None\) -> str takes 2 arguments",
     ):
         await search("a", 2, 3)
     with pytest.raises(TypeError, match="got 'query' twice"):
