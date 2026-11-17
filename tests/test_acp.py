@@ -57,6 +57,7 @@ def _runtime_metadata(**overrides: Any) -> dict[str, Any]:
             "max_concurrent_subagents": 4,
             "max_subagent_calls": None,
             "allow_git": False,
+            "network_guidance": False,
         },
         "system_prompt_path": None,
         "append_to_system_prompt": None,
@@ -151,9 +152,11 @@ class _Engine:
                 "max_tokens": None,
                 "compaction": False,
                 "summarize_at_tokens": None,
+                "summary_budget_tokens": 24576,
                 "max_compactions": None,
                 "max_compaction_attempts": 5,
                 "allow_git": False,
+                "network_guidance": False,
             },
             "semantic_edges": {"edges": []},
         }
@@ -478,9 +481,12 @@ async def test_engine_rollback_write_failure_is_fatal(monkeypatch, session):
     write = session._msg_file.write
 
     def fail_rollback(line):
-        if '"reason": "rollback"' in line:
-            raise OSError("disk full during rollback")
+        if b'"reason": "rollback"' in line:
+            raise OSError("write failed")
         return write(line)
+
+    def fail_truncate(size):
+        raise OSError("disk full during rollback")
 
     async def fail_prompt():
         engine._turn = 7
@@ -490,6 +496,7 @@ async def test_engine_rollback_write_failure_is_fatal(monkeypatch, session):
         raise RuntimeError("model failed")
 
     monkeypatch.setattr(session._msg_file, "write", fail_rollback)
+    monkeypatch.setattr(session._msg_file, "truncate", fail_truncate)
     monkeypatch.setattr(engine, "_run_loop", fail_prompt)
     try:
         with pytest.raises(OSError, match="disk full during rollback"):
@@ -624,6 +631,9 @@ async def test_engine_cancel_masks_tool_cleanup_error(monkeypatch, session):
             self.finished = False
             self.stopped = False
 
+        async def run_in_thread(self, fn, *args):
+            return await asyncio.to_thread(fn, *args)
+
         def interrupt(self):
             interrupted.set()
 
@@ -745,6 +755,9 @@ async def test_engine_failed_start_cleans_kernel_before_retry(
             self.stopped = False
             repls.append(self)
 
+        async def run_in_thread(self, fn, *args):
+            return await asyncio.to_thread(fn, *args)
+
         def start(self):
             self.started = True
 
@@ -849,6 +862,10 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert initialized.field_meta == {
         CONTRACT_METADATA_KEY: True,
         "steering": {"supported": True},
+        "ai.prime.rlm/execution-v1": {
+            "transports": ["stdio", "tcp"],
+            "tools": ["ipython", "bash", "edit", "fetch"],
+        },
     }
 
     created = await agent.new_session(
@@ -867,12 +884,13 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
                 env=[EnvVariable(name="TOKEN", value="task-secret")],
             ),
         ],
-        **_runtime_metadata(),
+        **_runtime_metadata(network_block=["example.org"]),
     )
     first = await agent.prompt(created.session_id, [text_block("one")])
     second = await agent.prompt(created.session_id, [text_block("two")])
 
     engine = _Engine.instances[0]
+    assert engine.runtime_config.network_block == ("example.org",)
     assert engine.prompts == ["one", "two"]
     assert engine.mcp_servers == {
         "tools": MCPHTTPServer(
@@ -915,7 +933,58 @@ async def test_acp_session_reuses_engine(monkeypatch, tmp_path):
     assert engine.closed is True
 
 
-async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "policy,stop_reason,last_stop_reason",
+    [
+        pytest.param({}, "end_turn", "done", id="answered"),
+        pytest.param(
+            {"max_total_turns": 1},
+            "max_turn_requests",
+            "max_total_turns",
+            id="max-total-turns",
+        ),
+        pytest.param(
+            {"max_total_tokens": 1},
+            "max_tokens",
+            "max_total_tokens",
+            id="max-total-tokens",
+        ),
+        pytest.param({"max_tokens": 1}, "max_tokens", "token_budget", id="max-tokens"),
+    ],
+)
+async def test_acp_stop_reason_names_the_spent_limit(
+    monkeypatch, tmp_path, policy, stop_reason, last_stop_reason
+):
+    monkeypatch.setenv("RLM_HOME", str(tmp_path / "rlm"))
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
+            DummyMessage(content="done"),
+        ]
+    )
+    monkeypatch.setattr(
+        "rlm.acp.RLMEngine", lambda **kwargs: RLMEngine(client=client, **kwargs)
+    )
+    agent = RLMACPAgent()
+    agent.on_connect(_Client())  # type: ignore[arg-type]
+    await _initialize(agent)
+    metadata = _runtime_metadata()
+    metadata[RUNTIME_METADATA_KEY]["policy"].update(policy)
+    created = await agent.new_session(str(tmp_path), mcp_servers=[], **metadata)
+    try:
+        response = await agent.prompt(created.session_id, [text_block("count")])
+    finally:
+        await agent.close_session(created.session_id)
+
+    assert response.stop_reason == stop_reason
+    snapshot = response.field_meta[SESSION_METADATA_KEY]
+    assert snapshot["last_stop_reason"] == last_stop_reason
+
+
+@pytest.mark.parametrize("attempts", [1, 5])
+async def test_acp_prompt_snapshot_records_compaction_edge(
+    monkeypatch, tmp_path, attempts
+):
     client = DummyClient(
         [
             DummyMessage(tool_calls=[DummyToolCall("add", {"a": 1, "b": 2})]),
@@ -936,6 +1005,9 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
     runtime_metadata[RUNTIME_METADATA_KEY]["builtin_tools"] = ["add"]
     runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["compaction"] = True
     runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["summarize_at_tokens"] = 1
+    runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["max_compaction_attempts"] = (
+        attempts
+    )
     created = await agent.new_session(str(tmp_path), **runtime_metadata)
 
     try:
@@ -954,6 +1026,22 @@ async def test_acp_prompt_snapshot_records_compaction_edge(monkeypatch, tmp_path
         request_ids = [
             call["extra_headers"]["X-ACP-Model-Request-ID"] for call in client.calls
         ]
+        if attempts == 1:
+            turn, rejected_tool = request_ids
+            assert response.stop_reason == "end_turn"
+            assert (
+                response.field_meta[SESSION_METADATA_KEY]["last_stop_reason"]
+                == "format_violation"
+            )
+            assert semantic_edges["edges"] == [
+                {
+                    "source_request_id": turn,
+                    "target_request_id": rejected_tool,
+                    "type": kind,
+                }
+                for kind in ("compaction_attempt", "format_violation")
+            ]
+            return
         turn, rejected_tool, rejected_empty, accepted, resumed = request_ids
         assert semantic_edges["edges"] == [
             {
@@ -1106,6 +1194,10 @@ async def test_acp_stdio_lifecycle(tmp_path):
     assert initialized.field_meta == {
         CONTRACT_METADATA_KEY: True,
         "steering": {"supported": True},
+        "ai.prime.rlm/execution-v1": {
+            "transports": ["stdio", "tcp"],
+            "tools": ["ipython", "bash", "edit", "fetch"],
+        },
     }
     assert created.field_meta is None
     assert closed.field_meta[SESSION_METADATA_KEY]["session_id"] == "wire-session"

@@ -11,6 +11,8 @@ import os
 
 import httpx
 
+from rlm.network import NetworkBlocklist, network_url_is_blocked
+
 SERPER_URL = "https://google.serper.dev/search"
 
 
@@ -31,7 +33,13 @@ def format_results(results, query: str) -> str:
     return "\n\n---\n\n".join(sections)
 
 
-def search(query: str, num_results: int = 5, *, api_key: str | None = None) -> str:
+def search(
+    query: str,
+    num_results: int = 5,
+    *,
+    api_key: str | None = None,
+    network_block: NetworkBlocklist = (),
+) -> str:
     """Run a synchronous Serper web search and return formatted results."""
     if api_key is None:
         api_key = os.environ.get("SERPER_API_KEY", "")
@@ -48,11 +56,15 @@ def search(query: str, num_results: int = 5, *, api_key: str | None = None) -> s
     except Exception:
         raise RuntimeError("web search is unavailable") from None
     organic = response.json().get("organic") or []
-    return format_results(organic[:num_results], query)
+    return _format_search_results(organic, query, num_results, network_block)
 
 
 async def run_with_api_key(
-    api_key: str | None, query: str, *, num_results: int = 5
+    api_key: str | None,
+    query: str,
+    *,
+    num_results: int = 5,
+    network_block: NetworkBlocklist = (),
 ) -> str:
     """Run a web search via Serper and return formatted results.
 
@@ -77,11 +89,31 @@ async def run_with_api_key(
         organic = response.json().get("organic") or []
     except Exception:
         raise RuntimeError("web search is unavailable") from None
-    return format_results(organic[:num_results], query)
+    return _format_search_results(organic, query, num_results, network_block)
 
 
-async def run(query: str, *, num_results: int = 5) -> str:
+async def run(
+    query: str, *, num_results: int = 5, network_block: NetworkBlocklist = ()
+) -> str:
     """Run search directly using ``SERPER_API_KEY`` from the current process."""
     return await run_with_api_key(
-        os.environ.get("SERPER_API_KEY"), query, num_results=num_results
+        os.environ.get("SERPER_API_KEY"),
+        query,
+        num_results=num_results,
+        network_block=network_block,
     )
+
+
+def _format_search_results(
+    organic: list[dict],
+    query: str,
+    num_results: int,
+    network_block: NetworkBlocklist,
+) -> str:
+    if network_block:
+        organic = [
+            result
+            for result in organic
+            if not network_url_is_blocked(network_block, result.get("link"))
+        ]
+    return format_results(organic[:num_results], query)

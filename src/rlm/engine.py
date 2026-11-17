@@ -23,20 +23,23 @@ from rlm.client import (
     extract_usage,
     make_client,
     model_call_headers,
+    stream_completion,
 )
 from rlm.provenance import agent_input, runtime_event
 from rlm.compaction import (
     CHECKPOINT_PROMPT,
-    RESERVE_TOKENS,
-    hollow_middle,
+    CUT_REPLY_NOTE,
     TOOL_OUTPUT_MAX_BYTES,
     CompactionFailed,
+    CompactionFormatViolation,
     REPL_NOTE,
     SUMMARY_FRAMING,
     compactable,
-    discover_threshold,
+    default_threshold,
+    discover_context_window,
     estimated_tokens,
     is_context_overflow,
+    trim_summary_input,
     truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
@@ -53,6 +56,7 @@ from rlm.tools import (
     IPythonREPL,
     ToolContext,
     ToolOutcome,
+    discover_skill_docs,
     discover_skills,
     get_active_builtin_tools,
     get_builtin_tool,
@@ -150,7 +154,7 @@ QUOTE_NESTING_HINT = (
     "That SyntaxError comes from program text nested inside a Python string literal. Pick a "
     'delimiter the text does not contain: r"""...""" for source with \'\'\' or backslashes, '
     "r'''...''' for source with \"\"\", or \"\\n\".join([...]) for both; for existing files use "
-    "the edit skill with short old_str/new_str hunks."
+    "the edit tool with short old_str/new_str hunks."
 )
 MULTILINE_COMMAND_HINT = (
     "That SyntaxError comes from a multi-line command inside a plain-quoted Python string. "
@@ -201,12 +205,14 @@ class RLMEngine:
         self.runtime_config = runtime_config
         config = self.runtime_config
         self.model = config.model
-        self.cwd = cwd or os.getcwd()
+        self.cwd = config.execution_cwd or cwd or os.getcwd()
         self.exec_timeout = config.policy.exec_timeout
         self.max_total_turns = config.policy.max_total_turns
         self.max_tool_output_bytes = config.policy.max_tool_output_bytes
         self.compaction = config.policy.compaction
         self.summarize_at_tokens = config.policy.summarize_at_tokens
+        self.summary_budget_tokens = config.policy.summary_budget_tokens
+        self.context_window: int | None = None
         self.max_compactions = config.policy.max_compactions
         self.max_compaction_attempts = config.policy.max_compaction_attempts
         self.system_prompt_path = config.system_prompt_path
@@ -216,6 +222,7 @@ class RLMEngine:
         self.allow_git = config.policy.allow_git
         self._context_file: ContextFile | None = None
         self._pinned_requests: list[dict] = []
+        self.network_guidance = config.policy.network_guidance
 
         # Task MCP tool servers to expose as IPython skills.
         self.mcp_servers = validate_mcp_servers(mcp_servers or {})
@@ -524,11 +531,19 @@ class RLMEngine:
         self._active_tools = get_active_builtin_tools(
             self.exec_timeout, self.builtin_tools
         )
+        if self.runtime_config.split_execution:
+            from rlm.execution import validate_tools
+
+            validate_tools(tool.name for tool in self._active_tools)
         self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
 
         clm = self.runtime_config.policy.context_mode == "clm"
-        if (self.compaction or clm) and self.summarize_at_tokens is None:
-            self.summarize_at_tokens = await discover_threshold(self.client, self.model)
+        if self.compaction or clm:
+            self.context_window = await discover_context_window(self.client, self.model)
+            if self.summarize_at_tokens is None and self.context_window is not None:
+                self.summarize_at_tokens = default_threshold(
+                    self.context_window, self.summary_budget_tokens
+                )
 
         self._ensure_session()
         if clm:
@@ -586,7 +601,17 @@ class RLMEngine:
                     self._owns_supervisor = False
                 raise
 
-        self._repl = IPythonREPL(
+        repl_type = IPythonREPL
+        repl_options = {}
+        if self.runtime_config.split_execution:
+            from rlm.execution import RemoteREPL
+
+            repl_type = RemoteREPL
+            repl_options["command"] = self.runtime_config.execution_command
+            repl_options["tcp"] = self.runtime_config.execution_tcp
+            repl_options["tools"] = [tool.name for tool in self._active_tools]
+        self._repl = repl_type(
+            **repl_options,
             cwd=self.cwd,
             session=self.session,
             kernel_env=self.kernel_env,
@@ -597,7 +622,7 @@ class RLMEngine:
             allow_git=self.allow_git,
         )
         try:
-            startup = asyncio.create_task(asyncio.to_thread(self._repl.start))
+            startup = asyncio.create_task(self._repl.run_in_thread(self._repl.start))
             cancelled = False
             while True:
                 try:
@@ -609,6 +634,14 @@ class RLMEngine:
                     cancelled = True
             if cancelled:
                 raise asyncio.CancelledError
+            if (
+                self.runtime_config.split_execution
+                and self.depth == 0
+                and self._supervisor is not None
+            ):
+                # The root's worker lives for the session, so the session's jobs and
+                # services run through it, wherever an agent started them.
+                self._supervisor.attach_host(self._repl.host_call)
 
             system_prompt = self._load_system_prompt(self._active_tools)
 
@@ -795,10 +828,14 @@ class RLMEngine:
             self._turn = turn + 1
             try:
                 response, usage = await self._complete(messages, turn)
-            except CompactionFailed:
+            except CompactionFailed as error:
                 # The context is exhausted and could not be summarized: end the run
                 # cleanly with what the conversation holds - still a trainable sample.
-                self._metrics.stop_reason = "compaction_failed"
+                self._metrics.stop_reason = (
+                    "format_violation"
+                    if isinstance(error, CompactionFormatViolation)
+                    else "compaction_failed"
+                )
                 final_text = "[context exhausted: compaction failed]"
                 break
             call_id = self._last_call_id
@@ -810,6 +847,38 @@ class RLMEngine:
             msg = response.choices[0].message
             msg_dict = msg.model_dump(exclude_none=True)
             msg_dict.setdefault("content", "")
+
+            if (
+                self._ran_into_window(response.choices[0].finish_reason, usage)
+                and self._can_compact()
+                and self._spent_tree_cap() is None
+                and not (
+                    self.max_tokens
+                    and self._total_usage.completion_tokens >= self.max_tokens
+                )
+            ):
+                # The reply stays in the conversation, minus any tool call it was cut
+                # off in, and the summary carries it into the next window.
+                msg_dict.pop("tool_calls", None)
+                step_start = self.session.message_count
+                self.session.log_assistant(turn, None, msg_dict)
+                self._publish_agent_step(step_start)
+                try:
+                    await self._compact_branch(
+                        self.session.messages,
+                        turn,
+                        context_tokens=usage.total,
+                        cut_reply=True,
+                    )
+                except CompactionFailed as error:
+                    self._metrics.stop_reason = (
+                        "format_violation"
+                        if isinstance(error, CompactionFormatViolation)
+                        else "compaction_failed"
+                    )
+                    final_text = "[context exhausted: compaction failed]"
+                    break
+                continue
 
             # Log assistant message; parse tool-call args once, reuse below.
             tool_calls_log: list[dict] | None = None
@@ -961,11 +1030,15 @@ class RLMEngine:
                 try:
                     if scope_id is not None:
                         repl.set_broker_scope(scope_id)
-                    tool_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            tool.execute, tool_args, self._tool_context(messages)
+                    run = repl.run_in_thread if repl is not None else asyncio.to_thread
+                    if self.runtime_config.split_execution:
+                        tool_task = asyncio.create_task(
+                            run(repl.execute_tool, tool.name, tool_args)
                         )
-                    )
+                    else:
+                        tool_task = asyncio.create_task(
+                            run(tool.execute, tool_args, self._tool_context(messages))
+                        )
                     try:
                         tool_result = await asyncio.shield(tool_task)
                     except asyncio.CancelledError:
@@ -1013,7 +1086,9 @@ class RLMEngine:
             result = tool_result.content
 
             content = truncate_tool_output(
-                result, self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES
+                result,
+                self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES,
+                tool_result.omitted,
             )
             if mirrored is not None:
                 context_notes = self._sync_context_file(mirrored, content)
@@ -1038,9 +1113,17 @@ class RLMEngine:
                 messages = self.session.messages
             if self._should_compact(messages, usage, content):
                 try:
-                    await self._compact_branch(messages, turn)
-                except CompactionFailed:
-                    self._metrics.stop_reason = "compaction_failed"
+                    await self._compact_branch(
+                        messages,
+                        turn,
+                        context_tokens=usage.total + estimated_tokens(content),
+                    )
+                except CompactionFailed as error:
+                    self._metrics.stop_reason = (
+                        "format_violation"
+                        if isinstance(error, CompactionFormatViolation)
+                        else "compaction_failed"
+                    )
                     final_text = "[context exhausted: compaction failed]"
                     break
 
@@ -1194,6 +1277,20 @@ class RLMEngine:
         tokens = usage.total + estimated_tokens(extra_text)
         return tokens >= self.summarize_at_tokens
 
+    def _ran_into_window(self, finish_reason: str | None, usage: TokenUsage) -> bool:
+        """A reply cut off by the advertised context window, not by a completion cap."""
+        return (
+            finish_reason == "length"
+            and self.context_window is not None
+            and usage.total >= self.context_window
+        )
+
+    async def _model_attempt(self, **request: Any) -> Any:
+        if self._supervisor is None:
+            return await stream_completion(self.client, **request)
+        async with self._supervisor.inference_slot(self._invocation_id):
+            return await stream_completion(self.client, **request)
+
     async def _call_model(
         self,
         messages: list[dict],
@@ -1207,7 +1304,7 @@ class RLMEngine:
         request: dict = {
             "model": self.model,
             "messages": messages,
-            "extra_headers": model_call_headers(request_id),
+            "extra_headers": model_call_headers(request_id, self._invocation_id),
         }
         if self._active_tool_schemas:
             request["tools"] = self._active_tool_schemas
@@ -1217,9 +1314,7 @@ class RLMEngine:
                 request["parallel_tool_calls"] = False
 
         try:
-            response = await call_with_retries(
-                self.client.chat.completions.create, **request
-            )
+            response = await call_with_retries(self._model_attempt, **request)
         except BaseException:
             self._semantic_edges.fail_request(request_id)
             raise
@@ -1246,13 +1341,13 @@ class RLMEngine:
     async def _complete(
         self, messages: list[dict], turn: int
     ) -> tuple[Any, TokenUsage]:
-        """Complete one turn, with at most one compact-and-retry cycle."""
+        """Complete one turn; a prompt the provider rejects as too long is compacted
+        and retried once."""
         try:
             response, usage = await self._call_model(messages)
         except APIStatusError as error:
             # Reactive compaction needs no discovered threshold: the overflow
-            # itself is the signal. The checkpoint fallback chain handles a
-            # summary request that is itself too large.
+            # itself is the signal.
             if not self._can_compact() or not is_context_overflow(error):
                 raise
             if not compactable(messages):
@@ -1264,27 +1359,20 @@ class RLMEngine:
                     ) from error
                 raise
         else:
-            choice = response.choices[0]
             if (
                 self.summarize_at_tokens is not None
                 and usage.total < self.summarize_at_tokens
             ):
-                # Usage-verified: this exact prompt was accepted with a full
-                # reserve of room, so it is a safe checkpoint fallback.
+                # Usage-verified: this exact prompt was accepted below the threshold,
+                # so a checkpoint over it fits.
                 self._last_good = len(messages)
-            if choice.finish_reason != "length" or not self._should_compact(
-                messages, usage
-            ):
-                return response, usage
-            self.session.log(
-                {
-                    "type": "discarded_assistant",
-                    "request_id": self._last_call_id,
-                    "message": choice.message.model_dump(exclude_none=True),
-                }
-            )
+            return response, usage
 
-        await self._compact_branch(messages, turn)
+        # The rejected prompt is longer than the window, however the estimate reads.
+        context_tokens = estimated_tokens(len(json.dumps(messages, ensure_ascii=False)))
+        if self.context_window is not None:
+            context_tokens = max(context_tokens, self.context_window + 1)
+        await self._compact_branch(messages, turn, context_tokens=context_tokens)
         try:
             return await self._call_model(self.session.messages)
         except APIStatusError as error:
@@ -1303,11 +1391,14 @@ class RLMEngine:
         prompt_tokens: int | None,
         remove_tokens: int,
     ) -> tuple[list[dict], list[dict] | None]:
-        """Hollow the summary input further. When hollowing cannot shrink it, try the last
+        """Trim the summary input further. When trimming cannot shrink it, try the last
         good snapshot once (it fit the window when it was live, whatever its message count);
         fail rather than resend an input unchanged."""
-        shorter = hollow_middle(
-            base, prompt_tokens=prompt_tokens, remove_tokens=remove_tokens
+        shorter = trim_summary_input(
+            base,
+            context_tokens=prompt_tokens
+            or estimated_tokens(len(json.dumps(base, ensure_ascii=False))),
+            remove_tokens=remove_tokens,
         )
         if shorter != base:
             return shorter, snapshot
@@ -1318,10 +1409,43 @@ class RLMEngine:
             "exceeds the model's window"
         )
 
+    @property
+    def _summary_budget(self) -> int:
+        """Leave at least half a known window for the summary's input."""
+        if self.context_window is None:
+            return self.summary_budget_tokens
+        return min(self.summary_budget_tokens, max(1, self.context_window // 2))
+
+    def _fit_summary_input(
+        self, messages: list[dict], checkpoint_prompt: str, context_tokens: int | None
+    ) -> list[dict]:
+        """Trim a summary request until the summary has its budget of the advertised
+        context window. `context_tokens` measures `messages` as a prompt."""
+        if self.context_window is None:
+            return messages
+        if context_tokens is None:
+            context_tokens = estimated_tokens(
+                len(json.dumps(messages, ensure_ascii=False))
+            )
+        excess = (
+            context_tokens
+            + estimated_tokens(checkpoint_prompt)
+            + self._summary_budget
+            - self.context_window
+        )
+        if excess <= 0:
+            return messages
+        return trim_summary_input(
+            messages, context_tokens=context_tokens, remove_tokens=excess
+        )
+
     async def _compact_branch(
         self,
         messages: list[dict],
         turn: int,
+        *,
+        context_tokens: int | None = None,
+        cut_reply: bool = False,
     ) -> None:
         """Ask the model for a handoff summary and replace the session context.
 
@@ -1332,6 +1456,11 @@ class RLMEngine:
         toward token budgets. Every committed attempt remains represented in the
         semantic graph.
 
+        The summary request is trimmed up front so the summary keeps
+        ``summary_budget_tokens`` of the context window; ``context_tokens`` measures
+        ``messages`` as a prompt. ``cut_reply`` marks a conversation whose last reply ran
+        into the window, which the summary is asked to pick up from.
+
         Forwarding active tool schemas preserves vLLM's system-message tool block
         and prime-rl's trajectory extension property across compaction.
         ``tool_choice="none"`` forbids tool calls in the summary response.
@@ -1340,6 +1469,8 @@ class RLMEngine:
         turns_since_last = turn + 1 - self._branch_start_turn
 
         checkpoint_prompt = CHECKPOINT_PROMPT
+        if cut_reply:
+            checkpoint_prompt += CUT_REPLY_NOTE
         if self._repl is not None:
             checkpoint_prompt += REPL_NOTE
         if self._prompt_kernel_notices:
@@ -1351,8 +1482,11 @@ class RLMEngine:
         try:
             # Only the summary request is shortened; the live context and ledger
             # remain intact until a complete summary succeeds.
-            base = messages
-            snapshot: list[dict] | None = messages[: self._last_good]
+            base = self._fit_summary_input(messages, checkpoint_prompt, context_tokens)
+            # A cut reply must survive every attempt, including overflow recovery.
+            snapshot: list[dict] | None = (
+                None if cut_reply else messages[: self._last_good]
+            )
             summary_text = ""
             for attempt in range(self.max_compaction_attempts):
                 last_attempt = attempt + 1 == self.max_compaction_attempts
@@ -1374,7 +1508,7 @@ class RLMEngine:
                             base,
                             snapshot,
                             prompt_tokens=None,
-                            remove_tokens=RESERVE_TOKENS,
+                            remove_tokens=self._summary_budget,
                         )
                     continue
                 choice = response.choices[0]
@@ -1386,25 +1520,37 @@ class RLMEngine:
                 if choice.finish_reason == "stop" and not message.tool_calls and text:
                     summary_text = text
                     break
+                if last_attempt:
+                    raise CompactionFormatViolation(
+                        f"no usable summary after {self.max_compaction_attempts} attempts"
+                    )
                 self._semantic_edges.release_summary_request(compaction.compaction_id)
-                if (
-                    not last_attempt
+                if self._ran_into_window(choice.finish_reason, usage):
+                    # The summary needed more room than it had: give it another budget.
+                    base, snapshot = self._shorter_summary_input(
+                        base,
+                        snapshot,
+                        prompt_tokens=usage.prompt_tokens,
+                        remove_tokens=max(
+                            usage.prompt_tokens
+                            + 2 * self._summary_budget
+                            - self.context_window,
+                            1024,
+                        ),
+                    )
+                elif (
+                    self.context_window is None
                     and choice.finish_reason == "length"
                     and (
                         self.summarize_at_tokens is None
                         or usage.prompt_tokens >= self.summarize_at_tokens
                     )
                 ):
-                    excess = (
-                        max(0, usage.prompt_tokens - self.summarize_at_tokens)
-                        if self.summarize_at_tokens is not None
-                        else RESERVE_TOKENS
-                    )
                     base, snapshot = self._shorter_summary_input(
                         base,
                         snapshot,
                         prompt_tokens=usage.prompt_tokens,
-                        remove_tokens=excess + 1024,
+                        remove_tokens=self._summary_budget,
                     )
             if not summary_text:
                 raise CompactionFailed(
@@ -1413,7 +1559,11 @@ class RLMEngine:
         except BaseException as exc:
             self._semantic_edges.finish_compaction(
                 compaction.compaction_id,
-                "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
+                "cancelled"
+                if isinstance(exc, asyncio.CancelledError)
+                else "format_violation"
+                if isinstance(exc, CompactionFormatViolation)
+                else "failed",
             )
             raise
 
@@ -1424,7 +1574,7 @@ class RLMEngine:
             + "\n\n"
             + summary_text
             + "\n\nFull conversation history is available in "
-            + str(self.session.dir / "messages.jsonl")
+            + str(Path(self._kernel_session_dir()) / "messages.jsonl")
             + ". Use `from rlm import history; h = await history()` to inspect "
             "`h.windows[w].messages[i]`, `h.messages[i]`, or `h.user_messages()`. "
             "Search or read relevant records with Python when the summary lacks context. The log includes failed attempts: prompt_rollback.prompt_id "
@@ -1514,26 +1664,37 @@ class RLMEngine:
                 "max_tokens": self.runtime_config.policy.max_tokens,
                 "compaction": self.compaction,
                 "summarize_at_tokens": self.summarize_at_tokens,
+                "summary_budget_tokens": self.summary_budget_tokens,
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "max_compaction_attempts": self.max_compaction_attempts,
                 "allow_git": self.runtime_config.policy.allow_git,
+                "network_guidance": self.runtime_config.policy.network_guidance,
             },
             "semantic_edges": self._semantic_edges.snapshot(),
         }
         return snapshot
 
+    def _kernel_session_dir(self) -> str:
+        """The session directory as the kernel sees it: in split execution, the
+        worker's, since the harness's own is on another machine."""
+        return getattr(self._repl, "session_dir", None) or str(self.session.dir)
+
     def _load_system_prompt(self, active_tools: list[BuiltinTool]) -> str:
         return build_system_prompt(
             self.cwd,
-            str(SKILLS_DIR) if SKILLS_DIR is not None else None,
             discover_skills(self.session.dir),
             depth=self.depth,
-            session_dir=str(self.session.dir),
+            session_dir=self._kernel_session_dir(),
             allow_recursion=self.depth < self.max_depth,
             delegation_prompt=self.runtime_config.policy.delegation_prompt,
             allow_git=self.allow_git,
+            network_guidance=self.network_guidance,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),
+            skill_docs=discover_skill_docs(SKILLS_DIR) if SKILLS_DIR else [],
+            mcp_servers=self._supervisor.mcp_server_summaries()
+            if self._supervisor
+            else None,
             task_instructions=Path(self.system_prompt_path).read_text()
             if self.system_prompt_path
             else None,
@@ -1558,6 +1719,7 @@ class RLMEngine:
         return edit.note + context_file.readout(tokens)
 
     def _tool_context(self, messages: list[dict]) -> ToolContext:
+        repl = self._repl if isinstance(self._repl, IPythonREPL) else None
         return ToolContext(
             messages=messages,
             metrics=self._metrics,
@@ -1568,6 +1730,8 @@ class RLMEngine:
             repl=self._repl,
             state=self._tool_state,
             cwd=self.cwd,
+            # A shell command stops with a cancelled turn.
+            interrupt_event=repl._interrupt_requested if repl else None,
         )
 
 

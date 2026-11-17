@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import subprocess
 
 import pytest
@@ -50,6 +52,40 @@ async def test_result_yields_before_cell_deadline(session):
         assert not any("execution timed out" in text for text in outputs)
     finally:
         await engine.aclose()
+
+
+async def test_service_outlives_the_session(session, tmp_path, monkeypatch):
+    services = tmp_path / "services"
+    monkeypatch.setenv("RLM_SERVICES_DIR", str(services))
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": "import asyncio; svc = await rlm.services.start('sleeper', 'echo up; exec sleep 60'); "
+                            "await asyncio.sleep(0.5); print('TAIL', await svc.tail(5)); "
+                            "assert (await rlm.services.get('sleeper')).running"
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(client=client, session=session, runtime_config=_config())
+    try:
+        await engine.prompt("Start a service")
+        outputs = [m["content"] for m in session.messages if m["role"] == "tool"]
+        assert any("TAIL up" in text for text in outputs), outputs
+    finally:
+        await engine.aclose()
+    pid = json.loads((services / "sleeper.json").read_text())["pid"]
+    try:
+        os.kill(pid, 0)  # still running after the session and its jobs are gone
+    finally:
+        os.killpg(pid, signal.SIGKILL)
 
 
 async def test_bash_capture_limits_failure_and_cleanup(tmp_path, monkeypatch):

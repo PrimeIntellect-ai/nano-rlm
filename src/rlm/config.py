@@ -10,8 +10,8 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from typing_extensions import Self
 
+from rlm.network import NetworkBlocklist
 from rlm.semantic import ACP_EXTENSION_HEADER_NAMES
 
 
@@ -79,9 +79,13 @@ class ExecutionPolicy(_ConfigModel):
     provider context-overflow errors by checkpointing). On by default; set False to
     let an overflowing session fail instead."""
     summarize_at_tokens: int | None = Field(default=None, gt=0)
-    """Compaction threshold. None = auto-discover from the provider's advertised
-    context window (~16k tokens of headroom); when the provider advertises no
-    window, compaction stays overflow-reactive only."""
+    """Compaction threshold. None = derive it from the provider's advertised context
+    window (the summary budget plus 8k tokens of headroom); when the provider
+    advertises no window, compaction stays overflow-reactive only."""
+    summary_budget_tokens: int = Field(default=24_576, gt=0)
+    """Room a summary reply gets, reasoning included. A summary request that would
+    leave less of the advertised context window is trimmed first. Capped at half
+    a known context window to leave room for the retained input."""
     max_compactions: int | None = Field(default=None, gt=0)
     """Compactions per session before the engine stops compacting. None (default) =
     unlimited: every compaction cycle itself spends new tokens, so ``max_total_tokens``
@@ -89,6 +93,9 @@ class ExecutionPolicy(_ConfigModel):
     max_compaction_attempts: int = Field(default=5, gt=0)
     """Summary-generation attempts within one compaction cycle."""
     max_concurrent_subagents: int = Field(default=4, gt=0)
+    """Concurrent inference calls across the tree, including root and compaction calls.
+    Queued calls prioritize shallower agents, FIFO within each depth. Tools run freely.
+    """
     max_subagent_calls: int | None = Field(default=None, gt=0)
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
@@ -100,11 +107,18 @@ class ExecutionPolicy(_ConfigModel):
     back the newest turns and demands a compaction (up to 50 times), then grants one
     final turn; summary compaction only answers provider context-overflow errors."""
 
-    @model_validator(mode="after")
-    def _validate_concurrency(self) -> Self:
-        if self.max_concurrent_subagents < self.max_depth:
-            raise ValueError("max_concurrent_subagents must be at least max_depth")
-        return self
+    network_guidance: bool = True
+    """Include prompt guidance that assumes outbound network access (installing extra
+    kernel packages, the online-solutions clause of the Git guard). Disable it for
+    boxes with no network."""
+
+
+class TcpExecutionConfig(_ConfigModel):
+    """Authenticated worker endpoint on a trusted private network."""
+
+    host: str = Field(min_length=1)
+    port: int = Field(gt=0, le=65535)
+    token: str = Field(min_length=32, repr=False)
 
 
 class RuntimeConfig(_ConfigModel):
@@ -123,7 +137,28 @@ class RuntimeConfig(_ConfigModel):
     """Builtin tool set for every engine in the tree; None = the registry default
     (`ipython` alone). Validated against the registry when the engine starts."""
     kernel_env: tuple[tuple[str, str], ...] = Field(default=(), repr=False)
+    execution_cwd: str | None = None
+    execution_command: tuple[str, ...] | None = None
+    """Trusted argv launching an rlm.execution worker in the task environment."""
+    execution_tcp: TcpExecutionConfig | None = None
     search_api_key: str | None = Field(default=None, repr=False)
+    network_block: NetworkBlocklist = ()
+    """Search-result destination rules shared by every agent in the session tree."""
+
+    @model_validator(mode="after")
+    def _validate_execution(self):
+        if self.execution_command is not None:
+            if not self.execution_command or any(
+                not arg for arg in self.execution_command
+            ):
+                raise ValueError("execution_command must contain nonempty arguments")
+            if self.execution_tcp is not None:
+                raise ValueError("choose execution_command or execution_tcp")
+        return self
+
+    @property
+    def split_execution(self) -> bool:
+        return self.execution_command is not None or self.execution_tcp is not None
 
     @property
     def resolved_append_to_system_prompt(self) -> str | None:
