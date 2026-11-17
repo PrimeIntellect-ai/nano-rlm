@@ -6,6 +6,10 @@
 - **Targeted comments**: don't explain your work process or reference old code. Use comments sparingly to clarify ambiguous logic or non-obvious constraints.
 - **No "this replaced that" comments**: never write comments or docstrings that reference code that used to exist. That context belongs in the PR, not in the file. Describe what the code does now, not what it isn't anymore.
 
+## Docs
+
+- **Keep docs current**: user-facing behavior is documented in `docs/` (indexed from the README). A change to that behavior updates the page that describes it in the same PR.
+
 ## Running code
 
 - **Always use uv**: run code with `uv run`, never raw `python`.

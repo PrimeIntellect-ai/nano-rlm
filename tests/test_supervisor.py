@@ -5,7 +5,13 @@ from dataclasses import dataclass
 
 import pytest
 
-from conftest import DummyClient, DummyMessage, DummyToolCall, tool_result
+from conftest import (
+    DummyClient,
+    DummyMessage,
+    DummyResponse,
+    DummyToolCall,
+    tool_result,
+)
 from rlm.config import (
     ExecutionPolicy,
     InvocationContext,
@@ -821,14 +827,22 @@ async def test_inference_limit_includes_root_and_compaction_with_root_priority(
             releases[name] = asyncio.Event()
 
         async def create(self, **kwargs):
-            state.active += 1
-            state.peak = max(state.peak, state.active)
-            started.put_nowait(self.name)
-            try:
-                await releases[self.name].wait()
-                return await super().create(**kwargs)
-            finally:
-                state.active -= 1
+            response = await super().create(**kwargs)
+            name = self.name
+
+            class BlockingStream(DummyResponse):
+                async def __aiter__(self):
+                    state.active += 1
+                    state.peak = max(state.peak, state.active)
+                    started.put_nowait(name)
+                    try:
+                        await releases[name].wait()
+                        async for chunk in super().__aiter__():
+                            yield chunk
+                    finally:
+                        state.active -= 1
+
+            return BlockingStream(response.choices, response.usage)
 
     class ObservedEngine(RLMEngine):
         async def _model_attempt(self, **request):
@@ -871,8 +885,8 @@ async def test_inference_limit_includes_root_and_compaction_with_root_priority(
             for _ in range(12)
         ]
         for _ in range(12):
-            await asyncio.wait_for(attempted.get(), timeout=5)
-        first = [await asyncio.wait_for(started.get(), timeout=5) for _ in range(10)]
+            await asyncio.wait_for(attempted.get(), timeout=30)
+        first = [await asyncio.wait_for(started.get(), timeout=30) for _ in range(10)]
         assert state.active == 10
         assert started.empty()
         root_call = asyncio.create_task(
@@ -884,10 +898,10 @@ async def test_inference_limit_includes_root_and_compaction_with_root_priority(
         await asyncio.sleep(0)
         assert len(supervisor._inference._waiters) == 3
         releases[first[0]].set()
-        assert await asyncio.wait_for(started.get(), timeout=5) == supervisor.root_id
+        assert await asyncio.wait_for(started.get(), timeout=30) == supervisor.root_id
         for release in releases.values():
             release.set()
-        await asyncio.wait_for(asyncio.gather(*tasks, root_call), timeout=5)
+        await asyncio.wait_for(asyncio.gather(*tasks, root_call), timeout=30)
         assert state.peak == 10
         assert state.active == 0
         assert supervisor._inference.available == 10

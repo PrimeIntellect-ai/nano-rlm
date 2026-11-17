@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import functools
 import os
 from queue import Empty
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
+from rlm.tools.output import OutputCapture
 from rlm.tools.skills import discover_skills
 from rlm.types import IpythonExecuted
 
@@ -39,7 +42,9 @@ IPYTHON_SCHEMA = {
             "as described in the runtime guide. Use await rlm.shell.run(command, yield_after=10) for Bash: "
             "it waits up to yield_after seconds (0 returns at once, max 300) and returns a ShellJob "
             "with .text, .exit_code and .running; await job.result() collects a job that is still "
-            "running. Commands support multiline Bash and survive kernel restart. "
+            "running. Commands support multiline Bash and survive kernel restart; their processes "
+            "stop when the job ends or when you finish. Use await rlm.services.start(name, command) "
+            "for a server or daemon that must keep running after you finish. "
             "Variables persist across cells and compaction, but are lost on kernel restart. "
             "Read recovery notices and reconstruct state before retrying interrupted work."
         ),
@@ -235,8 +240,10 @@ class IpythonTool:
                 metric_events=metric_events,
             )
 
+        content = context.repl.execute(code, timeout=timeout)
         return ToolOutcome(
-            content=context.repl.execute(code, timeout=timeout),
+            content=content,
+            omitted=getattr(context.repl, "omitted", None),
             metric_events=metric_events,
         )
 
@@ -254,7 +261,29 @@ class _KernelDied(RuntimeError):
 MAX_RECOVERY_ATTEMPTS = 3
 
 
+def kill_session(session: int) -> None:
+    """SIGKILL the process group of every process in `session`, read from /proc; a no-op
+    where there is none. Reparented processes stay in their session, so this also
+    reaches the commands of a dead kernel, while a daemon, in a session of its own, is
+    left running. The caller's own group is spared."""
+    try:
+        entries = [entry for entry in os.listdir("/proc") if entry.isdigit()]
+    except FileNotFoundError:
+        return
+    groups = set()
+    for entry in entries:
+        with contextlib.suppress(OSError):
+            if os.getsid(int(entry)) == session:
+                groups.add(os.getpgid(int(entry)))
+    groups -= {0, 1, os.getpgrp()}
+    for group in groups:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, signal.SIGKILL)
+
+
 class IPythonREPL:
+    _kernel_session: int | None = None
+
     """Persistent IPython kernel communicating via Jupyter protocol."""
 
     def __init__(
@@ -285,6 +314,9 @@ class IPythonREPL:
         self._recovery_attempts = 0
         self._recovery_failed = False
         self._cell_submitted = False
+        self.omitted = None
+        """How much more the last cell's whole output measured than what `execute`
+        returned, when that kept only its start and end."""
         self._recovery_notices: list[str] = []
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="rlm-repl"
@@ -335,6 +367,7 @@ class IPythonREPL:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        self._kernel_session = self._km.provisioner.pid
         self._kc = self._km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)
@@ -459,9 +492,13 @@ import rlm
             if reply["parent_header"].get("msg_id") != msg_id:
                 continue
             if reply["content"].get("status") != "ok":
-                raise RuntimeError(
-                    f"IPython setup failed: {reply['content'].get('ename', 'unknown error')}"
+                content = reply["content"]
+                detail = ": ".join(
+                    part
+                    for part in (content.get("ename"), content.get("evalue"))
+                    if part
                 )
+                raise RuntimeError(f"IPython setup failed: {detail or 'unknown error'}")
             return
         raise TimeoutError("IPython setup did not respond within 30 seconds")
 
@@ -516,11 +553,20 @@ import rlm
             ):
                 return True
 
+    def _kill_kernel_commands(self):
+        """Kill what the kernel started that is still attached to it, the way a closing
+        terminal does: everything in the kernel's session. The kernel leads a session
+        of its own, and a shell command leads a process group in it."""
+        if self._kernel_session:
+            kill_session(self._kernel_session)
+
     def restart_kernel(self):
         """Restart the kernel and restore the initial REPL state."""
         if self._kc:
             self._kc.stop_channels()
+        self._kill_kernel_commands()
         self._km.restart_kernel(now=True)
+        self._kernel_session = self._km.provisioner.pid
         self._kc = self._km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)
@@ -549,6 +595,7 @@ import rlm
         """Execute once; a lost kernel is recovered without replaying the cell."""
         with self._lock:
             self._cell_submitted = False
+            self.omitted = None
             try:
                 if self._interrupt_requested.is_set():
                     return ""
@@ -586,11 +633,12 @@ import rlm
         self._cell_submitted = True
         deadline = None if timeout is None else time.monotonic() + timeout
 
-        outputs: list[str] = []
+        capture = OutputCapture()
         try:
             while True:
                 if not self._km.is_alive():
-                    raise _KernelDied("".join(outputs))
+                    text, self.omitted = capture.result()
+                    raise _KernelDied(text)
                 if self._interrupt_requested.is_set():
                     self._interrupt_and_recover(msg_id)
                     break
@@ -600,7 +648,7 @@ import rlm
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         self._interrupt_and_recover(msg_id)
-                        outputs.append(
+                        capture.add(
                             f"\n[execution timed out after {timeout}s and was interrupted]"
                         )
                         break
@@ -616,18 +664,20 @@ import rlm
                 msg_type = msg["msg_type"]
                 content = msg["content"]
 
+                text = ""
                 if msg_type == "stream":
-                    outputs.append(content["text"])
+                    text = content["text"]
                 elif msg_type == "execute_result":
                     text = content.get("data", {}).get("text/plain", "")
                     if text:
-                        outputs.append(text + "\n")
+                        text += "\n"
                 elif msg_type == "error":
                     tb = "\n".join(content.get("traceback", []))
                     tb = _ANSI_RE.sub("", tb)
-                    outputs.append(tb)
+                    text = tb
                 elif msg_type == "status" and content["execution_state"] == "idle":
                     break
+                capture.add(text)
         finally:
             try:
                 timeout = 0.1 if self._interrupt_requested.is_set() else 5
@@ -636,13 +686,15 @@ import rlm
             except Exception:
                 pass
 
-        return "".join(outputs)
+        text, self.omitted = capture.result()
+        return text
 
     def shutdown(self):
         """Stop the kernel."""
         if self._kc:
             self._kc.stop_channels()
             self._kc = None
+        self._kill_kernel_commands()
         if self._km and self._km.has_kernel:
             self._km.shutdown_kernel(now=True)
         if self._km:
