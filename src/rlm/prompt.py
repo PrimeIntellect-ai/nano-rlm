@@ -394,6 +394,7 @@ def build_system_prompt(
     task_instructions: str | None = None,
     extra_instructions: str | None = None,
     agent_info: dict | None = None,
+    context_prompt: str | None = None,
     mcp_servers: list[dict] | None = None,
 ) -> str:
     """Compose task instructions with the guide for this agent's actual runtime."""
@@ -508,6 +509,8 @@ def build_system_prompt(
             if network_guidance
             else OFFLINE_GIT_HISTORY_GUARD_PROMPT
         )
+    if context_prompt:
+        parts.append(context_prompt)
     return "\n\n".join(parts)
 
 
