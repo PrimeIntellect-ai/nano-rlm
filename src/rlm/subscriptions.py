@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -31,6 +31,36 @@ class Subscription:
     thresholds: dict = field(default_factory=dict)
 
 
+PathChanges = AsyncIterator[tuple[set[str], bool]]
+"""Changes under a watched path: the changed paths and whether the path still exists."""
+
+
+async def watch_path(target: Path, recursive: bool) -> tuple[Path, PathChanges]:
+    """Watch `target` on this machine; returns the resolved path and its changes."""
+    target = target.resolve()
+    if not target.exists():
+        raise FileNotFoundError(target)
+    return target, _changes(target, recursive)
+
+
+async def _changes(target: Path, recursive: bool) -> PathChanges:
+    is_file = target.is_file()
+    async for changes in awatch(
+        target.parent if is_file else target,
+        recursive=recursive if not is_file else False,
+        watch_filter=None,
+        debounce=1,
+        step=1,
+        rust_timeout=100,
+        yield_on_timeout=True,
+        ignore_permission_denied=False,
+    ):
+        yield (
+            {name for _, name in changes if not is_file or name == str(target)},
+            target.exists(),
+        )
+
+
 class Subscriptions:
     def __init__(
         self,
@@ -40,6 +70,10 @@ class Subscriptions:
         self.items: dict[str, Subscription] = {}
         self.publish = publish
         self.record = record
+        self.watch: Callable[[Path, bool], Awaitable[tuple[Path, PathChanges]]] = (
+            watch_path
+        )
+        """Where path watches run: this machine, or the execution workspace."""
 
     def register(
         self,
@@ -115,10 +149,13 @@ class Subscriptions:
                 self._fail(sub, str(exc))
 
     async def path(self, owner_id: str, target: Path, recursive: bool) -> Subscription:
-        if not target.exists():
-            raise FileNotFoundError(target)
-        sub = self.register(owner_id, "path", str(target), recursive=recursive)
-        sub.task = asyncio.create_task(self._watch_path(sub, target))
+        target, changes = await self.watch(target, recursive)
+        try:
+            sub = self.register(owner_id, "path", str(target), recursive=recursive)
+        except BaseException:
+            await changes.aclose()
+            raise
+        sub.task = asyncio.create_task(self._watch_path(sub, changes))
         try:
             await sub.ready.wait()
         except BaseException:
@@ -193,26 +230,12 @@ class Subscriptions:
         self.record(sub)
         self.publish(sub, "watch.failed", {"error": error})
 
-    async def _watch_path(self, sub: Subscription, target: Path) -> None:
-        is_file = target.is_file()
-        watched = target.parent if is_file else target
+    async def _watch_path(self, sub: Subscription, changes: PathChanges) -> None:
         try:
-            async for changes in awatch(
-                watched,
-                recursive=sub.info.recursive if not is_file else False,
-                watch_filter=None,
-                debounce=1,
-                step=1,
-                rust_timeout=100,
-                yield_on_timeout=True,
-                ignore_permission_denied=False,
-            ):
+            async for paths, exists in changes:
                 sub.ready.set()
                 if sub.info.status != "active":
                     return
-                paths = {
-                    name for _, name in changes if not is_file or name == str(target)
-                }
                 if paths:
                     pending = sub.pending or {"paths": set(), "truncated": False}
                     for name in sorted(paths):
@@ -225,7 +248,7 @@ class Subscriptions:
                             pending["truncated"] = True
                     sub.pending = pending
                     self._schedule(sub)
-                if not target.exists():
+                if not exists:
                     self._flush(sub)
                     if sub.info.status == "active":
                         self._fail(
@@ -239,6 +262,7 @@ class Subscriptions:
             self._fail(sub, str(exc))
         finally:
             sub.ready.set()
+            await changes.aclose()
 
     async def cancel(self, sub: Subscription) -> dict:
         if sub.info.status == "active":
