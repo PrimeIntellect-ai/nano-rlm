@@ -27,3 +27,11 @@ async def get(name: str):
     """Load an async callable returning str. Inspect .schema or help() before use."""
     descriptor = await broker.agent_request("tools.get", name=name)
     return broker.make_skill(descriptor)
+
+
+async def load(server: str) -> dict[str, Any]:
+    """Every tool of `server` as an async callable returning str, by its name."""
+    descriptors = await broker.agent_request("tools.load", server=server)
+    return {
+        descriptor["name"]: broker.make_skill(descriptor) for descriptor in descriptors
+    }

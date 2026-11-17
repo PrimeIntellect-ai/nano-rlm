@@ -105,6 +105,8 @@ result = await tool(day="monday", title="standup")     # returns text
 data = json.loads(result)                              # when the tool returns JSON
 ```
 
+`await rlm.tools.load(server)` returns every tool of a server by name, as `get` gives one; a client whose agents call a small catalog by name can list the server in the policy's `mcp_preload` instead, and its tools are kernel globals from the start ([Runtime contract](runtime-contract.md#policy)).
+
 `search` returns up to 20 `matches` per page (ID, server and description) and a `next_cursor`, which continues the same query and server filter; `None` means there are no more. Search is keyword matching, so try other words when nothing fits. Tool names are not listed in the prompt, which shows the discovery guide only when IPython is active and at least one tool was found.
 
 Each call connects with the configured transport, runs the tool and returns its text; a tool-reported error raises `RuntimeError`. Discovery and calls run in the supervisor through the capability broker: the kernel receives only a tool's name, description, public schema and an opaque capability, never server URLs, headers, commands or environment. A catalog is limited to 64 MiB of metadata, 1 MiB per tool and 4,096 pages per server.

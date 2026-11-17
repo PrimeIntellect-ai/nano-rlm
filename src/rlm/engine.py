@@ -219,6 +219,8 @@ class RLMEngine:
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
+        self.mcp_preload = config.policy.mcp_preload
+        self._preloaded_restarts = 0
         self.network_guidance = config.policy.network_guidance
 
         # Task MCP tool servers to expose as IPython skills.
@@ -634,6 +636,7 @@ class RLMEngine:
                 # The root's worker lives for the session, so the session's jobs and
                 # services run through it, wherever an agent started them.
                 self._supervisor.attach_host(self._repl.host_call)
+            await self._preload_mcp()
 
             system_prompt = self._load_system_prompt(self._active_tools)
 
@@ -1063,6 +1066,13 @@ class RLMEngine:
                 self._note_quote_nesting(result, str(tool_args.get("code") or ""))
             self._publish_agent_step(step_start)
             self._deliver_kernel_notices()
+            if (
+                self.mcp_preload
+                and self._repl is not None
+                and self._repl.restarts != self._preloaded_restarts
+            ):
+                # A restarted kernel lost the preloaded tools with its other globals
+                await self._preload_mcp()
             messages = self.session.messages
 
             if tool_name == "wait":
@@ -1624,6 +1634,37 @@ class RLMEngine:
         }
         return snapshot
 
+    async def _preload_mcp(self) -> None:
+        """Bind the tools of the policy's `mcp_preload` servers as kernel globals, at
+        the kernel's start and again after it restarts."""
+        if not self.mcp_preload or not any(
+            tool.name == "ipython" for tool in self._active_tools
+        ):
+            return
+        self._preloaded_restarts = self._repl.restarts
+        unknown = [s for s in self.mcp_preload if s not in self.mcp_servers]
+        if unknown:
+            raise ValueError(f"mcp_preload names servers not in mcp_servers: {unknown}")
+        servers = list(self.mcp_preload)
+        code = "".join(
+            f"globals().update(await rlm.tools.load(server={server!r}))\n"
+            for server in servers
+        )
+        if not code or self._supervisor is None or self._invocation_id is None:
+            return
+        # A model's cell runs in a broker scope, as its tool call opens one; so does this one.
+        scope_id = await self._supervisor.open_scope(self._invocation_id, "mcp-preload")
+        try:
+            self._repl.set_broker_scope(scope_id)
+            output = await self._repl.run_in_thread(self._repl.execute, code)
+        finally:
+            try:
+                await self._supervisor.close_scope(scope_id)
+            finally:
+                self._repl.set_broker_scope(None)
+        if output.strip():  # the cell prints nothing unless it fails
+            raise RuntimeError(f"MCP preload failed: {output[-2000:]}")
+
     def _kernel_session_dir(self) -> str:
         """The session directory as the kernel sees it: in split execution, the
         worker's, since the harness's own is on another machine."""
@@ -1645,6 +1686,7 @@ class RLMEngine:
             mcp_servers=self._supervisor.mcp_server_summaries()
             if self._supervisor
             else None,
+            mcp_preload=self.mcp_preload,
             task_instructions=Path(self.system_prompt_path).read_text()
             if self.system_prompt_path
             else None,

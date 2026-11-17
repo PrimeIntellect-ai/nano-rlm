@@ -268,6 +268,7 @@ class RemoteREPL(IPythonREPL):
         )
         self._history_sent += len(last)
         self._recovery_notices.extend(result["notices"])
+        self.restarts = result["restarts"]
         with open(self.session.dir / "programmatic_tool_calls.jsonl", "ab") as log:
             log.write(base64.b64decode(result["tool_log"]))
         return ToolOutcome(
@@ -414,6 +415,7 @@ class _Worker:
                     "omitted": outcome.omitted and asdict(outcome.omitted),
                     "metric_events": [asdict(event) for event in outcome.metric_events],
                     "notices": self.repl.take_recovery_notices(),
+                    "restarts": self.repl.restarts,
                     "tool_log": base64.b64encode(self._new_tool_log()).decode(),
                 }
 

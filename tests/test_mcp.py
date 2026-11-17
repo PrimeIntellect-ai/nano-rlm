@@ -372,3 +372,90 @@ async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_pat
     assert tool_messages[-1]["content"].strip() == "reused"
     meta = json.loads((session.dir / "meta.json").read_text())
     assert meta["programmatic_tool_call_stats"]["python_total"] == 2
+
+
+async def test_a_preloaded_servers_tools_are_kernel_globals_and_the_prompt_says_so(
+    tmp_path,
+):
+    session = Session(tmp_path / "session")
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython", {"code": "print(await local_echo(text='hi'))"}
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config().model_copy(
+            update={"policy": ExecutionPolicy(mcp_preload=["local"])}
+        ),
+        mcp_servers={"local": _stdio_server()},
+        cwd=str(tmp_path),
+    )
+
+    await engine.run("use the tool")
+    await engine.aclose()
+
+    messages = client.calls[1]["messages"]
+    assert messages[-1]["content"].rstrip().endswith(":hi"), messages[-1]
+    system = messages[0]["content"]
+    assert "## MCP tools" in system and "MCP tool discovery" not in system
+
+
+async def test_preloaded_tools_return_after_a_kernel_restart(tmp_path):
+    session = Session(tmp_path / "session")
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall("ipython", {"code": "import os; os._exit(1)"})
+                ]
+            ),
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython", {"code": "print(await local_echo(text='back'))"}
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config().model_copy(
+            update={"policy": ExecutionPolicy(mcp_preload=["local"])}
+        ),
+        mcp_servers={"local": _stdio_server()},
+        cwd=str(tmp_path),
+    )
+
+    await engine.run("crash the kernel, then use the tool")
+    await engine.aclose()
+
+    assert client.calls[2]["messages"][-1]["content"].rstrip().endswith(":back")
+
+
+async def test_preloading_an_unknown_server_fails(tmp_path):
+    engine = RLMEngine(
+        client=DummyClient([DummyMessage(content="done")]),  # type: ignore[arg-type]
+        session=Session(tmp_path / "session"),
+        runtime_config=_config().model_copy(
+            update={"policy": ExecutionPolicy(mcp_preload=["locl"])}
+        ),
+        mcp_servers={"local": _stdio_server()},
+        cwd=str(tmp_path),
+    )
+    try:
+        with pytest.raises(ValueError, match="locl"):
+            await engine.run("anything")
+    finally:
+        await engine.aclose()

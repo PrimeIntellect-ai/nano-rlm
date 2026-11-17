@@ -57,6 +57,7 @@ The only process environment variable is `RLM_HOME` (default `~/.rlm`): the root
 | `max_compactions` | null | Compactions per session |
 | `max_compaction_attempts` | 5 | Summary attempts within one compaction |
 | `allow_git` | false | Lift the guard that refuses Git commands reaching beyond the current branch (other refs, branch and tag listings, `clone`, `fetch`, `pull`) |
+| `mcp_preload` | [] | MCP servers whose tools are loaded into the kernel at its start (and again after a restart), each a global named `<server>_<tool>`; the prompt names them in place of the discovery guide. Every name must be a configured server ([Tools](tools.md#mcp-tools)) |
 
 **Model-call admission.** `max_concurrent_subagents` bounds calls across the tree. Queued calls closer to the root go first, FIFO within a depth, and calls in flight are not preempted, so continuous shallow work can delay deeper agents. Tools, child waits and the backoff between outer retries hold no slot; the SDK's own retries stay within one. The limit is per tree: a cap across trees belongs in the runner or inference gateway.
 

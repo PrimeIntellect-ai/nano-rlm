@@ -318,6 +318,8 @@ class IPythonREPL:
         """How much more the last cell's whole output measured than what `execute`
         returned, when that kept only its start and end."""
         self._recovery_notices: list[str] = []
+        self.restarts = 0
+        """Kernel restarts so far: the startup state is rebuilt after each one."""
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="rlm-repl"
         )
@@ -571,6 +573,7 @@ import rlm
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=30)
         self._inject_startup()
+        self.restarts += 1
 
     def interrupt(self):
         """Request interruption and recovery of a running cell."""
