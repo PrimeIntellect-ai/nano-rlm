@@ -20,6 +20,12 @@ def pixel() -> list:
     return ["one pixel", Image(data=base64.b64decode(PIXEL_PNG), format="png")]
 
 
+@server.tool()
+def pixels(count: int, big: bool = False) -> list:
+    image = base64.b64decode(PIXEL_PNG) + (b"\0" * 3 * 1024 * 1024 if big else b"")
+    return [Image(data=image, format="png") for _ in range(count)]
+
+
 PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
 

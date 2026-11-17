@@ -10,6 +10,17 @@ MAX_IMAGES_PER_CALL = 4
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 
 
+def dropped_image(kept: int, data: str) -> str | None:
+    """Why an image (base64 ``data``) is dropped when ``kept`` images of the call are
+    already kept, as its text pointer; None when it is kept."""
+    if kept >= MAX_IMAGES_PER_CALL:
+        return f"[image dropped: at most {MAX_IMAGES_PER_CALL} images per call]"
+    size = len(data) * 3 // 4
+    if size > MAX_IMAGE_BYTES:
+        return f"[image dropped: {size / 1e6:.1f} MB exceeds the {MAX_IMAGE_BYTES // 2**20} MB limit]"
+    return None
+
+
 def sniff_mime(data: bytes) -> str | None:
     """The image MIME type from the file signature, or None for other formats."""
     if data.startswith(b"\x89PNG\r\n\x1a\n"):

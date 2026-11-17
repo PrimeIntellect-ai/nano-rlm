@@ -411,3 +411,14 @@ async def test_mcp_image_blocks_reach_the_model_as_images(tmp_path):
     assert messages[-1]["content"][1]["image_url"]["url"].startswith(
         "data:image/png;base64,iVBORw0KGgo"
     )
+
+
+async def test_mcp_images_are_kept_to_the_per_call_limits_before_the_broker():
+    from rlm.mcp import call_tool, validate_mcp_servers
+
+    server = validate_mcp_servers({"local": _stdio_server()})["local"]
+    result = await call_tool(server, "pixels", {"count": 6})
+    assert len(result["images"]) == 4
+    assert result["text"].count("[image dropped: at most 4 images per call]") == 2
+    result = await call_tool(server, "pixels", {"count": 1, "big": True})
+    assert result == "[image dropped: 3.1 MB exceeds the 2 MB limit]"
