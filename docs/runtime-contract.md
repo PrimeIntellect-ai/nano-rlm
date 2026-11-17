@@ -33,6 +33,7 @@ The agent accepts text prompts, and stdio or streamable-HTTP MCP servers (with H
 | `execution_command` | list or null | A trusted argv starting `python -m rlm.execution`, for [split execution](split-execution.md) over stdio |
 | `execution_cwd` | string or null | The tools' working directory in split execution |
 | `execution_tcp` | object or null | `host`, `port` and `token` of a worker for split execution over TCP |
+| `seed_messages` | list or null | A saved conversation to resume (user, assistant and tool messages, no system message). The root agent starts from its own system prompt, these messages and a notice that kernel state, shell jobs, sub-agents and watches did not carry over; children never inherit it |
 
 Recursive children inherit their parent's configuration in memory, one level deeper; nothing is re-read.
 
