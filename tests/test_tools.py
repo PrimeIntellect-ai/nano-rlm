@@ -321,3 +321,54 @@ async def test_tree_turn_budget_stops_engine(session):
     assert engine.stop_reason == "max_total_turns"
     assert len(client.calls) == 1
     assert result.answer == "[turn budget reached]"
+
+
+def _workspace_shadowing_pydantic_settings(tmp_path):
+    """A workspace that is a checkout of a harness dependency, at a commit the harness can't use."""
+    package = tmp_path / "pydantic_settings"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "WORKSPACE_COPY = True\n\n\nclass BaseSettings:\n    pass\n"
+    )
+    (tmp_path / "workspace_only.py").write_text("VALUE = 7\n")
+    return str(tmp_path)
+
+
+def test_kernel_startup_ignores_workspace_copies_of_harness_dependencies(tmp_path):
+    """`import rlm` loads mcp, which needs pydantic_settings.SettingsConfigDict; a workspace
+    package of that name must not be the one the startup imports."""
+    cwd = _workspace_shadowing_pydantic_settings(tmp_path)
+    repl = IPythonREPL(cwd=cwd)
+    try:
+        repl.start()
+        harness_copy = repl.execute(
+            "import mcp.server.fastmcp.server as _server; "
+            "print(_server.SettingsConfigDict.__module__, rlm.__name__)"
+        )
+    finally:
+        repl.shutdown()
+
+    assert harness_copy.strip() == "pydantic_settings.main rlm"
+
+
+def test_agent_cells_import_the_workspace_after_startup(tmp_path):
+    """The working directory is on sys.path for the agent's cells, ahead of site-packages,
+    and a package the workspace shadows imports from the workspace, also after a restart."""
+    cwd = _workspace_shadowing_pydantic_settings(tmp_path)
+    cell = (
+        "import os, sys, pydantic_settings, workspace_only; "
+        "print(pydantic_settings.WORKSPACE_COPY, workspace_only.VALUE, "
+        "os.path.dirname(pydantic_settings.__file__) == os.path.join(os.getcwd(), 'pydantic_settings'), "
+        "sys.path.index('') < next(i for i, p in enumerate(sys.path) if p.endswith('site-packages')))"
+    )
+    repl = IPythonREPL(cwd=cwd)
+    try:
+        repl.start()
+        first = repl.execute(cell)
+        repl.restart_kernel()
+        second = repl.execute(cell)
+    finally:
+        repl.shutdown()
+
+    assert first.strip() == "True 7 True True"
+    assert second.strip() == "True 7 True True"

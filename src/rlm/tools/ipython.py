@@ -350,6 +350,9 @@ class IPythonREPL:
             "ipykernel_launcher",
             "-f",
             "{connection_file}",
+            # Keep the working directory off sys.path until the startup code has
+            # imported the harness; _inject_startup adds it back for the agent.
+            "--InteractiveShellApp.ignore_cwd=True",
         ]
         self._km.kernel_spec.env = {}
         kernel_env = build_kernel_env(
@@ -374,7 +377,15 @@ class IPythonREPL:
         self._inject_startup()
 
     def _inject_startup(self):
-        """Set up kernel: cwd, env vars, nest_asyncio, skill pre-imports."""
+        """Set up kernel: cwd, env vars, nest_asyncio, skill pre-imports.
+
+        The kernel starts without the working directory on sys.path (ignore_cwd), so the
+        harness imports below resolve to the harness's own environment even when the
+        workspace is a checkout of one of its dependencies. The working directory goes on
+        sys.path afterwards, where IPython would have put it, and the modules the workspace
+        shadows are dropped from sys.modules, so the agent's cells import the workspace's
+        copy while the harness keeps the one it already loaded.
+        """
         session_dir = str(self.session.dir) if self.session else None
         depth = (
             int(os.environ.get("RLM_DEPTH", "0")) if self.depth is None else self.depth
@@ -386,6 +397,7 @@ class IPythonREPL:
         setup_code = f"""\
 import os, sys, asyncio, types, json, time, functools, inspect
 from pathlib import Path
+_rlm_preloaded = set(sys.modules)
 os.chdir({self.cwd!r})
 if {bool(session_dir)!r}:
     sys.path.append({session_dir!r})
@@ -462,6 +474,42 @@ for _name in {skill_names!r}:
     globals()[_name] = _wrap_callable(_module, _source)
 
 import rlm
+
+
+def _rlm_expose_cwd(preloaded, keep):
+    # Put the working directory on sys.path where InteractiveShellApp.init_path
+    # would have: before the first site-packages, after the standard library.
+    from importlib import invalidate_caches
+    from importlib.machinery import PathFinder
+    if '' not in sys.path:
+        for index, path in enumerate(sys.path):
+            if os.path.basename(path) in ('site-packages', 'dist-packages'):
+                break
+        else:
+            index = 0
+        sys.path.insert(index, '')
+    invalidate_caches()
+    # A module the startup imported that the working directory now shadows is
+    # forgotten, so a later import finds the workspace's copy, as it did when the
+    # working directory was on sys.path from the start. The harness keeps the
+    # references it already holds. Modules the kernel itself loaded are left alone.
+    loaded = {{name.partition('.')[0] for name in sys.modules}}
+    for top in loaded - {{name.partition('.')[0] for name in preloaded}} - keep:
+        spec = getattr(sys.modules.get(top), '__spec__', None)
+        if spec is None or spec.origin is None:
+            continue
+        try:
+            found = PathFinder.find_spec(top)
+        except Exception:
+            continue
+        if found is None or found.origin is None or found.origin == spec.origin:
+            continue
+        for name in [n for n in sys.modules if n == top or n.startswith(top + '.')]:
+            del sys.modules[name]
+
+
+_rlm_expose_cwd(_rlm_preloaded, {{'rlm', *{skill_names!r}}})
+del _rlm_expose_cwd, _rlm_preloaded
 """
         self._execute_silent(setup_code)
 
