@@ -47,6 +47,7 @@ from rlm.shell_jobs import (
 from rlm.service_manager import ServiceManager
 from rlm.subscriptions import Subscription, Subscriptions
 from rlm.tools.ipython import build_kernel_env
+from rlm.workspace_host import RemoteHost, RemoteShellJobs
 from rlm.tools.git_block import find_blocked_command, refusal
 from rlm.session import Session
 from rlm.skills.search import run_with_api_key as run_search
@@ -230,6 +231,7 @@ class SessionTreeSupervisor:
         self._services = ServiceManager(
             Path(os.environ.get("RLM_SERVICES_DIR", "/tmp/rlm-services"))
         )
+        self._host: RemoteHost | None = None
         self._root_config = runtime_config
         if "search" in runtime_config.skills:
             capability = secrets.token_urlsafe(24)
@@ -713,16 +715,19 @@ class SessionTreeSupervisor:
         notices: list[str] = []
         hints: list[str] = []
         # A job handed back while running reports its end here, so no turn is spent
-        # collecting it.
+        # collecting it. These come last, each closed by a marker, so no other notice
+        # reads as part of a job's output.
+        job_notices: list[str] = []
         for event in agent.inbox:
             if event["type"] != "shell.completed" or event["read"]:
                 continue
             job = event["content"]
             tail = job["text"][-COMPLETED_NOTICE_CHARS:]
-            notices.append(
+            job_notices.append(
                 f"Job {job['job_id']} finished ({job['status']}, exit code "
                 f"{job['exit_code']}); `{self._collect_expr_id(job['job_id'])}` "
-                f"returns its full output. Output tail:\n{tail}"
+                f"returns its full output. Output tail:\n{tail}\n"
+                f"[end of job {job['job_id']} output]"
             )
             self._record_event(agent, {"type": "read", "event_id": event["id"]})
             event["read"] = True
@@ -743,10 +748,10 @@ class SessionTreeSupervisor:
                 f"Inbox: {count} unread events. Use rlm.inbox.list() and rlm.inbox.read(event_id) to inspect them."
             )
         agent.unread_announced = count
-        if not notices:
+        if not notices and not job_notices:
             return None
         return {
-            "text": " ".join(notices),
+            "text": "\n".join(filter(None, [" ".join(notices), *job_notices])),
             "hints": hints,
             "unread": unread,
             "error": error,
@@ -851,9 +856,8 @@ class SessionTreeSupervisor:
                 completed=job.finished is not None,
             )
         elif op == "watch.path":
-            target = (Path(parent.cwd) / request["path"]).resolve()
             sub = await self._subscriptions.path(
-                parent.id, target, request["recursive"]
+                parent.id, Path(parent.cwd) / request["path"], request["recursive"]
             )
         elif op == "watch.list":
             return [
@@ -968,16 +972,10 @@ class SessionTreeSupervisor:
                 if yield_after is None
                 else min(float(yield_after), RUN_BLOCK_MAX_SECONDS)
             )
-            info = self._shell_jobs.start(
+            job_options = dict(
                 owner_id=parent.id,
                 command=command,
-                cwd=str(cwd.resolve()),
                 directory=parent.session.dir,
-                env={
-                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
-                    **parent.shell_env,
-                    **(request.get("env") or {}),
-                },
                 source_request_id=self._scopes[request["scope_id"]].request_id,
                 # yield_after= bounds how long run() blocks; timeout= is the kill deadline.
                 timeout=request.get("timeout"),
@@ -985,6 +983,17 @@ class SessionTreeSupervisor:
                 # handed back while still running posts shell.completed when it ends.
                 notify=block == 0,
             )
+            if isinstance(self._shell_jobs, RemoteShellJobs):
+                # The workspace resolves the directory and environment it runs in.
+                info = await self._shell_jobs.start_remote(
+                    cwd=str(cwd), env=self._env_layers(parent, request), **job_options
+                )
+            else:
+                info = self._shell_jobs.start(
+                    cwd=str(cwd.resolve()),
+                    env=self._command_env(parent, request),
+                    **job_options,
+                )
             job = self._shell_jobs.get(parent.id, info["id"])
             if block == 0:
                 return self._running_payload(
@@ -1071,6 +1080,22 @@ class SessionTreeSupervisor:
             return await self._shell_jobs.cancel(job)
         return job.snapshot()
 
+    @staticmethod
+    def _env_layers(parent: _Invocation, request: dict) -> dict:
+        return {
+            "kernel_env": dict(parent.runtime_config.kernel_env),
+            "shell_env": dict(parent.shell_env),
+            "env": dict(request.get("env") or {}),
+        }
+
+    def _command_env(self, parent: _Invocation, request: dict) -> dict[str, str]:
+        layers = self._env_layers(parent, request)
+        return {
+            **build_kernel_env(layers["kernel_env"]),
+            **layers["shell_env"],
+            **layers["env"],
+        }
+
     async def _services_operation(self, parent: _Invocation, request: dict) -> Any:
         op = request["op"]
         if op == "services.start":
@@ -1083,16 +1108,37 @@ class SessionTreeSupervisor:
             if blocked:
                 raise PermissionError(refusal(blocked))
             cwd = Path(parent.cwd) / (request["cwd"] or ".")
+            if self._host is not None:
+                return await self._host.call(
+                    op,
+                    {
+                        "name": request["name"],
+                        "command": command,
+                        "cwd": str(cwd),
+                        "env": self._env_layers(parent, request),
+                        "owner_id": parent.id,
+                    },
+                )
             return self._services.start(
                 name=request["name"],
                 command=command,
                 cwd=str(cwd.resolve()),
-                env={
-                    **build_kernel_env(dict(parent.runtime_config.kernel_env)),
-                    **parent.shell_env,
-                    **(request.get("env") or {}),
-                },
+                env=self._command_env(parent, request),
                 owner_id=parent.id,
+            )
+        if self._host is not None and op in (
+            "services.list",
+            "services.get",
+            "services.tail",
+            "services.stop",
+        ):
+            return await self._host.call(
+                op,
+                {
+                    key: request[key]
+                    for key in ("name", "lines", "grace")
+                    if key in request
+                },
             )
         if op == "services.list":
             return self._services.list()
@@ -1214,6 +1260,13 @@ class SessionTreeSupervisor:
                     ancestor = self._parents[ancestor]
             return agents
         child = self._child(parent, request.get("name_or_id", request.get("agent_id")))
+        if op == "agent.history":
+            from rlm.history import read_page
+
+            records, offset = read_page(
+                child.session.dir / "messages.jsonl", request["offset"]
+            )
+            return {"records": records, "next": offset}
         if op in {"agent.send", "agent.steer"}:
             if child.status in {"completed", "failed", "cancelled"}:
                 raise RuntimeError("agent is no longer active")
@@ -1520,6 +1573,16 @@ class SessionTreeSupervisor:
                 pass
             self._connection_writers.discard(writer)
 
+    def attach_host(self, call: Callable[[str, dict], Any]) -> None:
+        """Run shell jobs, services and path watches in the execution workspace, through
+        `call` on the root agent's worker, as split execution needs."""
+        self._host = RemoteHost(call)
+        self._shell_jobs = RemoteShellJobs(
+            self._host, self._publish_job, self._publish_job_output
+        )
+        self._host.follow(self._shell_jobs)
+        self._subscriptions.watch = self._host.watch
+
     async def aclose(self) -> None:
         if self._closed and self._close_task is None:
             return
@@ -1557,6 +1620,8 @@ class SessionTreeSupervisor:
                 return_exceptions=True,
             )
         )
+        if self._host is not None:
+            await self._host.close()
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()

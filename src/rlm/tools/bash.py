@@ -7,12 +7,28 @@ ipython alone).
 
 from __future__ import annotations
 
+import codecs
+import io
 import os
+import selectors
+import signal
+import sys
+import time
+import contextlib
 import subprocess
+from threading import Event
 from typing import Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_command, refusal
+from rlm.tools.output import OUTPUT_KEEP_BYTES, OutputCapture, OutputSize
+
+_OWN_GROUP = (
+    {"process_group": 0} if sys.version_info >= (3, 11) else {"preexec_fn": os.setpgrp}
+)
+"""A command leads a process group in its caller's session: a timeout or a cancel stops
+the command and what it started, a kernel restart or shutdown stops a command the kernel
+ran, and a daemon, in a session of its own, outlives both."""
 
 BASH_SCHEMA = {
     "type": "function",
@@ -61,28 +77,96 @@ def run_bash(
     timeout: int,
     cwd: str | None = None,
     allow_git: bool | None = None,
+    env: dict[str, str] | None = None,
+    interrupt_event: Event | None = None,
 ) -> str:
     """Guarded ``bash -c`` execution shared by the bash tool and the bash skill."""
+    return bash_outcome(command, timeout, cwd, allow_git, env, interrupt_event).content
+
+
+def bash_outcome(
+    command: str,
+    timeout: int,
+    cwd: str | None = None,
+    allow_git: bool | None = None,
+    env: dict[str, str] | None = None,
+    interrupt_event: Event | None = None,
+) -> ToolOutcome:
+    """`run_bash`, with how much of a long output its content left out."""
     if not isinstance(command, str) or not command.strip():
-        return "Error: empty command"
+        return ToolOutcome(content="Error: empty command")
     blocked = find_blocked_command(command, allow_git=allow_git)
     if blocked:
-        return refusal(blocked)
-    try:
-        proc = subprocess.run(
-            ["bash", "-c", command],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout,
-            cwd=cwd or None,
+        return ToolOutcome(content=refusal(blocked))
+    deadline = time.monotonic() + timeout
+    streams = ("stdout", "stderr")
+    # stdout and stderr each keep half of one result's bound.
+    captures = {name: OutputCapture(OUTPUT_KEEP_BYTES // 2) for name in streams}
+    decoders = {
+        name: io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")(errors="replace"), translate=True
         )
-    except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s"
-    out = proc.stdout + (("\n" + proc.stderr) if proc.stderr else "")
-    if proc.returncode != 0:
+        for name in streams
+    }
+    reason = ""
+    with (
+        subprocess.Popen(
+            ["bash", "-c", command],
+            # The caller's stdin may be its terminal, where a background group stops on
+            # a read, or its own protocol stream; a command reads end-of-file instead.
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd or None,
+            env=env,
+            **_OWN_GROUP,
+        ) as proc,
+        selectors.DefaultSelector() as selector,
+    ):
+        selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+        try:
+            while selector.get_map():
+                if interrupt_event is not None and interrupt_event.is_set():
+                    reason = "[command interrupted]"
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    reason = f"Error: command timed out after {timeout}s"
+                    break
+                for key, _ in selector.select(min(remaining, 0.1)):
+                    data = os.read(key.fileobj.fileno(), 65536)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        continue
+                    captures[key.data].add(decoders[key.data].decode(data))
+            if not reason:
+                try:
+                    proc.wait(timeout=max(0.01, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    reason = f"Error: command timed out after {timeout}s"
+        finally:
+            # Once bash itself has exited, what still holds its output is a job it put in
+            # the background, and that job outlives the call.
+            if proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+    for name in streams:
+        captures[name].add(decoders[name].decode(b"", final=True))
+    (stdout, stdout_omitted), (stderr, stderr_omitted) = (
+        captures[name].result() for name in streams
+    )
+    out = stdout + (("\n" + stderr) if stderr else "")
+    if reason:
+        out += "\n" + reason
+    elif proc.returncode != 0:
         out += f"\n[exit code {proc.returncode}]"
-    return out.strip() or "(no output)"
+    omitted = [size for size in (stdout_omitted, stderr_omitted) if size is not None]
+    return ToolOutcome(
+        content=out.strip() or "(no output)",
+        omitted=sum(omitted, OutputSize()) if omitted else None,
+    )
 
 
 class BashTool:
@@ -94,13 +178,13 @@ class BashTool:
         return BASH_SCHEMA
 
     def execute(self, args: dict[str, Any], context: ToolContext) -> ToolOutcome:
-        return ToolOutcome(
-            content=run_bash(
-                args.get("command", ""),
-                context.exec_timeout,
-                cwd=context.cwd,
-                allow_git=context.allow_git,
-            )
+        return bash_outcome(
+            args.get("command", ""),
+            context.exec_timeout,
+            cwd=context.cwd,
+            allow_git=context.allow_git,
+            env=context.env,
+            interrupt_event=context.interrupt_event,
         )
 
 
