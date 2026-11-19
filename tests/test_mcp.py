@@ -413,12 +413,16 @@ async def test_mcp_image_blocks_reach_the_model_as_images(tmp_path):
     )
 
 
-async def test_mcp_images_are_kept_to_the_per_call_limits_before_the_broker():
-    from rlm.mcp import call_tool, validate_mcp_servers
+async def test_mcp_checks_total_image_bytes_before_the_broker(monkeypatch):
+    import base64
+    from rlm.mcp import MCPToolError, call_tool, validate_mcp_servers
 
     server = validate_mcp_servers({"local": _stdio_server()})["local"]
     result = await call_tool(server, "pixels", {"count": 6})
-    assert len(result["images"]) == 4
-    assert result["text"].count("[image dropped: at most 4 images per call]") == 2
-    result = await call_tool(server, "pixels", {"count": 1, "big": True})
-    assert result == "[image dropped: 3.1 MB exceeds the 2 MB limit]"
+    assert len(result["images"]) == 6
+    size = len(base64.b64decode(result["images"][0]["data"]))
+    monkeypatch.setattr(mcp, "MAX_IMAGE_BYTES_PER_CALL", 6 * size - 1)
+    with pytest.raises(
+        MCPToolError, match="Attach fewer images per call or compress/resize"
+    ):
+        await call_tool(server, "pixels", {"count": 6})

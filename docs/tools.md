@@ -38,7 +38,7 @@ The contract's `skills` list pre-imports these into the kernel by name:
 
 ## Images
 
-With the policy's `vision` on, `attach(path)` in a cell shows an image file (PNG, JPEG, WebP or GIF, at most 2 MB) to the model, as does displaying an image; an MCP tool's image blocks come through the same way. Up to 4 images per call follow the call's output, and the result names each (`[image 1: image/png ...]`). Without `vision`, the result keeps a text pointer per image, naming an attached image's file, so a model without image input knows where it is.
+With the policy's `vision` on, use `attach_image(path, ...)` in an IPython cell to show the model PNG, JPEG, WebP or GIF files. IPython display output and MCP image blocks go through the same path. There is one 10 MiB budget per tool call, measured before base64 encoding. An over-budget call sends no images and asks the model to attach fewer files or compress/resize them. Each image that reaches the model has a numbered pointer in the tool result. Without `vision`, the result keeps only those pointers, including the file paths supplied to `attach_image`. The shorter `attach` name is an alias.
 
 ## Python tool packages
 

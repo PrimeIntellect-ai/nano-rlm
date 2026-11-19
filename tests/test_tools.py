@@ -7,6 +7,8 @@ exercise how the harness reacts to model tool-call behavior.
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 from conftest import (
     DummyClient,
@@ -331,7 +333,7 @@ PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwA
 async def test_attached_image_follows_tool_result(session, vision):
     code = (
         "import base64; open('pixel.png', 'wb').write(base64.b64decode("
-        f"{PIXEL_PNG!r})); attach('pixel.png')"
+        f"{PIXEL_PNG!r})); attach_image('pixel.png')"
     )
     client = DummyClient(
         [
@@ -363,21 +365,53 @@ async def test_attached_image_follows_tool_result(session, vision):
         assert "no image input" in messages[-1]["content"]
 
 
-def test_repl_keeps_at_most_four_images(session):
+def test_repl_shares_image_budget_across_attach_and_display(session, monkeypatch):
+    size = len(base64.b64decode(PIXEL_PNG))
+    monkeypatch.setattr("rlm.tools.ipython.MAX_IMAGE_BYTES_PER_CALL", 6 * size)
+    path = session.dir / "pixel.png"
+    path.write_bytes(base64.b64decode(PIXEL_PNG))
     repl = IPythonREPL(cwd=str(session.dir), session=session)
     repl.start()
     try:
-        output = repl.execute(
+        mixed = (
+            f"attach_image(*([{str(path)!r}] * 5))\n"
             "from IPython.display import display\n"
-            f"for _ in range(5): display({{'image/png': {PIXEL_PNG!r}}}, raw=True)"
+            f"display({{'image/png': {PIXEL_PNG!r}}}, raw=True)"
         )
-        images = repl.take_images()
-        refused = repl.execute("open('notes.txt', 'w').write('x'); attach('notes.txt')")
+        assert "[image 6:" in repl.execute(mixed)
+        assert len(repl.take_images()) == 6
+        denied = repl.execute(mixed + f"\nattach_image({str(path)!r})")
+        assert "Attach fewer images per call or compress/resize them" in denied
+        assert "[image 1:" not in denied
+        assert repl.take_images() == []
+        assert "[image 1:" in repl.execute(f"attach({str(path)!r})")
+        assert len(repl.take_images()) == 1
     finally:
         repl.shutdown()
 
-    assert len(images) == 4
-    assert "[image 4: image/png, 1 KB]" in output
-    assert "[image dropped: at most 4 images per call]" in output
-    assert "not a PNG, JPEG, WebP or GIF image" in refused
-    assert repl.take_images() == []
+
+def test_attach_validates_the_whole_batch_before_display(tmp_path, monkeypatch):
+    from rlm.images import MAX_IMAGE_BYTES_PER_CALL, ImageBudgetExceeded, attach_image
+
+    emitted = []
+    monkeypatch.setattr("IPython.display.display", lambda *a, **kw: emitted.append(a))
+    first = tmp_path / "first.png"
+    first.write_bytes(base64.b64decode(PIXEL_PNG))
+    last = tmp_path / "last.png"
+    last.write_bytes(first.read_bytes())
+    with last.open("ab") as stream:
+        stream.truncate(MAX_IMAGE_BYTES_PER_CALL - first.stat().st_size)
+    attach_image(first, last)
+    assert len(emitted) == 2
+    emitted.clear()
+    with last.open("ab") as stream:
+        stream.write(b"x")
+    with pytest.raises(
+        ImageBudgetExceeded, match="Attach fewer images per call or compress/resize"
+    ):
+        attach_image(first, last)
+    assert emitted == []
+    last.write_bytes(b"not an image")
+    with pytest.raises(ValueError, match="not a PNG"):
+        attach_image(first, last)
+    assert emitted == []

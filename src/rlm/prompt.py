@@ -62,9 +62,9 @@ KERNEL_PACKAGES_PROMPT = (
     "targets the kernel venv (a uv-managed venv with no pip module)."
 )
 VISION_PROMPT = (
-    "To look at an image file (PNG, JPEG, WebP or GIF, at most 2 MB), call `attach(path)` "
-    "in ipython; `display(...)` of an image works too. Up to 4 images per call are shown "
-    "to you right after the call's output."
+    "Use `attach_image(path, ...)` in ipython to view PNG, JPEG, WebP or GIF files together. "
+    "Image display output and MCP image blocks also appear after the tool result. "
+    "The images in a tool call can total up to 10 MiB."
 )
 BASH_SKILL_PROMPT = (
     "For short, blocking shell work, use `out = await bash('''command here''')` — always "

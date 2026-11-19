@@ -6,19 +6,20 @@ import base64
 from pathlib import Path
 
 IMAGE_MIMES = ("image/png", "image/jpeg", "image/webp", "image/gif")
-MAX_IMAGES_PER_CALL = 4
-MAX_IMAGE_BYTES = 2 * 1024 * 1024
+MAX_IMAGE_BYTES_PER_CALL = 10 * 1024 * 1024
 
 
-def dropped_image(kept: int, data: str) -> str | None:
-    """Why an image (base64 ``data``) is dropped when ``kept`` images of the call are
-    already kept, as its text pointer; None when it is kept."""
-    if kept >= MAX_IMAGES_PER_CALL:
-        return f"[image dropped: at most {MAX_IMAGES_PER_CALL} images per call]"
-    size = len(data) * 3 // 4
-    if size > MAX_IMAGE_BYTES:
-        return f"[image dropped: {size / 1e6:.1f} MB exceeds the {MAX_IMAGE_BYTES // 2**20} MB limit]"
-    return None
+class ImageBudgetExceeded(ValueError):
+    def __init__(self):
+        super().__init__(
+            "Images exceed the 10 MiB total per tool call. "
+            "Attach fewer images per call or compress/resize them."
+        )
+
+
+def decoded_size(data: str) -> int:
+    """Decoded bytes in a whitespace-free, padded base64 image."""
+    return len(data) * 3 // 4 - (2 if data.endswith("==") else int(data.endswith("=")))
 
 
 def sniff_mime(data: bytes) -> str | None:
@@ -34,25 +35,33 @@ def sniff_mime(data: bytes) -> str | None:
     return None
 
 
-def attach(path: str | Path) -> None:
-    """Show an image file (PNG, JPEG, WebP or GIF, at most 2 MB) to the model.
-
-    The image arrives after this call's output. At most 4 images per call are kept."""
+def attach_image(path: str | Path, *paths: str | Path) -> None:
+    """Show one or more image files together (up to 10 MiB total per tool call)."""
     from IPython.display import display
 
-    data = Path(path).read_bytes()
-    mime = sniff_mime(data)
-    if mime is None:
-        raise ValueError(f"{path}: not a PNG, JPEG, WebP or GIF image")
-    if len(data) > MAX_IMAGE_BYTES:
-        raise ValueError(
-            f"{path}: {len(data) / 1e6:.1f} MB exceeds the {MAX_IMAGE_BYTES // 2**20} MB image limit"
+    remaining = MAX_IMAGE_BYTES_PER_CALL
+    images = []
+    for name in (path, *paths):
+        source = Path(name).resolve()
+        with source.open("rb") as stream:
+            data = stream.read(remaining + 1)
+        if len(data) > remaining:
+            raise ImageBudgetExceeded()
+        mime = sniff_mime(data)
+        if mime is None:
+            raise ValueError(f"{name}: not a PNG, JPEG, WebP or GIF image")
+        images.append((source, mime, data))
+        remaining -= len(data)
+
+    for source, mime, data in images:
+        display(
+            {mime: base64.b64encode(data).decode()},
+            metadata={mime: {"path": str(source)}},
+            raw=True,
         )
-    display(
-        {mime: base64.b64encode(data).decode()},
-        metadata={mime: {"path": str(Path(path).resolve())}},
-        raw=True,
-    )
+
+
+attach = attach_image
 
 
 def image_part(image: dict) -> dict:

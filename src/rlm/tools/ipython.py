@@ -21,7 +21,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from rlm.images import IMAGE_MIMES, dropped_image
+from rlm.images import (
+    IMAGE_MIMES,
+    MAX_IMAGE_BYTES_PER_CALL,
+    ImageBudgetExceeded,
+    decoded_size,
+)
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
 from rlm.tools.output import OutputCapture
@@ -465,7 +470,7 @@ for _name in {skill_names!r}:
     globals()[_name] = _wrap_callable(_module, _source)
 
 import rlm
-from rlm.images import attach
+from rlm.images import attach, attach_image
 """
         self._execute_silent(setup_code)
 
@@ -644,6 +649,10 @@ from rlm.images import attach
 
         capture = OutputCapture()
         self._images = []
+        images = []
+        image_pointers = []
+        image_bytes = 0
+        image_error = False
         try:
             while True:
                 if not self._km.is_alive():
@@ -681,13 +690,28 @@ from rlm.images import attach
                     bundle = content.get("data", {})
                     mime = next((m for m in IMAGE_MIMES if m in bundle), None)
                     if mime is not None:
+                        if image_error:
+                            continue
+                        data = "".join(bundle[mime].split())
+                        size = decoded_size(data)
+                        image_bytes += size
+                        if image_bytes > MAX_IMAGE_BYTES_PER_CALL:
+                            image_error = True
+                            continue
+                        images.append({"mime": mime, "data": data})
                         path = content.get("metadata", {}).get(mime, {}).get("path")
-                        text = self._keep_image(mime, bundle[mime], path) + "\n"
+                        source = f"{path}, " if path else ""
+                        image_pointers.append(
+                            f"[image {len(images)}: {source}{mime}, {max(1, size // 1024)} KB]\n"
+                        )
                     elif msg_type == "execute_result":
                         text = bundle.get("text/plain", "")
                         if text:
                             text += "\n"
                 elif msg_type == "error":
+                    if content.get("evalue") == str(ImageBudgetExceeded()):
+                        image_error = True
+                        continue
                     tb = "\n".join(content.get("traceback", []))
                     tb = _ANSI_RE.sub("", tb)
                     text = tb
@@ -702,19 +726,14 @@ from rlm.images import attach
             except Exception:
                 pass
 
+        if image_error:
+            capture.add(str(ImageBudgetExceeded()))
+        else:
+            self._images = images
+            for pointer in image_pointers:
+                capture.add(pointer)
         text, self.omitted = capture.result()
         return text
-
-    def _keep_image(self, mime: str, data: str, path: str | None = None) -> str:
-        """Keep one displayed image within the per-call limits; return its text pointer,
-        which names the file ``attach`` read it from."""
-        data = "".join(data.split())
-        size = len(data) * 3 // 4
-        if dropped := dropped_image(len(self._images), data):
-            return dropped
-        self._images.append({"mime": mime, "data": data})
-        source = f"{path}, " if path else ""
-        return f"[image {len(self._images)}: {source}{mime}, {max(1, size // 1024)} KB]"
 
     def shutdown(self):
         """Stop the kernel."""

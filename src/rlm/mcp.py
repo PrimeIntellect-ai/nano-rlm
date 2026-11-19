@@ -22,7 +22,12 @@ from mcp.types import ImageContent, Tool
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from rlm.broker import json_annotation
-from rlm.images import IMAGE_MIMES, dropped_image
+from rlm.images import (
+    IMAGE_MIMES,
+    MAX_IMAGE_BYTES_PER_CALL,
+    ImageBudgetExceeded,
+    decoded_size,
+)
 
 MAX_MCP_SKILL_NAME_CHARS = 96
 MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
@@ -367,13 +372,14 @@ async def call_tool(
         result = await session.call_tool(name, arguments or {})
     texts: list[str] = []
     images: list[dict[str, str]] = []
+    image_bytes = 0
     for block in result.content:
         if isinstance(block, ImageContent) and block.mimeType in IMAGE_MIMES:
-            # The per-call limits apply here, before the images cross the broker
-            if dropped := dropped_image(len(images), block.data):
-                texts.append(dropped)
-            else:
-                images.append({"mime": block.mimeType, "data": block.data})
+            data = "".join(block.data.split())
+            image_bytes += decoded_size(data)
+            if image_bytes > MAX_IMAGE_BYTES_PER_CALL:
+                raise MCPToolError(str(ImageBudgetExceeded()))
+            images.append({"mime": block.mimeType, "data": data})
         else:
             texts.append(getattr(block, "text", "") or str(block))
     text = "\n".join(texts)

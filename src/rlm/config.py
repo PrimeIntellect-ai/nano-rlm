@@ -99,7 +99,7 @@ class ExecutionPolicy(_ConfigModel):
     still bounds the tree."""
     allow_git: bool = False
     vision: bool = False
-    """The model reads images: images shown by a tool call (``attach(path)``, image
+    """The model reads images: images shown by a tool call (``attach_image(path, ...)``, image
     display output, MCP image blocks) follow its result as one user message with image
     parts. Off: the result keeps only a text pointer per image."""
 
