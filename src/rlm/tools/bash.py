@@ -16,7 +16,7 @@ import sys
 import time
 import contextlib
 import subprocess
-from threading import Event
+from threading import Event, Thread
 from typing import Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
@@ -29,6 +29,11 @@ _OWN_GROUP = (
 """A command leads a process group in its caller's session: a timeout or a cancel stops
 the command and what it started, a kernel restart or shutdown stops a command the kernel
 ran, and a daemon, in a session of its own, outlives both."""
+
+_EXIT_DRAIN_GRACE = 0.5
+"""Seconds a command's output is still read for once bash itself has exited. A pipe still
+open after that is held by a job the command put in the background, and the call does not
+wait for it."""
 
 BASH_SCHEMA = {
     "type": "function",
@@ -72,6 +77,14 @@ EDIT_SCHEMA = {
 }
 
 
+def _discard_until_eof(fd: int) -> None:
+    """Read a pipe a background job still holds to its end, so the job's writes neither
+    block on a full pipe nor fail on a closed one once the call has returned."""
+    with open(fd, "rb", buffering=0) as pipe:
+        while pipe.read(65536):
+            pass
+
+
 def run_bash(
     command: str,
     timeout: int,
@@ -109,6 +122,7 @@ def bash_outcome(
         for name in streams
     }
     reason = ""
+    exited_at = None
     with (
         subprocess.Popen(
             ["bash", "-c", command],
@@ -130,10 +144,18 @@ def bash_outcome(
                 if interrupt_event is not None and interrupt_event.is_set():
                     reason = "[command interrupted]"
                     break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    reason = f"Error: command timed out after {timeout}s"
-                    break
+                now = time.monotonic()
+                if exited_at is None and proc.poll() is not None:
+                    exited_at = now
+                if exited_at is not None:
+                    remaining = exited_at + _EXIT_DRAIN_GRACE - now
+                    if remaining <= 0:
+                        break
+                else:
+                    remaining = deadline - now
+                    if remaining <= 0:
+                        reason = f"Error: command timed out after {timeout}s"
+                        break
                 for key, _ in selector.select(min(remaining, 0.1)):
                     data = os.read(key.fileobj.fileno(), 65536)
                     if not data:
@@ -147,11 +169,16 @@ def bash_outcome(
                     reason = f"Error: command timed out after {timeout}s"
         finally:
             # Once bash itself has exited, what still holds its output is a job it put in
-            # the background, and that job outlives the call.
+            # the background, and that job outlives the call. Its pipes are read to their
+            # end off the call, never closed under it.
             if proc.poll() is None:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
+            for key in list(selector.get_map().values()):
+                Thread(
+                    target=_discard_until_eof, args=(os.dup(key.fd),), daemon=True
+                ).start()
     for name in streams:
         captures[name].add(decoders[name].decode(b"", final=True))
     (stdout, stdout_omitted), (stderr, stderr_omitted) = (
