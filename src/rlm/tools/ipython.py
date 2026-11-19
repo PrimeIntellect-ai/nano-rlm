@@ -21,12 +21,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from rlm.images import (
-    IMAGE_MIMES,
-    MAX_IMAGE_BYTES_PER_CALL,
-    ImageBudgetExceeded,
-    decoded_size,
-)
+from rlm.images import IMAGE_MIMES, MAX_IMAGE_BYTES_PER_CALL
+from rlm.images import ImageBudgetExceeded, decoded_size
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
 from rlm.tools.output import OutputCapture

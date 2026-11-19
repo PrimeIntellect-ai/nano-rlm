@@ -22,12 +22,8 @@ from mcp.types import ImageContent, Tool
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from rlm.broker import json_annotation
-from rlm.images import (
-    IMAGE_MIMES,
-    MAX_IMAGE_BYTES_PER_CALL,
-    ImageBudgetExceeded,
-    decoded_size,
-)
+from rlm.images import IMAGE_MIMES, MAX_IMAGE_BYTES_PER_CALL
+from rlm.images import ImageBudgetExceeded, decoded_size
 
 MAX_MCP_SKILL_NAME_CHARS = 96
 MAX_MCP_DESCRIPTOR_BYTES = 1024 * 1024
