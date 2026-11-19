@@ -8,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
+from rlm.images import image_part
 from rlm.types import ChildSessionAggregate, ProgrammaticToolCallStats
 
 
@@ -166,8 +167,20 @@ class Session:
         *,
         call_id: str,
         context_content: str | None = None,
+        images: list[dict[str, str]] | None = None,
     ) -> dict:
-        message = {"role": "tool", "tool_call_id": call_id, "content": content}
+        image_parts = [image_part(image) for image in images or []]
+
+        def tool_message(text: str) -> dict:
+            return {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": [{"type": "text", "text": text}, *image_parts]
+                if image_parts
+                else text,
+            }
+
+        message = tool_message(content)
         truncated = context_content is not None and context_content != content
         source_index = self.log(
             {
@@ -181,7 +194,7 @@ class Session:
             in_context=not truncated,
         )
         if truncated:
-            message = {**message, "content": context_content}
+            message = tool_message(context_content)
             self.log(
                 {
                     "type": "context_message",

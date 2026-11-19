@@ -57,7 +57,7 @@ The only process environment variable is `RLM_HOME` (default `~/.rlm`): the root
 | `max_compactions` | null | Compactions per session |
 | `max_compaction_attempts` | 5 | Summary attempts within one compaction |
 | `allow_git` | false | Lift the guard that refuses Git commands reaching beyond the current branch (other refs, branch and tag listings, `clone`, `fetch`, `pull`) |
-| `vision` | false | The model reads images: images a tool call shows (`attach_image(path, ...)`, image display output, MCP image blocks; up to 10 MiB of image file bytes in total per tool call) follow its result as one user message with image parts. Off, the result keeps a text pointer per image, naming an attached image's file |
+| `vision` | false | The model reads images: images a tool call shows (`attach_image(path, ...)`, image display output, MCP image blocks; up to 10 MiB of image file bytes in total per tool call) are sent as image parts in the tool response with its original tool call ID. Off, the result keeps a text pointer per image, naming an attached image's file |
 
 **Model-call admission.** `max_concurrent_subagents` bounds calls across the tree. Queued calls closer to the root go first, FIFO within a depth, and calls in flight are not preempted, so continuous shallow work can delay deeper agents. Tools, child waits and the backoff between outer retries hold no slot; the SDK's own retries stay within one. The limit is per tree: a cap across trees belongs in the runner or inference gateway.
 

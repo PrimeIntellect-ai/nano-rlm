@@ -352,17 +352,20 @@ async def test_attached_image_follows_tool_result(session, vision):
     await engine.aclose()
 
     messages = client.calls[1]["messages"]
-    assert messages[-1 - vision]["role"] == "tool"
-    pixel = session.dir / "pixel.png"
-    assert f"[image 1: {pixel}, image/png, 1 KB]" in messages[-1 - vision]["content"]
+    call = messages[-2]["tool_calls"][0]
+    result = messages[-1]
+    assert result["role"] == "tool"
+    assert result["tool_call_id"] == call["id"]
+    pointer = f"[image 1: {session.dir / 'pixel.png'}, image/png, 1 KB]"
     if vision:
-        assert messages[-1]["role"] == "user"
-        assert messages[-1]["content"][1] == {
+        text, image = result["content"]
+        assert text["type"] == "text" and pointer in text["text"]
+        assert image == {
             "type": "image_url",
             "image_url": {"url": f"data:image/png;base64,{PIXEL_PNG}"},
         }
     else:
-        assert "no image input" in messages[-1]["content"]
+        assert pointer in result["content"] and "no image input" in result["content"]
 
 
 def test_repl_shares_image_budget_across_attach_and_display(session, monkeypatch):

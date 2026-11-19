@@ -43,7 +43,6 @@ from rlm.compaction import (
     truncate_tool_output,
 )
 from rlm.config import RuntimeConfig
-from rlm.images import image_part
 from rlm.semantic import SemanticEdgeTracker
 from rlm.mcp import MCPServer, validate_mcp_servers
 from rlm.prompt import build_system_prompt
@@ -698,22 +697,6 @@ class RLMEngine:
         self._quote_nesting_hints += 1
         self._supervisor.hint(self._invocation_id, "quote-nesting", text)
 
-    def _log_images(self, images: list[dict[str, str]]) -> None:
-        # Tool messages carry text only at most providers, so the images follow
-        # the tool result as a user message.
-        message, provenance = runtime_event(
-            "images",
-            f"The {len(images)} image(s) shown by the last tool call, in order.",
-        )
-        message["content"] = [
-            {"type": "text", "text": message["content"]},
-            *(image_part(image) for image in images),
-        ]
-        self.session.log(
-            {"type": "tool_images", "message": message, "provenance": provenance},
-            in_context=True,
-        )
-
     def _deliver_kernel_notices(self) -> None:
         if self._repl is None:
             return
@@ -1078,9 +1061,8 @@ class RLMEngine:
                 duration,
                 call_id=tc.id,
                 context_content=content,
+                images=tool_result.images if self.vision else None,
             )
-            if tool_result.images and self.vision:
-                self._log_images(tool_result.images)
             if tool_name == "ipython":
                 self._note_quote_nesting(result, str(tool_args.get("code") or ""))
             self._publish_agent_step(step_start)

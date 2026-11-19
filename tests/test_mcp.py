@@ -405,12 +405,12 @@ async def test_mcp_image_blocks_reach_the_model_as_images(tmp_path):
     await engine.aclose()
 
     messages = client.calls[1]["messages"]
-    assert messages[-2]["role"] == "tool"
-    assert "one pixel" in messages[-2]["content"]
-    assert "[image 1: image/png" in messages[-2]["content"]
-    assert messages[-1]["content"][1]["image_url"]["url"].startswith(
-        "data:image/png;base64,iVBORw0KGgo"
-    )
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == messages[-2]["tool_calls"][0]["id"]
+    text, image = messages[-1]["content"]
+    assert text["type"] == "text" and "one pixel" in text["text"]
+    assert "[image 1: image/png" in text["text"]
+    assert image["image_url"]["url"].startswith("data:image/png;base64,iVBORw0KGgo")
 
 
 async def test_mcp_checks_total_image_bytes_before_the_broker(monkeypatch):

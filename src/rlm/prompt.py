@@ -63,7 +63,7 @@ KERNEL_PACKAGES_PROMPT = (
 )
 VISION_PROMPT = (
     "Use `attach_image(path, ...)` in ipython to view PNG, JPEG, WebP or GIF files together. "
-    "Image display output and MCP image blocks also appear after the tool result. "
+    "Image display output and MCP image blocks also appear in the tool result. "
     "The images in a tool call can total up to 10 MiB."
 )
 BASH_SKILL_PROMPT = (
