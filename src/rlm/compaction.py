@@ -168,7 +168,7 @@ def truncate_tool_output(
     if omitted is not None:
         keep = min(keep, KEPT_PER_END)
     head = data[:keep].decode("utf-8", errors="ignore")
-    tail = data[len(data) - keep :].decode("utf-8", errors="ignore")
+    tail = data[-keep:].decode("utf-8", errors="ignore")
     return (
         f"Warning: truncated output (original token count: {estimated_tokens(size.nchars)})\n"
         f"Total output lines: {size.newlines + 1}\n\n"
