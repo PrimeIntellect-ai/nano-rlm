@@ -13,7 +13,7 @@ import uuid
 
 import pytest
 
-from rlm.tools.bash import bash_outcome, run_bash
+from rlm.tools.bash import _BACKGROUND_NOTE, bash_outcome, run_bash
 from rlm.tools.output import OUTPUT_KEEP_BYTES
 
 TAG_VAR = "RLM_BASH_TEST_TAG"
@@ -68,24 +68,27 @@ def _timed(command: str, timeout: int = 10, **kwargs) -> tuple[float, str]:
     return time.monotonic() - start, out
 
 
-# (command, seconds the command itself sleeps before bash exits)
+# (command, seconds the command itself sleeps before bash exits, whether the job left
+# running still holds the call's output)
 BACKGROUND_COMMANDS = [
-    ("cd /tmp && nohup sleep 300 >/dev/null 2>&1 &", 0),
-    ("cd /tmp && setsid sleep 300 </dev/null >/dev/null 2>&1 &", 0),
-    ("sleep 300 &", 0),
-    ("nohup sleep 300 &", 0),
-    ("sleep 300 >f &", 0),
-    ("(cd {cwd} && nohup sleep 300 >f 2>&1 &)", 0),
-    ("bash -c 'sleep 300; :' & sleep 1; kill $!", 1),
-    ("sleep 300 | cat & sleep 1; kill $!", 1),
+    ("cd /tmp && nohup sleep 300 >/dev/null 2>&1 &", 0, False),
+    ("cd /tmp && setsid sleep 300 </dev/null >/dev/null 2>&1 &", 0, False),
+    ("sleep 300 &", 0, True),
+    ("nohup sleep 300 &", 0, True),
+    ("sleep 300 >f &", 0, True),
+    ("(cd {cwd} && nohup sleep 300 >f 2>&1 &)", 0, False),
+    ("bash -c 'sleep 300; :' & sleep 1; kill $!", 1, True),
+    ("sleep 300 | cat & sleep 1; kill $!", 1, True),
 ]
 
 
 @needs_proc
-@pytest.mark.parametrize(("command", "own_sleep"), BACKGROUND_COMMANDS)
-def test_background_job_does_not_hold_call_open(command, own_sleep, tag, tmp_path):
+@pytest.mark.parametrize(("command", "own_sleep", "held"), BACKGROUND_COMMANDS)
+def test_background_job_does_not_hold_call_open(
+    command, own_sleep, held, tag, tmp_path
+):
     elapsed, out = _timed(command.format(cwd=tmp_path), cwd=str(tmp_path))
-    assert out == "(no output)"
+    assert out == (_BACKGROUND_NOTE if held else "(no output)")
     assert elapsed < own_sleep + 1.5
     sleepers = [
         pid for pid, argv in _tagged(tag).items() if argv[:2] == ["sleep", "300"]
@@ -116,6 +119,25 @@ def test_unredirected_server_keeps_serving_after_return(tag):
     for _ in range(3):
         with urllib.request.urlopen(url, timeout=5) as response:
             assert response.status == 200
+
+
+@needs_proc
+def test_output_before_exit_is_complete_while_a_job_holds_the_pipes(tag):
+    """More than a pipe's capacity, all written before bash exits, comes back whole."""
+    size = 300_000
+    elapsed, out = _timed(
+        f"head -c {size} /dev/zero | tr '\\0' a; echo; head -c {size} /dev/zero"
+        " | tr '\\0' b >&2; sleep 300 &"
+    )
+    assert out == "a" * size + "\n\n" + "b" * size + "\n" + _BACKGROUND_NOTE
+    assert elapsed < 5
+
+
+@needs_proc
+def test_output_written_after_bash_exits_is_not_shown(tag):
+    elapsed, out = _timed("echo fg; (sleep 1; echo bg) &")
+    assert out == "fg\n\n" + _BACKGROUND_NOTE
+    assert elapsed < 1
 
 
 @needs_proc
