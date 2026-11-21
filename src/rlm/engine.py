@@ -850,7 +850,8 @@ class RLMEngine:
             parsed_args: list[dict | None] = []
             if msg.tool_calls:
                 tool_calls_log = []
-                for tc in msg.tool_calls:
+                dumped_calls = msg_dict.get("tool_calls") or []
+                for idx, tc in enumerate(msg.tool_calls):
                     args, err = _parse_tool_call_args(tc.function.arguments)
                     parsed_args.append(args)
                     tool_calls_log.append(
@@ -859,6 +860,14 @@ class RLMEngine:
                             "args": err if args is None else args,
                         }
                     )
+                    if args is None and idx < len(dumped_calls):
+                        # OpenAI-compatible endpoints reject subsequent turns with HTTP 400
+                        # if a previous assistant message carries non-JSON-object arguments.
+                        # The raw malformed payload and parse error remain in tool_calls_log
+                        # and in the tool error feedback returned to the model below.
+                        fn = dumped_calls[idx].get("function")
+                        if isinstance(fn, dict):
+                            fn["arguments"] = "{}"
             step_start = self.session.message_count
             self.session.log_assistant(turn, tool_calls_log, msg_dict)
             messages = self.session.messages
