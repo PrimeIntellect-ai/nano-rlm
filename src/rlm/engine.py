@@ -72,20 +72,24 @@ from rlm.types import (
 logger = logging.getLogger(__name__)
 
 
+def _reject_json_constant(constant: str) -> Any:
+    raise ValueError(f"invalid JSON constant: {constant}")
+
+
 def _parse_tool_call_args(raw: str) -> tuple[dict | None, dict | None]:
     """Parse a tool-call arguments blob. Returns (args, error_info).
 
-    Accepts JSON objects only. Errors return (None, error_info), where
+    Accepts strict JSON objects only. Errors return (None, error_info), where
     error_info contains ``_parse_error`` and ``_raw`` for logging.
     """
     try:
-        args = json.loads(raw)
+        args = json.loads(raw, parse_constant=_reject_json_constant)
     except json.JSONDecodeError as exc:
         return None, {
             "_parse_error": f"{exc.msg} at line {exc.lineno} column {exc.colno}",
             "_raw": raw,
         }
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         return None, {"_parse_error": str(exc), "_raw": raw}
     if not isinstance(args, dict):
         return None, {
