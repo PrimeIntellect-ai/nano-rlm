@@ -219,6 +219,7 @@ class RLMEngine:
         self.max_depth = config.policy.max_depth
         self.depth = config.invocation.depth
         self.allow_git = config.policy.allow_git
+        self.vision = config.policy.vision
         self.network_guidance = config.policy.network_guidance
 
         # Task MCP tool servers to expose as IPython skills.
@@ -1045,6 +1046,8 @@ class RLMEngine:
                 self._metrics.record(event)
 
             result = tool_result.content
+            if tool_result.images and not self.vision:
+                result += "\n[images are not shown: this model has no image input]"
 
             content = truncate_tool_output(
                 result,
@@ -1058,6 +1061,7 @@ class RLMEngine:
                 duration,
                 call_id=tc.id,
                 context_content=content,
+                images=tool_result.images if self.vision else None,
             )
             if tool_name == "ipython":
                 self._note_quote_nesting(result, str(tool_args.get("code") or ""))
@@ -1638,6 +1642,7 @@ class RLMEngine:
             allow_recursion=self.depth < self.max_depth,
             delegation_prompt=self.runtime_config.policy.delegation_prompt,
             allow_git=self.allow_git,
+            vision=self.vision,
             network_guidance=self.network_guidance,
             active_tools=active_tools,
             shell_skills=get_installed_skills(),

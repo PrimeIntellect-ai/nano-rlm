@@ -16,6 +16,8 @@ class ToolOutcome:
 
     content: str
     metric_events: list[BuiltinMetricEvent] = field(default_factory=list)
+    images: list[dict[str, str]] = field(default_factory=list)
+    """Images shown by the call, as ``{"mime": ..., "data": <base64>}``."""
     omitted: OutputSize | None = None
     """How much more the whole output measures than `content`, when `content` kept
     only its start and end."""

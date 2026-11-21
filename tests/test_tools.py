@@ -7,6 +7,8 @@ exercise how the harness reacts to model tool-call behavior.
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 from conftest import (
     DummyClient,
@@ -17,6 +19,7 @@ from conftest import (
     tool_result,
 )
 
+from rlm.config import ExecutionPolicy
 from rlm.engine import RLMEngine
 from rlm.tools.ipython import IPythonREPL
 
@@ -321,3 +324,97 @@ async def test_tree_turn_budget_stops_engine(session):
     assert engine.stop_reason == "max_total_turns"
     assert len(client.calls) == 1
     assert result.answer == "[turn budget reached]"
+
+
+PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+
+@pytest.mark.parametrize("vision", [True, False])
+async def test_attached_image_follows_tool_result(session, vision):
+    code = (
+        "import base64; open('pixel.png', 'wb').write(base64.b64decode("
+        f"{PIXEL_PNG!r})); attach_image('pixel.png')"
+    )
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", {"code": code})]),
+            DummyMessage(content="a pixel"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        cwd=str(session.dir),
+        runtime_config=make_runtime_config(policy=ExecutionPolicy(vision=vision)),
+    )  # type: ignore
+
+    await engine.run("look")
+    await engine.aclose()
+
+    messages = client.calls[1]["messages"]
+    call = messages[-2]["tool_calls"][0]
+    result = messages[-1]
+    assert result["role"] == "tool"
+    assert result["tool_call_id"] == call["id"]
+    pointer = f"[image 1: {session.dir / 'pixel.png'}, image/png, 1 KB]"
+    if vision:
+        text, image = result["content"]
+        assert text["type"] == "text" and pointer in text["text"]
+        assert image == {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{PIXEL_PNG}"},
+        }
+    else:
+        assert pointer in result["content"] and "no image input" in result["content"]
+
+
+def test_repl_shares_image_budget_across_attach_and_display(session, monkeypatch):
+    size = len(base64.b64decode(PIXEL_PNG))
+    monkeypatch.setattr("rlm.tools.ipython.MAX_IMAGE_BYTES_PER_CALL", 6 * size)
+    path = session.dir / "pixel.png"
+    path.write_bytes(base64.b64decode(PIXEL_PNG))
+    repl = IPythonREPL(cwd=str(session.dir), session=session)
+    repl.start()
+    try:
+        mixed = (
+            f"attach_image(*([{str(path)!r}] * 5))\n"
+            "from IPython.display import display\n"
+            f"display({{'image/png': {PIXEL_PNG!r}}}, raw=True)"
+        )
+        assert "[image 6:" in repl.execute(mixed)
+        assert len(repl.take_images()) == 6
+        denied = repl.execute(mixed + f"\nattach_image({str(path)!r})")
+        assert "Attach fewer images per call or compress/resize them" in denied
+        assert "[image 1:" not in denied
+        assert repl.take_images() == []
+        assert "[image 1:" in repl.execute(f"attach({str(path)!r})")
+        assert len(repl.take_images()) == 1
+    finally:
+        repl.shutdown()
+
+
+def test_attach_validates_the_whole_batch_before_display(tmp_path, monkeypatch):
+    from rlm.images import MAX_IMAGE_BYTES_PER_CALL, ImageBudgetExceeded, attach_image
+
+    emitted = []
+    monkeypatch.setattr("IPython.display.display", lambda *a, **kw: emitted.append(a))
+    first = tmp_path / "first.png"
+    first.write_bytes(base64.b64decode(PIXEL_PNG))
+    last = tmp_path / "last.png"
+    last.write_bytes(first.read_bytes())
+    with last.open("ab") as stream:
+        stream.truncate(MAX_IMAGE_BYTES_PER_CALL - first.stat().st_size)
+    attach_image(first, last)
+    assert len(emitted) == 2
+    emitted.clear()
+    with last.open("ab") as stream:
+        stream.write(b"x")
+    with pytest.raises(
+        ImageBudgetExceeded, match="Attach fewer images per call or compress/resize"
+    ):
+        attach_image(first, last)
+    assert emitted == []
+    last.write_bytes(b"not an image")
+    with pytest.raises(ValueError, match="not a PNG"):
+        attach_image(first, last)
+    assert emitted == []

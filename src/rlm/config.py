@@ -98,6 +98,10 @@ class ExecutionPolicy(_ConfigModel):
     """Tree-total cap on sub-agent spawns. None (default) = uncapped; ``max_total_tokens``
     still bounds the tree."""
     allow_git: bool = False
+    vision: bool = False
+    """The model reads images: images shown by a tool call (``attach_image(path, ...)``, image
+    display output, MCP image blocks) appear in its tool result as image content parts. Off: the result keeps only a text pointer per image."""
+
     network_guidance: bool = True
     """Include prompt guidance that assumes outbound network access (installing extra
     kernel packages, the online-solutions clause of the Git guard). Disable it for
