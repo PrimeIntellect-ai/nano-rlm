@@ -68,27 +68,25 @@ def _timed(command: str, timeout: int = 10, **kwargs) -> tuple[float, str]:
     return time.monotonic() - start, out
 
 
-# (command, seconds the command itself sleeps before bash exits, whether the job left
-# running still holds the call's output)
+# (command, seconds the command itself sleeps before bash exits). Each leaves a job that
+# holds the call's output, which kept the call open until its timeout before.
 BACKGROUND_COMMANDS = [
-    ("cd /tmp && nohup sleep 300 >/dev/null 2>&1 &", 0, False),
-    ("cd /tmp && setsid sleep 300 </dev/null >/dev/null 2>&1 &", 0, False),
-    ("sleep 300 &", 0, True),
-    ("nohup sleep 300 &", 0, True),
-    ("sleep 300 >f &", 0, True),
-    ("(cd {cwd} && nohup sleep 300 >f 2>&1 &)", 0, False),
-    ("bash -c 'sleep 300; :' & sleep 1; kill $!", 1, True),
-    ("sleep 300 | cat & sleep 1; kill $!", 1, True),
+    ("cd /tmp && nohup sleep 300 >/dev/null 2>&1 &", 0),
+    ("cd /tmp && setsid sleep 300 </dev/null >/dev/null 2>&1 &", 0),
+    ("sleep 300 &", 0),
+    ("nohup sleep 300 &", 0),
+    ("sleep 300 >f &", 0),
+    ("(cd {cwd} && nohup sleep 300 >f 2>&1 &)", 0),
+    ("bash -c 'sleep 300; :' & sleep 1; kill $!", 1),
+    ("sleep 300 | cat & sleep 1; kill $!", 1),
 ]
 
 
 @needs_proc
-@pytest.mark.parametrize(("command", "own_sleep", "held"), BACKGROUND_COMMANDS)
-def test_background_job_does_not_hold_call_open(
-    command, own_sleep, held, tag, tmp_path
-):
+@pytest.mark.parametrize(("command", "own_sleep"), BACKGROUND_COMMANDS)
+def test_background_job_does_not_hold_call_open(command, own_sleep, tag, tmp_path):
     elapsed, out = _timed(command.format(cwd=tmp_path), cwd=str(tmp_path))
-    assert out == (_BACKGROUND_NOTE if held else "(no output)")
+    assert out == _BACKGROUND_NOTE
     assert elapsed < own_sleep + 1.5
     sleepers = [
         pid for pid, argv in _tagged(tag).items() if argv[:2] == ["sleep", "300"]
