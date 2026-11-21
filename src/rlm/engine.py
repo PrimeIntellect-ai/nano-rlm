@@ -95,6 +95,20 @@ def _parse_tool_call_args(raw: str) -> tuple[dict | None, dict | None]:
     return args, None
 
 
+def _invalid_tool_call_feedback(name: str, error: dict, max_bytes: int) -> str:
+    raw = error["_raw"]
+    text = raw if isinstance(raw, str) else json.dumps(raw)
+    preview = truncate_tool_output(text, max_bytes)
+    source = "Original arguments"
+    if preview != text:
+        source += " (full text in messages.jsonl under tool_calls[].args._raw)"
+    return (
+        f"Error: invalid JSON arguments for tool '{name}': {error['_parse_error']}\n"
+        "The call was skipped. The {} in the call history is a placeholder. "
+        f"Retry with a complete JSON object.\n{source}:\n{preview}"
+    )
+
+
 def _new_tokens(response, usage: TokenUsage) -> int:
     """One call's contribution to the tree budget: completion + uncached prompt tokens.
     The cached context prefix re-billed on every call is not new work; a provider that
@@ -850,7 +864,8 @@ class RLMEngine:
             parsed_args: list[dict | None] = []
             if msg.tool_calls:
                 tool_calls_log = []
-                for tc in msg.tool_calls:
+                dumped_calls = msg_dict.get("tool_calls") or []
+                for idx, tc in enumerate(msg.tool_calls):
                     args, err = _parse_tool_call_args(tc.function.arguments)
                     parsed_args.append(args)
                     tool_calls_log.append(
@@ -859,30 +874,31 @@ class RLMEngine:
                             "args": err if args is None else args,
                         }
                     )
+                    if args is None and idx < len(dumped_calls):
+                        # Some endpoints validate historical arguments before inference.
+                        fn = dumped_calls[idx].get("function")
+                        if isinstance(fn, dict):
+                            fn["arguments"] = "{}"
             step_start = self.session.message_count
             self.session.log_assistant(turn, tool_calls_log, msg_dict)
             messages = self.session.messages
 
-            if msg.tool_calls and len(msg.tool_calls) > 1:
-                feedback = "Error: only one tool call per turn allowed"
-                for tc in msg.tool_calls:
+            if msg.tool_calls and (len(msg.tool_calls) > 1 or parsed_args[0] is None):
+                for idx, tc in enumerate(msg.tool_calls):
+                    feedback = []
+                    if len(msg.tool_calls) > 1:
+                        feedback.append("Error: only one tool call per turn allowed")
+                    if parsed_args[idx] is None:
+                        feedback.append(
+                            _invalid_tool_call_feedback(
+                                tc.function.name,
+                                tool_calls_log[idx]["args"],
+                                self.max_tool_output_bytes or TOOL_OUTPUT_MAX_BYTES,
+                            )
+                        )
                     self.session.log_tool_result(
-                        turn, tc.function.name, feedback, 0.0, call_id=tc.id
+                        turn, tc.function.name, "\n".join(feedback), 0.0, call_id=tc.id
                     )
-                self._publish_agent_step(step_start)
-                continue
-
-            if msg.tool_calls and parsed_args[0] is None:
-                tc = msg.tool_calls[0]
-                tool_name = tc.function.name
-                err_info = tool_calls_log[0]["args"]
-                feedback = (
-                    f"Error: invalid JSON arguments for tool '{tool_name}': "
-                    f"{err_info['_parse_error']}"
-                )
-                self.session.log_tool_result(
-                    turn, tool_name, feedback, 0.0, call_id=tc.id
-                )
                 self._publish_agent_step(step_start)
                 continue
 
