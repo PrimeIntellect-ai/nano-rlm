@@ -18,6 +18,8 @@ The kernel keeps running through compaction, so variables, imports and in-memory
 
 ## Tool output
 
+When a tool call's arguments cannot be parsed as a JSON object, the engine skips the call and records `{}` in the assistant message. The matching tool error includes the parser diagnostic and the original argument text so the agent can correct and resubmit it. If that text exceeds `max_tool_output_bytes`, the error shows the beginning and end and points to the full text in the assistant record's `tool_calls[].args._raw` in `messages.jsonl`.
+
 A tool result longer than 20 KB (`max_tool_output_bytes`) enters the conversation as its first and last 10 KB around a notice with the whole output's token estimate, line count and omitted bytes. The full result stays in the ledger.
 
 A command or cell always runs to its end, however much it prints. Its result keeps at most the first and last 512 KiB of output (bash divides that between stdout and stderr) and records how much more the whole output measured, so the notice reports the whole output's size either way. The ledger keeps the retained ends with a marker where the middle was dropped. `rlm.shell` jobs keep up to 16 MiB each in their own files ([Shell jobs](python-api.md#shell-jobs)).

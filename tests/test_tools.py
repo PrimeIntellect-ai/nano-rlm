@@ -7,6 +7,8 @@ exercise how the harness reacts to model tool-call behavior.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from conftest import (
     DummyClient,
@@ -17,7 +19,9 @@ from conftest import (
     tool_result,
 )
 
+from rlm.config import ExecutionPolicy
 from rlm.engine import RLMEngine
+from rlm.history import History
 from rlm.tools.ipython import IPythonREPL
 
 
@@ -42,14 +46,67 @@ async def test_valid_tool(session):
     assert result.turns == 2
 
 
-async def test_multiple_tool_calls(session):
+async def test_retry_invalid_tool_arguments(session):
+    code = "runs = globals().get('runs', 0) + 1\nprint('✓', runs)"
+    corrected = json.dumps({"code": code}, ensure_ascii=False, indent=2)
+    raw = corrected[:-1]
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", raw, id="broken")]),
+            DummyMessage(tool_calls=[DummyToolCall("ipython", corrected, id="retry")]),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client, session=session, runtime_config=make_runtime_config()
+    )
+    await engine.run("Run the cell once")
+
+    assistant, error = client.calls[1]["messages"][-2:]
+    assert assistant["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert error["tool_call_id"] == "broken"
+    assert "invalid JSON arguments" in error["content"]
+    assert error["content"].endswith("Original arguments:\n" + raw)
+    retry, result = client.calls[2]["messages"][-2:]
+    assert retry["tool_calls"][0]["function"]["arguments"] == corrected
+    assert result["tool_call_id"] == "retry"
+    assert result["content"].strip() == "✓ 1"
+
+
+async def test_oversized_invalid_tool_arguments(session):
+    raw = '{"code":"START' + "界" * 100 + "END"
+    client = DummyClient(
+        [
+            DummyMessage(tool_calls=[DummyToolCall("ipython", raw)]),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,
+        session=session,
+        runtime_config=make_runtime_config(
+            policy=ExecutionPolicy(max_tool_output_bytes=64)
+        ),
+    )
+    await engine.run("Run the cell")
+
+    feedback = tool_result(client)
+    assert raw not in feedback
+    assert "START" in feedback and feedback.endswith("END")
+    assert "bytes truncated" in feedback and "messages.jsonl" in feedback
+    event = next(e for e in History(session.dir).events if e["type"] == "assistant")
+    assert event["tool_calls"][0]["args"]["_raw"] == raw
+
+
+@pytest.mark.parametrize("second_args", ['{"a":3,"b":4}', "[3, 4]"])
+async def test_multiple_tool_calls(session, second_args):
     """Each tool_call_id in a multi-call assistant message receives a tool result."""
     prompt = "add things"
     messages = [
         DummyMessage(
             tool_calls=[
                 DummyToolCall("add", {"a": 1, "b": 2}, id="call_0"),
-                DummyToolCall("add", {"a": 3, "b": 4}, id="call_1"),
+                DummyToolCall("add", second_args, id="call_1"),
             ]
         ),
         DummyMessage(content="done"),
@@ -63,7 +120,19 @@ async def test_multiple_tool_calls(session):
     await engine.run(prompt)
 
     tool_messages = [m for m in client.calls[1]["messages"] if m.get("role") == "tool"]
-    assert sorted(m["tool_call_id"] for m in tool_messages) == ["call_0", "call_1"]
+    assert [m["tool_call_id"] for m in tool_messages] == ["call_0", "call_1"]
+    rule = "Error: only one tool call per turn allowed"
+    assert tool_messages[0]["content"] == rule
+    second_call = client.calls[1]["messages"][-3]["tool_calls"][1]
+    if second_args == "[3, 4]":
+        assert second_call["function"]["arguments"] == "{}"
+        assert tool_messages[1]["content"].startswith(rule)
+        assert tool_messages[1]["content"].endswith(
+            "Original arguments:\n" + second_args
+        )
+    else:
+        assert second_call["function"]["arguments"] == second_args
+        assert tool_messages[1]["content"] == rule
 
 
 async def test_tool_raises(session):
@@ -259,6 +328,7 @@ def test_truncate_tool_output_budget_override():
     tight = truncate_tool_output(big, max_bytes=1_000)
     assert len(tight.encode()) < 1_500
     assert "bytes truncated" in tight
+    assert big not in truncate_tool_output(big, max_bytes=1)
 
 
 def test_new_tokens_excludes_cached_prompt():
