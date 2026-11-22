@@ -22,7 +22,7 @@ A cancelled turn stops a running `bash` command the same way. A cancelled `ipyth
 | A `bash` tool command | unaffected | stopped, partial output kept | stopped |
 | A `bash` tool command's background job (`cmd &`, `nohup cmd &`) | runs on | runs on | runs on |
 | An `rlm.shell` job and the processes in its group | runs on | runs on (its own `timeout` applies) | stopped with its owner |
-| An `rlm.services` service | runs on | runs on | runs on, until `stop()` |
+| An `rlm.services` service | runs on | runs on | runs on, until `stop()`; in a population episode its owner's retirement, stop or episode end stops it |
 | A daemon in a session of its own (`setsid`, `start_new_session=True`) | runs on | runs on | runs on |
 
 - **The kernel's session.** The kernel leads a session of its own. A restart or the end of the session stops every process still in that session, the way a closing terminal does, while processes that started a session of their own are left alone.
