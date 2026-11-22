@@ -1,8 +1,9 @@
-"""run_bash returns when bash exits, even if background jobs hold its pipes."""
+"""run_bash returns soon after bash exits, even if background jobs hold its pipes."""
 
 from __future__ import annotations
 
 import os
+import resource
 import signal
 import socket
 import subprocess
@@ -13,7 +14,8 @@ import uuid
 
 import pytest
 
-from rlm.tools.bash import _BACKGROUND_NOTE, bash_outcome, run_bash
+from rlm.tools import bash as bash_module
+from rlm.tools.bash import _BACKGROUND_NOTE, _EXIT_GRACE, bash_outcome, run_bash
 from rlm.tools.output import OUTPUT_KEEP_BYTES
 
 TAG_VAR = "RLM_BASH_TEST_TAG"
@@ -87,7 +89,7 @@ BACKGROUND_COMMANDS = [
 def test_background_job_does_not_hold_call_open(command, own_sleep, tag, tmp_path):
     elapsed, out = _timed(command.format(cwd=tmp_path), cwd=str(tmp_path))
     assert out == _BACKGROUND_NOTE
-    assert elapsed < own_sleep + 1.5
+    assert own_sleep + _EXIT_GRACE <= elapsed < own_sleep + 1.5
     sleepers = [
         pid for pid, argv in _tagged(tag).items() if argv[:2] == ["sleep", "300"]
     ]
@@ -132,10 +134,72 @@ def test_output_before_exit_is_complete_while_a_job_holds_the_pipes(tag):
 
 
 @needs_proc
-def test_output_written_after_bash_exits_is_not_shown(tag):
+def test_output_written_after_the_grace_is_not_shown(tag):
     elapsed, out = _timed("echo fg; (sleep 1; echo bg) &")
     assert out == "fg\n\n" + _BACKGROUND_NOTE
-    assert elapsed < 1
+    assert _EXIT_GRACE <= elapsed < 1
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("echo hello > >(sleep 0.2; cat)", "hello"),
+        ("exec > >(tee log) 2>&1; echo ok", "ok"),
+        ("seq 1 200000 > >(sort -rn | head -3)", "200000\n199999\n199998"),
+        ("echo fg; (sleep 0.2; echo bg) &", "fg\nbg"),
+    ],
+)
+def test_output_written_just_after_bash_exits_is_shown(command, expected, tmp_path):
+    """A process substitution or a short job that finishes within the grace is waited
+    for, and the call returns as soon as it closes the output."""
+    elapsed, out = _timed(command, cwd=str(tmp_path))
+    assert out == expected
+    assert elapsed < _EXIT_GRACE
+
+
+def test_job_writing_after_return_runs_to_its_end(tmp_path):
+    """A job that writes more than a pipe holds after the call returned neither blocks
+    nor dies of a closed pipe."""
+    _, out = _timed(
+        "echo fg; (sleep 0.8; head -c 3000000 /dev/zero; echo $? > rc) &",
+        cwd=str(tmp_path),
+    )
+    assert out == "fg\n\n" + _BACKGROUND_NOTE
+    rc = tmp_path / "rc"
+    give_up = time.monotonic() + 10
+    while not (rc.exists() and rc.read_text()) and time.monotonic() < give_up:
+        time.sleep(0.05)
+    assert rc.read_text() == "0\n"
+
+
+def test_job_left_running_with_descriptors_above_1024():
+    """The call's pipes get descriptors above select's limit of 1024."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 2048:
+        pytest.skip("needs a descriptor limit of at least 2048")
+    if soft != resource.RLIM_INFINITY and soft < 2048:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (2048, hard))
+    held = []
+    try:
+        while not held or held[-1] < 1100:
+            held.append(os.open(os.devnull, os.O_RDONLY))
+        _, out = _timed("echo hi; sleep 3 &")
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert out == "hi\n\n" + _BACKGROUND_NOTE
+
+
+class _UnstartableThread(threading.Thread):
+    def start(self):
+        raise RuntimeError("can't start new thread")
+
+
+def test_result_returned_when_pipes_cannot_be_drained(monkeypatch):
+    monkeypatch.setattr(bash_module, "Thread", _UnstartableThread)
+    _, out = _timed("echo hi; sleep 3 &")
+    assert out == "hi\n\n" + _BACKGROUND_NOTE
 
 
 @needs_proc

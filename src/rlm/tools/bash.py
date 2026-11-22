@@ -35,10 +35,14 @@ the command and what it started, a kernel restart or shutdown stops a command th
 ran, and a daemon, in a session of its own, outlives both."""
 
 _BACKGROUND_NOTE = (
-    "[a background job still holds this command's output; what it writes later is not"
-    " shown]"
+    "[a process started by this command is still running and holds its output; later"
+    " output is not shown]"
 )
-"""Ends a result whose output a job the command left running still holds open."""
+"""Ends a result whose output a process the command left running still holds open."""
+
+_EXIT_GRACE = 0.5
+"""Seconds the output is still read after bash exits, for processes that finish writing
+just after it: a process substitution, or a short job bash did not wait for."""
 
 BASH_SCHEMA = {
     "type": "function",
@@ -89,8 +93,11 @@ def _pending(fd: int) -> int:
 
 def _at_end(fd: int) -> bool:
     """Whether every process has closed a pipe whose waiting bytes were just read. Bytes
-    that arrived since are a background job's, written after bash exited, and dropped."""
-    if not select.select([fd], [], [], 0)[0]:
+    that arrived since are a background job's, written after the grace, and dropped."""
+    # poll, not select: select rejects descriptors at or above FD_SETSIZE (1024).
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    if not poller.poll(0):
         return False
     return not os.read(fd, 65536)
 
@@ -101,6 +108,19 @@ def _discard_until_eof(fd: int) -> None:
     with open(fd, "rb", buffering=0) as pipe:
         while pipe.read(65536):
             pass
+
+
+def _drain_off_call(fd: int) -> None:
+    """Start reading a pipe a background job still holds on a thread of its own. If that
+    cannot start, the pipe is closed with the call instead, and the call still returns."""
+    try:
+        copy = os.dup(fd)
+    except OSError:
+        return
+    try:
+        Thread(target=_discard_until_eof, args=(copy,), daemon=True).start()
+    except (OSError, RuntimeError):
+        os.close(copy)
 
 
 def run_bash(
@@ -157,32 +177,40 @@ def bash_outcome(
     ):
         selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
         selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+        exited_at = None
         try:
             while selector.get_map():
                 if interrupt_event is not None and interrupt_event.is_set():
                     reason = "[command interrupted]"
                     break
-                if proc.poll() is not None:
-                    # Bash has exited, so what it and its foreground commands wrote is
-                    # in the pipes already: read exactly that and return, as a terminal
-                    # prompt does. A pipe still open is held by a job left running.
-                    for key in list(selector.get_map().values()):
-                        pending = _pending(key.fd)
-                        while pending > 0:
-                            data = os.read(key.fd, min(pending, 65536))
-                            if not data:
-                                break
-                            pending -= len(data)
-                            captures[key.data].add(decoders[key.data].decode(data))
-                        if _at_end(key.fd):
-                            selector.unregister(key.fileobj)
-                    held_open = bool(selector.get_map())
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    reason = f"Error: command timed out after {timeout}s"
-                    break
-                for key, _ in selector.select(min(remaining, 0.1)):
+                now = time.monotonic()
+                if exited_at is None and proc.poll() is not None:
+                    exited_at = now
+                if exited_at is not None:
+                    # Bash has exited in time; its output is read until every process
+                    # has closed it, or for a short grace after the exit.
+                    wait = exited_at + _EXIT_GRACE - now
+                    if wait <= 0:
+                        # A pipe still open is held by a job left running. Read what
+                        # is waiting in it now and return, as a terminal prompt does.
+                        for key in list(selector.get_map().values()):
+                            pending = _pending(key.fd)
+                            while pending > 0:
+                                data = os.read(key.fd, min(pending, 65536))
+                                if not data:
+                                    break
+                                pending -= len(data)
+                                captures[key.data].add(decoders[key.data].decode(data))
+                            if _at_end(key.fd):
+                                selector.unregister(key.fileobj)
+                        held_open = bool(selector.get_map())
+                        break
+                else:
+                    wait = deadline - now
+                    if wait <= 0:
+                        reason = f"Error: command timed out after {timeout}s"
+                        break
+                for key, _ in selector.select(min(wait, 0.1)):
                     data = os.read(key.fileobj.fileno(), 65536)
                     if not data:
                         selector.unregister(key.fileobj)
@@ -194,17 +222,18 @@ def bash_outcome(
                 except subprocess.TimeoutExpired:
                     reason = f"Error: command timed out after {timeout}s"
         finally:
-            # Once bash itself has exited, what still holds its output is a job it put in
-            # the background, and that job outlives the call. Its pipes are read to their
-            # end off the call, never closed under it.
             if proc.poll() is None:
+                # A timeout or an interrupt: the command and what it started stop, and
+                # their pipes close with the call.
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
-            for key in list(selector.get_map().values()):
-                Thread(
-                    target=_discard_until_eof, args=(os.dup(key.fd),), daemon=True
-                ).start()
+            elif exited_at is not None:
+                # Bash exited by itself, so what still holds its output is a job it put
+                # in the background, and that job outlives the call. Its pipes are read
+                # to their end off the call, never closed under it.
+                for key in list(selector.get_map().values()):
+                    _drain_off_call(key.fd)
     for name in streams:
         captures[name].add(decoders[name].decode(b"", final=True))
     (stdout, stdout_omitted), (stderr, stderr_omitted) = (
