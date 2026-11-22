@@ -70,6 +70,19 @@ def _timed(command: str, timeout: int = 10, **kwargs) -> tuple[float, str]:
     return time.monotonic() - start, out
 
 
+def _kill_from(pid_file) -> None:
+    """Stop a job left running that wrote its process ID to ``pid_file``."""
+    give_up = time.monotonic() + 5
+    while not (pid_file.exists() and pid_file.read_text().strip()):
+        if time.monotonic() > give_up:
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(int(pid_file.read_text()), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 # (command, seconds the command itself sleeps before bash exits). Each leaves a job that
 # holds the call's output, which kept the call open until its timeout before.
 BACKGROUND_COMMANDS = [
@@ -172,7 +185,7 @@ def test_job_writing_after_return_runs_to_its_end(tmp_path):
     assert rc.read_text() == "0\n"
 
 
-def test_job_left_running_with_descriptors_above_1024():
+def test_job_left_running_with_descriptors_above_1024(tmp_path):
     """The call's pipes get descriptors above select's limit of 1024."""
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if hard != resource.RLIM_INFINITY and hard < 2048:
@@ -183,11 +196,12 @@ def test_job_left_running_with_descriptors_above_1024():
     try:
         while not held or held[-1] < 1100:
             held.append(os.open(os.devnull, os.O_RDONLY))
-        _, out = _timed("echo hi; sleep 3 &")
+        _, out = _timed("echo hi; sleep 30 & echo $! > pid", cwd=str(tmp_path))
     finally:
         for fd in held:
             os.close(fd)
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+        _kill_from(tmp_path / "pid")
     assert out == "hi\n\n" + _BACKGROUND_NOTE
 
 
@@ -196,9 +210,12 @@ class _UnstartableThread(threading.Thread):
         raise RuntimeError("can't start new thread")
 
 
-def test_result_returned_when_pipes_cannot_be_drained(monkeypatch):
+def test_result_returned_when_pipes_cannot_be_drained(monkeypatch, tmp_path):
     monkeypatch.setattr(bash_module, "Thread", _UnstartableThread)
-    _, out = _timed("echo hi; sleep 3 &")
+    try:
+        _, out = _timed("echo hi; sleep 30 & echo $! > pid", cwd=str(tmp_path))
+    finally:
+        _kill_from(tmp_path / "pid")
     assert out == "hi\n\n" + _BACKGROUND_NOTE
 
 
@@ -219,6 +236,55 @@ def test_interrupt_stops_the_command(tag):
     assert out == "started\n\n[command interrupted]"
     assert elapsed < 2
     assert _tagged(tag) == {}
+
+
+def test_interrupt_after_bash_exits_keeps_the_result(tmp_path):
+    """An interrupt during the grace ends it; bash's output and exit code are kept."""
+    interrupt = threading.Event()
+    threading.Timer(0.25, interrupt.set).start()
+    try:
+        elapsed, out = _timed(
+            "echo done; sleep 30 & echo $! > pid; exit 3",
+            cwd=str(tmp_path),
+            interrupt_event=interrupt,
+        )
+    finally:
+        _kill_from(tmp_path / "pid")
+    assert out == "done\n\n[exit code 3]\n" + _BACKGROUND_NOTE
+    assert elapsed < _EXIT_GRACE
+
+
+_SESSION_WRITER = """
+import os, time
+os.setsid()
+open("pid", "w").write(str(os.getpid()))
+for _ in range(300):
+    try:
+        os.write(1, b"x\\n")
+    except BrokenPipeError:
+        open("closed", "w").write("1")
+        break
+    time.sleep(0.05)
+"""
+
+
+def test_no_drain_after_a_timeout_killed_the_group(tmp_path):
+    """A process in a session of its own holding the pipes survives the timeout's kill,
+    but its pipes are closed with the call, not read on by a thread."""
+    (tmp_path / "writer.py").write_text(_SESSION_WRITER)
+    before = set(threading.enumerate())
+    try:
+        _, out = _timed("python3 writer.py & sleep 30", timeout=1, cwd=str(tmp_path))
+        started = [t for t in threading.enumerate() if t not in before]
+        closed = tmp_path / "closed"
+        give_up = time.monotonic() + 5
+        while not closed.exists() and time.monotonic() < give_up:
+            time.sleep(0.05)
+    finally:
+        _kill_from(tmp_path / "pid")
+    assert out.endswith("Error: command timed out after 1s")
+    assert started == []
+    assert closed.exists()
 
 
 def test_wait_still_waits_for_background_jobs():

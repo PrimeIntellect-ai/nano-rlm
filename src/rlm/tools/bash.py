@@ -180,17 +180,19 @@ def bash_outcome(
         exited_at = None
         try:
             while selector.get_map():
-                if interrupt_event is not None and interrupt_event.is_set():
-                    reason = "[command interrupted]"
-                    break
                 now = time.monotonic()
                 if exited_at is None and proc.poll() is not None:
                     exited_at = now
+                interrupted = interrupt_event is not None and interrupt_event.is_set()
+                if interrupted and exited_at is None:
+                    reason = "[command interrupted]"
+                    break
                 if exited_at is not None:
                     # Bash has exited in time; its output is read until every process
-                    # has closed it, or for a short grace after the exit.
+                    # has closed it, or for a short grace after the exit. An interrupt
+                    # now ends the grace: bash's result is already complete.
                     wait = exited_at + _EXIT_GRACE - now
-                    if wait <= 0:
+                    if wait <= 0 or interrupted:
                         # A pipe still open is held by a job left running. Read what
                         # is waiting in it now and return, as a terminal prompt does.
                         for key in list(selector.get_map().values()):
