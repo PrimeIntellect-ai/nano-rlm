@@ -1,8 +1,9 @@
-"""run_bash returns when bash exits, even if background jobs hold its pipes."""
+"""run_bash returns soon after bash exits, even if background jobs hold its pipes."""
 
 from __future__ import annotations
 
 import os
+import resource
 import signal
 import socket
 import subprocess
@@ -13,7 +14,8 @@ import uuid
 
 import pytest
 
-from rlm.tools.bash import _BACKGROUND_NOTE, bash_outcome, run_bash
+from rlm.tools import bash as bash_module
+from rlm.tools.bash import _BACKGROUND_NOTE, _EXIT_GRACE, bash_outcome, run_bash
 from rlm.tools.output import OUTPUT_KEEP_BYTES
 
 TAG_VAR = "RLM_BASH_TEST_TAG"
@@ -68,6 +70,19 @@ def _timed(command: str, timeout: int = 10, **kwargs) -> tuple[float, str]:
     return time.monotonic() - start, out
 
 
+def _kill_from(pid_file) -> None:
+    """Stop a job left running that wrote its process ID to ``pid_file``."""
+    give_up = time.monotonic() + 5
+    while not (pid_file.exists() and pid_file.read_text().strip()):
+        if time.monotonic() > give_up:
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(int(pid_file.read_text()), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 # (command, seconds the command itself sleeps before bash exits). Each leaves a job that
 # holds the call's output, which kept the call open until its timeout before.
 BACKGROUND_COMMANDS = [
@@ -87,7 +102,7 @@ BACKGROUND_COMMANDS = [
 def test_background_job_does_not_hold_call_open(command, own_sleep, tag, tmp_path):
     elapsed, out = _timed(command.format(cwd=tmp_path), cwd=str(tmp_path))
     assert out == _BACKGROUND_NOTE
-    assert elapsed < own_sleep + 1.5
+    assert own_sleep + _EXIT_GRACE <= elapsed < own_sleep + 1.5
     sleepers = [
         pid for pid, argv in _tagged(tag).items() if argv[:2] == ["sleep", "300"]
     ]
@@ -132,10 +147,74 @@ def test_output_before_exit_is_complete_while_a_job_holds_the_pipes(tag):
 
 
 @needs_proc
-def test_output_written_after_bash_exits_is_not_shown(tag):
+def test_output_written_after_the_grace_is_not_shown(tag):
     elapsed, out = _timed("echo fg; (sleep 1; echo bg) &")
     assert out == "fg\n\n" + _BACKGROUND_NOTE
-    assert elapsed < 1
+    assert _EXIT_GRACE <= elapsed < 1
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("echo hello > >(sleep 0.2; cat)", "hello"),
+        ("exec > >(tee log) 2>&1; echo ok", "ok"),
+        ("seq 1 200000 > >(sort -rn | head -3)", "200000\n199999\n199998"),
+        ("echo fg; (sleep 0.2; echo bg) &", "fg\nbg"),
+    ],
+)
+def test_output_written_just_after_bash_exits_is_shown(command, expected, tmp_path):
+    """Output written within the grace after bash exits is shown."""
+    elapsed, out = _timed(command, cwd=str(tmp_path))
+    assert out == expected
+    assert elapsed < _EXIT_GRACE
+
+
+def test_job_writing_after_return_runs_to_its_end(tmp_path):
+    """A job writing after the call returned neither blocks nor gets SIGPIPE."""
+    _, out = _timed(
+        "echo fg; (sleep 0.8; head -c 3000000 /dev/zero; echo $? > rc) &",
+        cwd=str(tmp_path),
+    )
+    assert out == "fg\n\n" + _BACKGROUND_NOTE
+    rc = tmp_path / "rc"
+    give_up = time.monotonic() + 10
+    while not (rc.exists() and rc.read_text()) and time.monotonic() < give_up:
+        time.sleep(0.05)
+    assert rc.read_text() == "0\n"
+
+
+def test_job_left_running_with_descriptors_above_1024(tmp_path):
+    """The call's pipes get descriptors above select's limit of 1024."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 2048:
+        pytest.skip("needs a descriptor limit of at least 2048")
+    if soft != resource.RLIM_INFINITY and soft < 2048:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (2048, hard))
+    held = []
+    try:
+        while not held or held[-1] < 1100:
+            held.append(os.open(os.devnull, os.O_RDONLY))
+        _, out = _timed("echo hi; sleep 30 & echo $! > pid", cwd=str(tmp_path))
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+        _kill_from(tmp_path / "pid")
+    assert out == "hi\n\n" + _BACKGROUND_NOTE
+
+
+class _UnstartableThread(threading.Thread):
+    def start(self):
+        raise RuntimeError("can't start new thread")
+
+
+def test_result_returned_when_pipes_cannot_be_drained(monkeypatch, tmp_path):
+    monkeypatch.setattr(bash_module, "Thread", _UnstartableThread)
+    try:
+        _, out = _timed("echo hi; sleep 30 & echo $! > pid", cwd=str(tmp_path))
+    finally:
+        _kill_from(tmp_path / "pid")
+    assert out == "hi\n\n" + _BACKGROUND_NOTE
 
 
 @needs_proc
@@ -155,6 +234,54 @@ def test_interrupt_stops_the_command(tag):
     assert out == "started\n\n[command interrupted]"
     assert elapsed < 2
     assert _tagged(tag) == {}
+
+
+def test_interrupt_after_bash_exits_keeps_the_result(tmp_path):
+    """An interrupt during the grace ends it; bash's output and exit code are kept."""
+    interrupt = threading.Event()
+    threading.Timer(0.25, interrupt.set).start()
+    try:
+        elapsed, out = _timed(
+            "echo done; sleep 30 & echo $! > pid; exit 3",
+            cwd=str(tmp_path),
+            interrupt_event=interrupt,
+        )
+    finally:
+        _kill_from(tmp_path / "pid")
+    assert out == "done\n\n[exit code 3]\n" + _BACKGROUND_NOTE
+    assert elapsed < _EXIT_GRACE
+
+
+_SESSION_WRITER = """
+import os, time
+os.setsid()
+open("pid", "w").write(str(os.getpid()))
+for _ in range(300):
+    try:
+        os.write(1, b"x\\n")
+    except BrokenPipeError:
+        open("closed", "w").write("1")
+        break
+    time.sleep(0.05)
+"""
+
+
+def test_no_drain_after_a_timeout_killed_the_group(tmp_path):
+    """After a timeout, pipes a surviving process holds are closed, not drained."""
+    (tmp_path / "writer.py").write_text(_SESSION_WRITER)
+    before = set(threading.enumerate())
+    try:
+        _, out = _timed("python3 writer.py & sleep 30", timeout=1, cwd=str(tmp_path))
+        started = [t for t in threading.enumerate() if t not in before]
+        closed = tmp_path / "closed"
+        give_up = time.monotonic() + 5
+        while not closed.exists() and time.monotonic() < give_up:
+            time.sleep(0.05)
+    finally:
+        _kill_from(tmp_path / "pid")
+    assert out.endswith("Error: command timed out after 1s")
+    assert started == []
+    assert closed.exists()
 
 
 def test_wait_still_waits_for_background_jobs():
