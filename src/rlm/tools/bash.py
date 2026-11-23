@@ -41,8 +41,7 @@ _BACKGROUND_NOTE = (
 """Ends a result whose output a process the command left running still holds open."""
 
 _EXIT_GRACE = 0.5
-"""Seconds the output is still read after bash exits, for processes that finish writing
-just after it: a process substitution, or a short job bash did not wait for."""
+"""Seconds to keep reading after bash exits, e.g. for a process substitution."""
 
 BASH_SCHEMA = {
     "type": "function",
@@ -94,7 +93,7 @@ def _pending(fd: int) -> int:
 def _at_end(fd: int) -> bool:
     """Whether every process has closed a pipe whose waiting bytes were just read. Bytes
     that arrived since are a background job's, written after the grace, and dropped."""
-    # poll, not select: select rejects descriptors at or above FD_SETSIZE (1024).
+    # select.select rejects descriptors >= 1024.
     poller = select.poll()
     poller.register(fd, select.POLLIN)
     if not poller.poll(0):
@@ -111,8 +110,7 @@ def _discard_until_eof(fd: int) -> None:
 
 
 def _drain_off_call(fd: int) -> None:
-    """Start reading a pipe a background job still holds on a thread of its own. If that
-    cannot start, the pipe is closed with the call instead, and the call still returns."""
+    """Read a held pipe to its end on a thread of its own; never raises."""
     try:
         copy = os.dup(fd)
     except OSError:
@@ -188,13 +186,10 @@ def bash_outcome(
                     reason = "[command interrupted]"
                     break
                 if exited_at is not None:
-                    # Bash has exited in time; its output is read until every process
-                    # has closed it, or for a short grace after the exit. An interrupt
-                    # now ends the grace: bash's result is already complete.
+                    # Bash has exited: read on briefly; an interrupt ends the wait.
                     wait = exited_at + _EXIT_GRACE - now
                     if wait <= 0 or interrupted:
-                        # A pipe still open is held by a job left running. Read what
-                        # is waiting in it now and return, as a terminal prompt does.
+                        # A pipe still open is held by a job left running.
                         for key in list(selector.get_map().values()):
                             pending = _pending(key.fd)
                             while pending > 0:
@@ -225,15 +220,12 @@ def bash_outcome(
                     reason = f"Error: command timed out after {timeout}s"
         finally:
             if proc.poll() is None:
-                # A timeout or an interrupt: the command and what it started stop, and
-                # their pipes close with the call.
+                # Timed out or interrupted: the command's group is killed.
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
             elif exited_at is not None:
-                # Bash exited by itself, so what still holds its output is a job it put
-                # in the background, and that job outlives the call. Its pipes are read
-                # to their end off the call, never closed under it.
+                # A job left running outlives the call; its pipes are read off the call.
                 for key in list(selector.get_map().values()):
                     _drain_off_call(key.fd)
     for name in streams:

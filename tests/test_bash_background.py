@@ -163,16 +163,14 @@ def test_output_written_after_the_grace_is_not_shown(tag):
     ],
 )
 def test_output_written_just_after_bash_exits_is_shown(command, expected, tmp_path):
-    """A process substitution or a short job that finishes within the grace is waited
-    for, and the call returns as soon as it closes the output."""
+    """Output written within the grace after bash exits is shown."""
     elapsed, out = _timed(command, cwd=str(tmp_path))
     assert out == expected
     assert elapsed < _EXIT_GRACE
 
 
 def test_job_writing_after_return_runs_to_its_end(tmp_path):
-    """A job that writes more than a pipe holds after the call returned neither blocks
-    nor dies of a closed pipe."""
+    """A job writing after the call returned neither blocks nor gets SIGPIPE."""
     _, out = _timed(
         "echo fg; (sleep 0.8; head -c 3000000 /dev/zero; echo $? > rc) &",
         cwd=str(tmp_path),
@@ -269,8 +267,7 @@ for _ in range(300):
 
 
 def test_no_drain_after_a_timeout_killed_the_group(tmp_path):
-    """A process in a session of its own holding the pipes survives the timeout's kill,
-    but its pipes are closed with the call, not read on by a thread."""
+    """After a timeout, pipes a surviving process holds are closed, not drained."""
     (tmp_path / "writer.py").write_text(_SESSION_WRITER)
     before = set(threading.enumerate())
     try:
