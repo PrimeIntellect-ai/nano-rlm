@@ -1953,7 +1953,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.28.1,<2.0.0" },
     { name = "nest-asyncio" },
     { name = "numpy" },
-    { name = "openai", specifier = ">=1.0" },
+    { name = "openai", specifier = ">=2.30.0" },
     { name = "pandas" },
     { name = "pydantic" },
     { name = "python-dotenv" },

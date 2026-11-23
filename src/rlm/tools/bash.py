@@ -10,13 +10,17 @@ from __future__ import annotations
 import codecs
 import io
 import os
+import select
 import selectors
 import signal
+import struct
 import sys
+import termios
 import time
 import contextlib
+import fcntl
 import subprocess
-from threading import Event
+from threading import Event, Thread
 from typing import Any
 
 from rlm.tools.base import ToolContext, ToolOutcome
@@ -29,6 +33,12 @@ _OWN_GROUP = (
 """A command leads a process group in its caller's session: a timeout or a cancel stops
 the command and what it started, a kernel restart or shutdown stops a command the kernel
 ran, and a daemon, in a session of its own, outlives both."""
+
+_BACKGROUND_NOTE = (
+    "[a background job still holds this command's output; what it writes later is not"
+    " shown]"
+)
+"""Ends a result whose output a job the command left running still holds open."""
 
 BASH_SCHEMA = {
     "type": "function",
@@ -72,6 +82,27 @@ EDIT_SCHEMA = {
 }
 
 
+def _pending(fd: int) -> int:
+    """Bytes waiting in a pipe right now."""
+    return struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, b"\0" * 4))[0]
+
+
+def _at_end(fd: int) -> bool:
+    """Whether every process has closed a pipe whose waiting bytes were just read. Bytes
+    that arrived since are a background job's, written after bash exited, and dropped."""
+    if not select.select([fd], [], [], 0)[0]:
+        return False
+    return not os.read(fd, 65536)
+
+
+def _discard_until_eof(fd: int) -> None:
+    """Read a pipe a background job still holds to its end, so the job's writes neither
+    block on a full pipe nor fail on a closed one once the call has returned."""
+    with open(fd, "rb", buffering=0) as pipe:
+        while pipe.read(65536):
+            pass
+
+
 def run_bash(
     command: str,
     timeout: int,
@@ -109,6 +140,7 @@ def bash_outcome(
         for name in streams
     }
     reason = ""
+    held_open = False
     with (
         subprocess.Popen(
             ["bash", "-c", command],
@@ -130,6 +162,22 @@ def bash_outcome(
                 if interrupt_event is not None and interrupt_event.is_set():
                     reason = "[command interrupted]"
                     break
+                if proc.poll() is not None:
+                    # Bash has exited, so what it and its foreground commands wrote is
+                    # in the pipes already: read exactly that and return, as a terminal
+                    # prompt does. A pipe still open is held by a job left running.
+                    for key in list(selector.get_map().values()):
+                        pending = _pending(key.fd)
+                        while pending > 0:
+                            data = os.read(key.fd, min(pending, 65536))
+                            if not data:
+                                break
+                            pending -= len(data)
+                            captures[key.data].add(decoders[key.data].decode(data))
+                        if _at_end(key.fd):
+                            selector.unregister(key.fileobj)
+                    held_open = bool(selector.get_map())
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     reason = f"Error: command timed out after {timeout}s"
@@ -147,11 +195,16 @@ def bash_outcome(
                     reason = f"Error: command timed out after {timeout}s"
         finally:
             # Once bash itself has exited, what still holds its output is a job it put in
-            # the background, and that job outlives the call.
+            # the background, and that job outlives the call. Its pipes are read to their
+            # end off the call, never closed under it.
             if proc.poll() is None:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
+            for key in list(selector.get_map().values()):
+                Thread(
+                    target=_discard_until_eof, args=(os.dup(key.fd),), daemon=True
+                ).start()
     for name in streams:
         captures[name].add(decoders[name].decode(b"", final=True))
     (stdout, stdout_omitted), (stderr, stderr_omitted) = (
@@ -162,6 +215,8 @@ def bash_outcome(
         out += "\n" + reason
     elif proc.returncode != 0:
         out += f"\n[exit code {proc.returncode}]"
+    if held_open and not reason:
+        out += "\n" + _BACKGROUND_NOTE
     omitted = [size for size in (stdout_omitted, stderr_omitted) if size is not None]
     return ToolOutcome(
         content=out.strip() or "(no output)",

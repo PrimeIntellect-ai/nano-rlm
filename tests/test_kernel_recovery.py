@@ -504,8 +504,8 @@ async def test_long_output_runs_to_its_end_and_reads_as_whole(
 async def test_processes_live_as_on_a_terminal(session, tmp_path, split):
     """A cancelled turn stops its running bash command at once. The session's end stops
     what is attached to the kernel, like a closing terminal, and leaves a daemon and a
-    bash command's background jobs running, among them one that held the command's
-    output until its timeout."""
+    bash command's background jobs running, among them one that still holds the
+    command's output."""
     import signal
     import sys
 
