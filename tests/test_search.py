@@ -87,3 +87,20 @@ async def test_search_omits_whole_results_and_handles_block_everything(monkeypat
     assert await run_with_api_key("fake", "query", network_block=("*",)) == (
         "No results returned for query: query"
     )
+
+
+@pytest.mark.parametrize("data", [{"results": None}, {"results": {"web": None}}])
+async def test_eco_search_without_web_results_reports_no_results(monkeypatch, data):
+    response = httpx.Response(
+        200,
+        request=httpx.Request("GET", "https://ydc-index.io/v1/eco_search"),
+        json=data,
+    )
+
+    async def get(*args, **kwargs):
+        return response
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", get)
+    assert await run_with_api_key("fake", "query", provider="eco") == (
+        "No results returned for query: query"
+    )

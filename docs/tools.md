@@ -32,7 +32,7 @@ The contract's `skills` list pre-imports these into the kernel by name:
 | `bash` | `await bash("...")`: the `bash` tool's semantics from a cell |
 | `edit` | `await edit(path=..., old_str=..., new_str=...)`: a single-occurrence replacement |
 | `fetch` | `await fetch(url=...)`: a URL as cleaned text |
-| `search` | `await search(query=...)`: web search through Serper, returning titles, URLs and snippets |
+| `search` | `await search(query=...)`: web search through Serper or You.com Eco Search (`search_provider`), returning titles, URLs and snippets |
 
 `search` runs in the supervisor through the capability broker, so `search_api_key` never reaches the kernel or its subprocesses; `network_block` filters its results. The others run in the kernel.
 
