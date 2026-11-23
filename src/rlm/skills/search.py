@@ -135,7 +135,7 @@ async def _eco_results(
             "link": result.get("url"),
             "snippet": result.get("description"),
         }
-        for result in response.json().get("results", {}).get("web", [])
+        for result in (response.json().get("results") or {}).get("web") or []
     ]
 
 
