@@ -37,7 +37,7 @@ from rlm.config import (
     ProviderConfig,
     RuntimeConfig,
 )
-from rlm.engine import RLMEngine
+from rlm.engine import CAP_HIT_NUDGE, RLMEngine
 from rlm.history import history
 from rlm.session import Session
 from rlm.supervisor import SessionTreeSupervisor
@@ -137,6 +137,7 @@ def _config(
     compaction: bool = True,
     max_compaction_attempts: int = 5,
     summary_budget_tokens: int = 24_576,
+    max_cap_continuations: int = 2,
 ):
     return RuntimeConfig(
         model="test-model",
@@ -149,6 +150,7 @@ def _config(
             summarize_at_tokens=summarize_at_tokens,
             max_compaction_attempts=max_compaction_attempts,
             summary_budget_tokens=summary_budget_tokens,
+            max_cap_continuations=max_cap_continuations,
         ),
     )
 
@@ -478,8 +480,11 @@ async def test_window_cut_reply_is_kept_and_compacted(session):
 
 
 @pytest.mark.parametrize("prompt_tokens", [100, 1_500])
-async def test_length_cut_below_the_window_ends_the_run(session, prompt_tokens):
-    """A reply stopped by a completion cap is the answer, even past the threshold."""
+async def test_length_cut_below_the_window_ends_the_run_without_continuations(
+    session, prompt_tokens
+):
+    """With continuations off, a reply stopped by a completion cap is the answer, even
+    past the threshold."""
     client = _ScriptedClient(
         [
             _response(
@@ -494,7 +499,7 @@ async def test_length_cut_below_the_window_ends_the_run(session, prompt_tokens):
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        runtime_config=_config(summary_budget_tokens=1_000),
+        runtime_config=_config(summary_budget_tokens=1_000, max_cap_continuations=0),
     )
 
     try:
@@ -507,6 +512,98 @@ async def test_length_cut_below_the_window_ends_the_run(session, prompt_tokens):
     assert engine._metrics.stop_reason == "done"
     assert engine._metrics.num_compactions == 0
     assert len(client.calls) == 1
+
+
+async def test_cap_hit_reply_is_kept_and_the_model_is_asked_to_act(session):
+    """A reply stopped by the completion cap stays in the conversation, without the tool
+    call it was cut off in, followed by a nudge to act; the run continues."""
+    client = _ScriptedClient(
+        [
+            _response(
+                DummyMessage(
+                    content="long thought",
+                    tool_calls=[
+                        DummyToolCall("ipython", {"code": "print(1)"}, id="cut")
+                    ],
+                ),
+                prompt_tokens=100,
+                completion_tokens=1_000,
+                finish_reason="length",
+            ),
+            _response(DummyMessage(content="done")),
+        ],
+        max_model_len=4_000,
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(summary_budget_tokens=1_000),
+    )
+
+    try:
+        result = await engine.run("think at length")
+    finally:
+        engine.close()
+
+    assert result.answer == "done"
+    assert engine._metrics.stop_reason == "done"
+    assert engine._metrics.num_compactions == 0
+    assert len(client.calls) == 2
+    resumed = client.calls[1]["messages"]
+    assert resumed[-2] == {"role": "assistant", "content": "long thought"}
+    assert resumed[-1]["role"] == "user"
+    assert CAP_HIT_NUDGE in resumed[-1]["content"]
+    records = [
+        json.loads(line)
+        for line in (session.dir / "messages.jsonl").read_text().splitlines()
+    ]
+    assert not any(entry["type"] == "tool_result" for entry in records)
+
+
+async def test_cap_hit_continuations_are_bounded_and_reset_by_a_normal_reply(session):
+    """Only consecutive cap hits count: a normal reply resets the count, and the hit past
+    the limit ends the prompt with that reply as the answer."""
+
+    def capped(content: str) -> DummyResponse:
+        return _response(
+            DummyMessage(content=content),
+            prompt_tokens=100,
+            completion_tokens=1_000,
+            finish_reason="length",
+        )
+
+    client = _ScriptedClient(
+        [
+            capped("first"),
+            _response(
+                DummyMessage(
+                    tool_calls=[DummyToolCall("ipython", {"code": "print('ok')"})]
+                )
+            ),
+            capped("second"),
+            capped("third"),
+        ],
+        max_model_len=4_000,
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config(summary_budget_tokens=1_000, max_cap_continuations=1),
+    )
+
+    try:
+        result = await engine.run("think at length")
+    finally:
+        engine.close()
+
+    assert result.answer == "third"
+    assert engine._metrics.stop_reason == "done"
+    assert len(client.calls) == 4
+    records = [
+        json.loads(line)
+        for line in (session.dir / "messages.jsonl").read_text().splitlines()
+    ]
+    assert sum(entry["type"] == "cap_hit_nudge" for entry in records) == 2
 
 
 def _exchanges(count: int, output_chars: int) -> list[dict]:

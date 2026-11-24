@@ -85,6 +85,11 @@ class ExecutionPolicy(_ConfigModel):
     """Room a summary reply gets, reasoning included. A summary request that would
     leave less of the advertised context window is trimmed first. Capped at half
     a known context window to leave room for the retained input."""
+    max_cap_continuations: int = Field(default=2, ge=0)
+    """Consecutive replies stopped by the completion cap (below the advertised context
+    window) that the engine continues from before the cap ends the prompt. Each cut
+    reply is kept, minus any tool call it was cut off in, and the model is asked to
+    act. 0 = a cap hit ends the prompt."""
     max_compactions: int | None = Field(default=None, gt=0)
     """Compactions per session before the engine stops compacting. None (default) =
     unlimited: every compaction cycle itself spends new tokens, so ``max_total_tokens``
