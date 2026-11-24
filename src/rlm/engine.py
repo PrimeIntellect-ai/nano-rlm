@@ -157,6 +157,11 @@ EMPTY_REPLY_NUDGE = (
     "tool, or state your final answer in plain text."
 )
 
+CAP_HIT_NUDGE = (
+    "Your last reply hit the output token limit before you acted. Act now: make your "
+    "next tool call or give your final answer. Do not restate your reasoning."
+)
+
 # Allow one continuation nudge for a plan-like reply without a tool call.
 MAX_PLAN_REPLY_NUDGES = 1
 
@@ -229,6 +234,7 @@ class RLMEngine:
         self.compaction = config.policy.compaction
         self.summarize_at_tokens = config.policy.summarize_at_tokens
         self.summary_budget_tokens = config.policy.summary_budget_tokens
+        self.max_cap_continuations = config.policy.max_cap_continuations
         self.context_window: int | None = None
         self.max_compactions = config.policy.max_compactions
         self.max_compaction_attempts = config.policy.max_compaction_attempts
@@ -305,6 +311,7 @@ class RLMEngine:
         self._turn = 0
         self._empty_reply_nudges = 0
         self._plan_reply_nudges = 0
+        self._cap_continuations = 0
         self._quote_nesting_hints = 0
         self._last_answer = ""
         self._has_result = False
@@ -425,6 +432,7 @@ class RLMEngine:
             raise RuntimeError("RLM engine is closed")
         self._empty_reply_nudges = 0  # the nudge budget is per user turn
         self._plan_reply_nudges = 0
+        self._cap_continuations = 0
         self._quote_nesting_hints = 0
 
         if self.session is not None:
@@ -863,6 +871,36 @@ class RLMEngine:
                     break
                 continue
 
+            if not self._hit_completion_cap(response.choices[0].finish_reason, usage):
+                self._cap_continuations = 0
+            elif (
+                self._cap_continuations < self.max_cap_continuations
+                and self._spent_tree_cap() is None
+                and not (
+                    self.max_tokens
+                    and self._total_usage.completion_tokens >= self.max_tokens
+                )
+            ):
+                # Keep the cut reply, minus any tool call it was cut off in, and ask
+                # the model to act instead of reasoning on.
+                self._cap_continuations += 1
+                msg_dict.pop("tool_calls", None)
+                step_start = self.session.message_count
+                self.session.log_assistant(turn, None, msg_dict)
+                self._publish_agent_step(step_start)
+                message, provenance = runtime_event(
+                    "nudge", CAP_HIT_NUDGE, reason="completion_cap"
+                )
+                self.session.log(
+                    {
+                        "type": "cap_hit_nudge",
+                        "message": message,
+                        "provenance": provenance,
+                    },
+                    in_context=True,
+                )
+                continue
+
             # Log assistant message; parse tool-call args once, reuse below.
             tool_calls_log: list[dict] | None = None
             parsed_args: list[dict | None] = []
@@ -1257,6 +1295,14 @@ class RLMEngine:
             and usage.total >= self.context_window
         )
 
+    def _hit_completion_cap(self, finish_reason: str | None, usage: TokenUsage) -> bool:
+        """A reply stopped by a completion cap below the advertised context window."""
+        return (
+            finish_reason == "length"
+            and self.context_window is not None
+            and usage.total < self.context_window
+        )
+
     async def _model_attempt(self, **request: Any) -> Any:
         if self._supervisor is None:
             return await stream_completion(self.client, **request)
@@ -1635,6 +1681,7 @@ class RLMEngine:
                 "compaction": self.compaction,
                 "summarize_at_tokens": self.summarize_at_tokens,
                 "summary_budget_tokens": self.summary_budget_tokens,
+                "max_cap_continuations": self.max_cap_continuations,
                 "max_compactions": self.runtime_config.policy.max_compactions,
                 "max_compaction_attempts": self.max_compaction_attempts,
                 "allow_git": self.runtime_config.policy.allow_git,

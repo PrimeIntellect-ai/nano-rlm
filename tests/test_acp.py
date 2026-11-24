@@ -153,6 +153,7 @@ class _Engine:
                 "compaction": False,
                 "summarize_at_tokens": None,
                 "summary_budget_tokens": 24576,
+                "max_cap_continuations": 2,
                 "max_compactions": None,
                 "max_compaction_attempts": 5,
                 "allow_git": False,
