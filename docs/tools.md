@@ -36,6 +36,10 @@ The contract's `skills` list pre-imports these into the kernel by name:
 
 `search` runs in the supervisor through the capability broker, so `search_api_key` never reaches the kernel or its subprocesses; `network_block` filters its results. The others run in the kernel.
 
+## Images
+
+With the policy's `vision` on, use `attach_image(path, ...)` in an IPython cell to show the model PNG, JPEG, WebP or GIF files. IPython display output and MCP image blocks go through the same path. There is one 10 MiB budget per tool call, measured before base64 encoding. An over-budget call sends no images and asks the model to attach fewer files or compress/resize them. The tool response carries its original call ID, a text part with numbered pointers, and an image part for each file in order. Without `vision`, the result keeps only those pointers, including the file paths supplied to `attach_image`. The shorter `attach` name is an alias.
+
 ## Python tool packages
 
 A host can supply more tools as Python packages. Before running `install.sh`, it places them under `$RLM_HOME/skills/<name>/`; `install.sh` installs them beside rlm, so each is importable in the kernel and its command is on `$PATH`. The prompt lists pre-imported callables as "Python tools (pre-imported)" and packages with console commands as "Shell-enabled Python tools".

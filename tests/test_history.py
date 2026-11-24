@@ -60,6 +60,37 @@ async def test_full_tool_output_has_a_separate_index_from_context_text(tmp_path)
         session.close()
 
 
+async def test_tool_images_survive_truncation_with_the_same_call_id(tmp_path):
+    session = Session(tmp_path)
+    try:
+        session.log_tool_result(
+            0,
+            "ipython",
+            "full",
+            0,
+            call_id="look",
+            context_content="short",
+            images=[{"mime": "image/png", "data": "AQ=="}],
+        )
+        saved = await history(tmp_path)
+        for message, text in zip(saved.messages, ["full", "short"], strict=True):
+            assert message == {
+                "role": "tool",
+                "tool_call_id": "look",
+                "content": [
+                    {"type": "text", "text": text},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AQ=="},
+                    },
+                ],
+            }
+        assert saved.windows[0].messages == [saved.messages[1]]
+        assert saved.user_messages() == []
+    finally:
+        session.close()
+
+
 async def test_live_reader_ignores_unfinished_record_and_sees_it_on_next_read(tmp_path):
     path = tmp_path / "messages.jsonl"
     data = json.dumps(

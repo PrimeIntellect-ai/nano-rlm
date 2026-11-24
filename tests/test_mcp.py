@@ -372,3 +372,57 @@ async def test_cancelled_kernel_mcp_call_stops_server_and_session_reuses(tmp_pat
     assert tool_messages[-1]["content"].strip() == "reused"
     meta = json.loads((session.dir / "meta.json").read_text())
     assert meta["programmatic_tool_call_stats"]["python_total"] == 2
+
+
+async def test_mcp_image_blocks_reach_the_model_as_images(tmp_path):
+    session = Session(tmp_path / "session")
+    client = DummyClient(
+        [
+            DummyMessage(
+                tool_calls=[
+                    DummyToolCall(
+                        "ipython",
+                        {
+                            "code": "tool = await rlm.tools.get('local_pixel'); print(await tool())"
+                        },
+                    )
+                ]
+            ),
+            DummyMessage(content="done"),
+        ]
+    )
+    engine = RLMEngine(
+        client=client,  # type: ignore[arg-type]
+        session=session,
+        runtime_config=_config().model_copy(
+            update={"policy": ExecutionPolicy(vision=True)}
+        ),
+        mcp_servers={"local": _stdio_server()},
+        cwd=str(tmp_path),
+    )
+
+    await engine.run("use the tool")
+    await engine.aclose()
+
+    messages = client.calls[1]["messages"]
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == messages[-2]["tool_calls"][0]["id"]
+    text, image = messages[-1]["content"]
+    assert text["type"] == "text" and "one pixel" in text["text"]
+    assert "[image 1: image/png" in text["text"]
+    assert image["image_url"]["url"].startswith("data:image/png;base64,iVBORw0KGgo")
+
+
+async def test_mcp_checks_total_image_bytes_before_the_broker(monkeypatch):
+    import base64
+    from rlm.mcp import MCPToolError, call_tool, validate_mcp_servers
+
+    server = validate_mcp_servers({"local": _stdio_server()})["local"]
+    result = await call_tool(server, "pixels", {"count": 6})
+    assert len(result["images"]) == 6
+    size = len(base64.b64decode(result["images"][0]["data"]))
+    monkeypatch.setattr(mcp, "MAX_IMAGE_BYTES_PER_CALL", 6 * size - 1)
+    with pytest.raises(
+        MCPToolError, match="Attach fewer images per call or compress/resize"
+    ):
+        await call_tool(server, "pixels", {"count": 6})

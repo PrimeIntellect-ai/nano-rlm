@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rlm.images import IMAGE_MIMES, MAX_IMAGE_BYTES_PER_CALL
+from rlm.images import ImageBudgetExceeded, decoded_size
 from rlm.tools.base import ToolContext, ToolOutcome
 from rlm.tools.git_block import find_blocked_in_ipython, refusal
 from rlm.tools.output import OutputCapture
@@ -245,6 +247,7 @@ class IpythonTool:
             content=content,
             omitted=getattr(context.repl, "omitted", None),
             metric_events=metric_events,
+            images=context.repl.take_images(),
         )
 
     @staticmethod
@@ -318,6 +321,7 @@ class IPythonREPL:
         """How much more the last cell's whole output measured than what `execute`
         returned, when that kept only its start and end."""
         self._recovery_notices: list[str] = []
+        self._images: list[dict[str, str]] = []
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="rlm-repl"
         )
@@ -462,6 +466,7 @@ for _name in {skill_names!r}:
     globals()[_name] = _wrap_callable(_module, _source)
 
 import rlm
+from rlm.images import attach, attach_image
 """
         self._execute_silent(setup_code)
 
@@ -472,6 +477,11 @@ import rlm
     def take_recovery_notices(self) -> list[str]:
         notices, self._recovery_notices = self._recovery_notices, []
         return notices
+
+    def take_images(self) -> list[dict[str, str]]:
+        """Images displayed by the last cell, as ``{"mime", "data"}``."""
+        images, self._images = self._images, []
+        return images
 
     def _execute_silent(self, code: str, *, interruptible: bool = False):
         """Execute setup and verify the matching reply succeeded."""
@@ -634,6 +644,11 @@ import rlm
         deadline = None if timeout is None else time.monotonic() + timeout
 
         capture = OutputCapture()
+        self._images = []
+        images = []
+        image_pointers = []
+        image_bytes = 0
+        image_error = False
         try:
             while True:
                 if not self._km.is_alive():
@@ -667,11 +682,32 @@ import rlm
                 text = ""
                 if msg_type == "stream":
                     text = content["text"]
-                elif msg_type == "execute_result":
-                    text = content.get("data", {}).get("text/plain", "")
-                    if text:
-                        text += "\n"
+                elif msg_type in ("display_data", "execute_result"):
+                    bundle = content.get("data", {})
+                    mime = next((m for m in IMAGE_MIMES if m in bundle), None)
+                    if mime is not None:
+                        if image_error:
+                            continue
+                        data = "".join(bundle[mime].split())
+                        size = decoded_size(data)
+                        image_bytes += size
+                        if image_bytes > MAX_IMAGE_BYTES_PER_CALL:
+                            image_error = True
+                            continue
+                        images.append({"mime": mime, "data": data})
+                        path = content.get("metadata", {}).get(mime, {}).get("path")
+                        source = f"{path}, " if path else ""
+                        image_pointers.append(
+                            f"[image {len(images)}: {source}{mime}, {max(1, size // 1024)} KB]\n"
+                        )
+                    elif msg_type == "execute_result":
+                        text = bundle.get("text/plain", "")
+                        if text:
+                            text += "\n"
                 elif msg_type == "error":
+                    if content.get("evalue") == str(ImageBudgetExceeded()):
+                        image_error = True
+                        continue
                     tb = "\n".join(content.get("traceback", []))
                     tb = _ANSI_RE.sub("", tb)
                     text = tb
@@ -686,6 +722,12 @@ import rlm
             except Exception:
                 pass
 
+        if image_error:
+            capture.add(str(ImageBudgetExceeded()))
+        else:
+            self._images = images
+            for pointer in image_pointers:
+                capture.add(pointer)
         text, self.omitted = capture.result()
         return text
 
