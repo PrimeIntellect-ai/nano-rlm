@@ -102,6 +102,7 @@ class _ScriptedClient(DummyClient):
         super().__init__([])
         self.actions = list(actions)
         self.max_model_len = max_model_len
+        self.model_list_calls = 0
         self.base_url = f"http://scripted-{next(_client_numbers)}"
 
     @property
@@ -110,6 +111,7 @@ class _ScriptedClient(DummyClient):
 
         class _Models:
             async def list(self):
+                outer.model_list_calls += 1
                 extra = (
                     {"max_model_len": outer.max_model_len}
                     if outer.max_model_len is not None
@@ -133,6 +135,7 @@ class _ScriptedClient(DummyClient):
 def _config(
     *,
     max_depth: int = 0,
+    max_model_len: int | None = None,
     summarize_at_tokens: int | None = None,
     compaction: bool = True,
     max_compaction_attempts: int = 5,
@@ -146,6 +149,7 @@ def _config(
             max_depth=max_depth,
             max_concurrent_subagents=max(4, max_depth),
             compaction=compaction,
+            max_model_len=max_model_len,
             summarize_at_tokens=summarize_at_tokens,
             max_compaction_attempts=max_compaction_attempts,
             summary_budget_tokens=summary_budget_tokens,
@@ -418,7 +422,16 @@ async def test_context_overflow_propagates_when_compaction_is_disabled(session):
     assert engine._metrics.num_compactions == 0
 
 
-async def test_window_cut_reply_is_kept_and_compacted(session):
+@pytest.mark.parametrize(
+    ("provider_window", "configured_window"),
+    [
+        pytest.param(4_000, None, id="discovered"),
+        pytest.param(8_000, 4_000, id="override"),
+    ],
+)
+async def test_window_cut_reply_is_kept_and_compacted(
+    session, provider_window, configured_window
+):
     """A reply that runs into the context window stays in the conversation, without the
     tool call it was cut off in, and the summary request carries it."""
     client = _ScriptedClient(
@@ -444,12 +457,16 @@ async def test_window_cut_reply_is_kept_and_compacted(session):
             _response(DummyMessage(content="summary")),
             _response(DummyMessage(content="done")),
         ],
-        max_model_len=4_000,
+        max_model_len=provider_window,
     )
     engine = RLMEngine(
         client=client,  # type: ignore[arg-type]
         session=session,
-        runtime_config=_config(summary_budget_tokens=1_000, max_compaction_attempts=1),
+        runtime_config=_config(
+            max_model_len=configured_window,
+            summary_budget_tokens=1_000,
+            max_compaction_attempts=1,
+        ),
     )
 
     try:
@@ -457,6 +474,8 @@ async def test_window_cut_reply_is_kept_and_compacted(session):
     finally:
         engine.close()
 
+    assert client.model_list_calls == (1 if configured_window is None else 0)
+    assert engine.summarize_at_tokens == 2_000
     assert result.answer == "done"
     assert engine._metrics.num_compactions == 1
     assert len(client.calls) == 4

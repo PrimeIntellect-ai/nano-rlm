@@ -119,6 +119,7 @@ class _LimitsSnapshot(_ContractModel):
     max_subagent_calls: int | None = Field(default=None, gt=0)
     max_tokens: int | None = Field(default=None, gt=0)
     compaction: bool
+    max_model_len: int | None = Field(default=None, gt=0)
     summarize_at_tokens: int | None = Field(default=None, gt=0)
     summary_budget_tokens: int = Field(gt=0)
     max_compactions: int | None = Field(default=None, gt=0)

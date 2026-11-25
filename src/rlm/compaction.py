@@ -106,7 +106,9 @@ def is_context_overflow(error: APIStatusError) -> bool:
 def default_threshold(context_window: int, summary_budget: int) -> int:
     """Leave the summary budget plus overshoot room below the window; small windows
     keep at least half."""
-    return max(context_window - summary_budget - OVERSHOOT_TOKENS, context_window // 2)
+    return max(
+        context_window - summary_budget - OVERSHOOT_TOKENS, context_window // 2, 1
+    )
 
 
 def _model_context_window(payload: Mapping[str, Any], model: str) -> int | None:

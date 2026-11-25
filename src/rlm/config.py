@@ -77,14 +77,15 @@ class ExecutionPolicy(_ConfigModel):
     """Compact the context once it outgrows ``summarize_at_tokens`` (and recover from
     provider context-overflow errors by checkpointing). On by default; set False to
     let an overflowing session fail instead."""
+    max_model_len: int | None = Field(default=None, gt=0)
+    """Context window in tokens used for compaction. None = discover it from the provider."""
     summarize_at_tokens: int | None = Field(default=None, gt=0)
-    """Compaction threshold. None = derive it from the provider's advertised context
-    window (the summary budget plus 8k tokens of headroom); when the provider
-    advertises no window, compaction stays overflow-reactive only."""
+    """Compaction threshold. None = derive it from the known context window (the
+    summary budget plus 8k tokens of headroom); without a known window, compaction
+    stays overflow-reactive only."""
     summary_budget_tokens: int = Field(default=24_576, gt=0)
-    """Room a summary reply gets, reasoning included. A summary request that would
-    leave less of the advertised context window is trimmed first. Capped at half
-    a known context window to leave room for the retained input."""
+    """Room reserved for a summary reply, including reasoning. The summary input
+    is trimmed to leave this room. Capped at half a known context window."""
     max_compactions: int | None = Field(default=None, gt=0)
     """Compactions per session before the engine stops compacting. None (default) =
     unlimited: every compaction cycle itself spends new tokens, so ``max_total_tokens``
