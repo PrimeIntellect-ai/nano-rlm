@@ -229,7 +229,7 @@ class RLMEngine:
         self.compaction = config.policy.compaction
         self.summarize_at_tokens = config.policy.summarize_at_tokens
         self.summary_budget_tokens = config.policy.summary_budget_tokens
-        self.context_window: int | None = None
+        self.context_window = config.policy.max_model_len
         self.max_compactions = config.policy.max_compactions
         self.max_compaction_attempts = config.policy.max_compaction_attempts
         self.system_prompt_path = config.system_prompt_path
@@ -551,7 +551,10 @@ class RLMEngine:
         self._active_tool_schemas = [tool.schema() for tool in self._active_tools]
 
         if self.compaction:
-            self.context_window = await discover_context_window(self.client, self.model)
+            if self.context_window is None:
+                self.context_window = await discover_context_window(
+                    self.client, self.model
+                )
             if self.summarize_at_tokens is None and self.context_window is not None:
                 self.summarize_at_tokens = default_threshold(
                     self.context_window, self.summary_budget_tokens
@@ -1250,7 +1253,7 @@ class RLMEngine:
         return tokens >= self.summarize_at_tokens
 
     def _ran_into_window(self, finish_reason: str | None, usage: TokenUsage) -> bool:
-        """A reply cut off by the advertised context window, not by a completion cap."""
+        """Whether a length-limited reply reached the known context window."""
         return (
             finish_reason == "length"
             and self.context_window is not None
@@ -1389,7 +1392,7 @@ class RLMEngine:
     def _fit_summary_input(
         self, messages: list[dict], checkpoint_prompt: str, context_tokens: int | None
     ) -> list[dict]:
-        """Trim a summary request until the summary has its budget of the advertised
+        """Trim a summary request until the summary has its budget of the known
         context window. `context_tokens` measures `messages` as a prompt."""
         if self.context_window is None:
             return messages
@@ -1633,6 +1636,7 @@ class RLMEngine:
                 "max_subagent_calls": self.runtime_config.policy.max_subagent_calls,
                 "max_tokens": self.runtime_config.policy.max_tokens,
                 "compaction": self.compaction,
+                "max_model_len": self.runtime_config.policy.max_model_len,
                 "summarize_at_tokens": self.summarize_at_tokens,
                 "summary_budget_tokens": self.summary_budget_tokens,
                 "max_compactions": self.runtime_config.policy.max_compactions,

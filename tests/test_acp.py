@@ -1004,6 +1004,7 @@ async def test_acp_prompt_snapshot_records_compaction_edge(
     runtime_metadata = _runtime_metadata()
     runtime_metadata[RUNTIME_METADATA_KEY]["builtin_tools"] = ["add"]
     runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["compaction"] = True
+    runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["max_model_len"] = 65_536
     runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["summarize_at_tokens"] = 1
     runtime_metadata[RUNTIME_METADATA_KEY]["policy"]["max_compaction_attempts"] = (
         attempts
@@ -1012,6 +1013,9 @@ async def test_acp_prompt_snapshot_records_compaction_edge(
 
     try:
         response = await agent.prompt(created.session_id, [text_block("compact")])
+        limits = response.field_meta[SESSION_METADATA_KEY]["limits"]
+        assert limits["max_model_len"] == 65_536
+        assert limits["summarize_at_tokens"] == 1
         assert all(
             [tool["function"]["name"] for tool in call["tools"]] == ["add"]
             for call in client.calls
